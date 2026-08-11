@@ -9,10 +9,12 @@
 #
 # Does not re-encode media.
 #
-set -uo pipefail
+set -Eo pipefail
 IFS=$'\n\t'
 
-PROGRAM_NAME="amux-clean"
+PROGRAM_NAME="${AMUXIFY_COMMAND:-amux-clean}"
+PROGRAM_VERSION="${AMUXIFY_VERSION:-dev}"
+
 DRY_RUN=0
 TARGET=""
 
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    --version)
+      printf '%s %s\n' "$PROGRAM_NAME" "$PROGRAM_VERSION"
+      exit 0
       ;;
     -h|--help)
       usage
