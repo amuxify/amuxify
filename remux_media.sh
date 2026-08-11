@@ -6,11 +6,11 @@
 #   - MKV input only (single file OR directory tree).
 #   - Preserve the primary/default video stream with stream copy (NO video re-encode).
 #   - Preserve English audio streams only with stream copy (NO audio re-encode).
-#   - Preserve all English SRT subtitles.
-#   - Convert English ASS/SSA subtitles to plain SRT.
-#   - For untagged ASS/SSA subtitles, show a dialogue sample and ask whether
-#     they should be treated as English. The choice can be remembered for
-#     the rest of this run only.
+#   - Preserve all English subtitle streams in their ORIGINAL codec with stream copy.
+#   - For untagged text subtitles (ASS/SSA/SRT), show a dialogue sample when possible
+#     and ask whether they should be treated as English.
+#   - For untagged image subtitles (for example PGS), ask without text preview.
+#   - Subtitle decisions can be remembered for the rest of this run only.
 #   - Drop non-English audio/subtitles, attachments, data streams, chapters,
 #     global/track tags, track titles, old Segment UID and old container metadata.
 #   - Verify the output before it is finalized.
@@ -21,8 +21,8 @@
 #
 # This tool removes/rebuilds CONTAINER-level provenance.
 #
-# Retained video/audio streams are intentionally stream-copied and are therefore
-# not re-encoded. Encoder-identifying information embedded INSIDE the encoded
+# Retained video/audio/subtitle streams are intentionally stream-copied and are
+# therefore not re-encoded. Encoder-identifying information embedded INSIDE the encoded
 # bitstream may survive this operation. For example, HEVC produced by x265 can
 # contain x265 version/build/options information inside codec headers/SEI data.
 #
@@ -45,7 +45,7 @@
 #   Single-file input:
 #     /path/movies/Episode.mkv -> /path/movies__remuxed/Episode.mkv
 #
-set -Euo pipefail
+set -Eo pipefail
 IFS=$'\n\t'
 
 DRY_RUN=0
@@ -64,8 +64,7 @@ VIDEO_KEPT=0
 VIDEO_DROPPED=0
 AUDIO_KEPT=0
 AUDIO_DROPPED=0
-SUB_SRT_KEPT=0
-SUB_ASS_CONVERTED=0
+SUB_KEPT=0
 SUB_DROPPED=0
 NO_SUB_HINTS=0
 
@@ -92,9 +91,8 @@ Rules:
   - MKV only
   - primary/default video only
   - English audio only
-  - English SRT kept
-  - English ASS/SSA converted to SRT
-  - untagged ASS/SSA prompts for a decision
+  - all English subtitle codecs are kept unchanged via stream copy
+  - untagged subtitles prompt for a decision
   - no overwrite
   - symlinks are refused
 EOF
@@ -312,15 +310,30 @@ show_sub_sample() {
   ' "$srt" | head -n 6
 }
 
-clean_srt_font_tags() {
-  local srt="$1"
-  perl -0pi -e 's/<font\b[^>]*>//gi; s#</font>##gi' "$srt"
+make_subtitle_preview() {
+  local input="$1"
+  local idx="$2"
+  local codec="$3"
+  local out="$4"
+
+  case "$codec" in
+    ass|ssa)
+      safe_ffmpeg "$FFMPEG_TIMEOUT_SECS" -nostdin -hide_banner -v error -i "$input" -map "0:$idx" -c:s srt -f srt "$out" >/dev/null 2>&1
+      ;;
+    subrip|srt)
+      safe_ffmpeg "$FFMPEG_TIMEOUT_SECS" -nostdin -hide_banner -v error -i "$input" -map "0:$idx" -c:s copy -f srt "$out" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 prompt_und_subtitle() {
   local file="$1"
-  local codec="$2"
-  local sample_file="$3"
+  local idx="$2"
+  local codec="$3"
+  local sample_file="${4:-}"
   local answer
 
   if [[ "$SESSION_UND_SUB_POLICY" == "english" ]]; then
@@ -334,39 +347,31 @@ prompt_und_subtitle() {
   echo
   echo "Untagged subtitle found"
   echo "  File:     $(basename "$file")"
+  echo "  Stream:   #$idx"
   echo "  Codec:    $codec"
   echo "  Language: und"
   echo
-  echo "Sample:"
-  show_sub_sample "$sample_file" | sed 's/^/  /'
-  echo
+
+  if [[ -n "$sample_file" && -s "$sample_file" ]]; then
+    echo "Sample:"
+    show_sub_sample "$sample_file" | sed 's/^/  /'
+    echo
+  else
+    echo "  HINT: this subtitle codec cannot be previewed as text without OCR/conversion."
+    echo
+  fi
 
   while true; do
-    printf '[y] English this one  [a] English all untagged ASS/SSA this run  [n] drop this one  [d] drop all untagged ASS/SSA this run  [q] quit: '
+    printf '[y] English this one  [a] English all untagged subtitles this run  [n] drop this one  [d] drop all untagged subtitles this run  [q] quit: '
     IFS= read -r answer
 
     case "$(lowercase "$answer")" in
-      y)
-        return 0
-        ;;
-      a)
-        SESSION_UND_SUB_POLICY="english"
-        return 0
-        ;;
-      n)
-        return 1
-        ;;
-      d)
-        SESSION_UND_SUB_POLICY="drop"
-        return 1
-        ;;
-      q)
-        echo "Quit requested."
-        exit 130
-        ;;
-      *)
-        echo "Please enter y, a, n, d or q."
-        ;;
+      y) return 0 ;;
+      a) SESSION_UND_SUB_POLICY="english"; return 0 ;;
+      n) return 1 ;;
+      d) SESSION_UND_SUB_POLICY="drop"; return 1 ;;
+      q) echo "Quit requested."; exit 130 ;;
+      *) echo "Please enter y, a, n, d or q." ;;
     esac
   done
 }
@@ -402,44 +407,14 @@ prompt_und_audio() {
     IFS= read -r answer
 
     case "$(lowercase "$answer")" in
-      y)
-        return 0
-        ;;
-      a)
-        SESSION_UND_AUDIO_POLICY="english"
-        return 0
-        ;;
-      n)
-        return 1
-        ;;
-      d)
-        SESSION_UND_AUDIO_POLICY="drop"
-        return 1
-        ;;
-      q)
-        echo "Quit requested."
-        exit 130
-        ;;
-      *)
-        echo "Please enter y, a, n, d or q."
-        ;;
+      y) return 0 ;;
+      a) SESSION_UND_AUDIO_POLICY="english"; return 0 ;;
+      n) return 1 ;;
+      d) SESSION_UND_AUDIO_POLICY="drop"; return 1 ;;
+      q) echo "Quit requested."; exit 130 ;;
+      *) echo "Please enter y, a, n, d or q." ;;
     esac
   done
-}
-
-extract_sub_to_srt() {
-  local input="$1"
-  local idx="$2"
-  local codec="$3"
-  local out="$4"
-
-  if [[ "$codec" == "subrip" || "$codec" == "srt" ]]; then
-    safe_ffmpeg "$FFMPEG_TIMEOUT_SECS" -nostdin -hide_banner -v error -i "$input" -map "0:$idx" -c:s copy -f srt "$out"
-  else
-    safe_ffmpeg "$FFMPEG_TIMEOUT_SECS" -nostdin -hide_banner -v error -i "$input" -map "0:$idx" -c:s srt -f srt "$out"
-  fi
-
-  clean_srt_font_tags "$out"
 }
 
 stream_copy_hash() {
@@ -476,10 +451,9 @@ process_file() {
   local -a subtitle_indexes=()
   local -a keep_audio_indexes=()
   local -a keep_audio_disps=()
-  local -a keep_sub_files=()
+  local -a keep_sub_indexes=()
   local -a keep_sub_disps=()
-  local -a keep_sub_source_indexes=()
-  local -a keep_sub_source_codecs=()
+  local -a keep_sub_codecs=()
   local -a ffargs=()
   local -a prop_args=()
   local -a out_video_indexes=()
@@ -501,10 +475,8 @@ process_file() {
   local source_sub_count=0
   local keep_sub_count=0
   local duration
-  local rel_tmp
-  local subtmp
+  local preview_file
   local subnum=0
-  local input_no
   local i
   local src_hash
   local dst_hash
@@ -632,78 +604,38 @@ process_file() {
       forced="$(stream_disposition "$input" "$idx" forced || true)"
       disp="$(format_disposition "$def" "$forced")"
 
-      subnum=$((subnum + 1))
-      subtmp="$CURRENT_WORKDIR/sub_${subnum}.srt"
+      if is_english_lang "$lang"; then
+        keep_sub_indexes+=("$idx")
+        keep_sub_disps+=("$disp")
+        keep_sub_codecs+=("$codec")
+        echo "  KEEP  #$idx codec=$codec language=${lang:-eng} (stream copy)"
+        SUB_KEPT=$((SUB_KEPT + 1))
+      elif is_und_lang "$lang"; then
+        subnum=$((subnum + 1))
+        preview_file="$CURRENT_WORKDIR/sub_preview_${subnum}.srt"
+        rm -f -- "$preview_file" 2>/dev/null || true
 
-      case "$codec" in
-        subrip|srt)
-          if is_english_lang "$lang"; then
-            if extract_sub_to_srt "$input" "$idx" "$codec" "$subtmp"; then
-              keep_sub_files+=("$subtmp")
-              keep_sub_disps+=("$disp")
-              keep_sub_source_indexes+=("$idx")
-              keep_sub_source_codecs+=("$codec")
-              echo "  KEEP  #$idx SRT language=${lang:-eng}"
-              SUB_SRT_KEPT=$((SUB_SRT_KEPT + 1))
-            else
-              echo "FAILED: could not extract SRT subtitle #$idx."
-              FAILED=$((FAILED + 1))
-              cleanup_current
-              return 1
-            fi
-          else
-            echo "  DROP  #$idx SRT language=${lang:-und}"
-            SUB_DROPPED=$((SUB_DROPPED + 1))
-          fi
-          ;;
+        if ! make_subtitle_preview "$input" "$idx" "$codec" "$preview_file"; then
+          preview_file=""
+        fi
 
-        ass|ssa)
-          if ! extract_sub_to_srt "$input" "$idx" "$codec" "$subtmp"; then
-            echo "FAILED: could not convert subtitle #$idx ($codec) to SRT."
-            FAILED=$((FAILED + 1))
-            cleanup_current
-            return 1
-          fi
-
-          if is_english_lang "$lang"; then
-            keep_sub_files+=("$subtmp")
-            keep_sub_disps+=("$disp")
-            keep_sub_source_indexes+=("$idx")
-            keep_sub_source_codecs+=("$codec")
-            echo "  CONVERT #$idx ${codec} language=$lang -> SRT"
-            SUB_ASS_CONVERTED=$((SUB_ASS_CONVERTED + 1))
-          elif is_und_lang "$lang"; then
-            if prompt_und_subtitle "$input" "$codec" "$subtmp"; then
-              keep_sub_files+=("$subtmp")
-              keep_sub_disps+=("$disp")
-              keep_sub_source_indexes+=("$idx")
-              keep_sub_source_codecs+=("$codec")
-              echo "  CONVERT #$idx ${codec} language=und -> English SRT"
-              SUB_ASS_CONVERTED=$((SUB_ASS_CONVERTED + 1))
-            else
-              echo "  DROP  #$idx ${codec} language=und"
-              rm -f -- "$subtmp"
-              SUB_DROPPED=$((SUB_DROPPED + 1))
-            fi
-          else
-            echo "  DROP  #$idx ${codec} language=$lang"
-            rm -f -- "$subtmp"
-            SUB_DROPPED=$((SUB_DROPPED + 1))
-          fi
-          ;;
-
-        *)
-          if is_english_lang "$lang"; then
-            echo "  DROP  #$idx codec=$codec language=$lang (not SRT/ASS/SSA; no OCR conversion)"
-          else
-            echo "  DROP  #$idx codec=$codec language=${lang:-und}"
-          fi
+        if prompt_und_subtitle "$input" "$idx" "$codec" "$preview_file"; then
+          keep_sub_indexes+=("$idx")
+          keep_sub_disps+=("$disp")
+          keep_sub_codecs+=("$codec")
+          echo "  KEEP  #$idx codec=$codec language=und -> tag eng (stream copy)"
+          SUB_KEPT=$((SUB_KEPT + 1))
+        else
+          echo "  DROP  #$idx codec=$codec language=und"
           SUB_DROPPED=$((SUB_DROPPED + 1))
-          ;;
-      esac
+        fi
+      else
+        echo "  DROP  #$idx codec=$codec language=$lang"
+        SUB_DROPPED=$((SUB_DROPPED + 1))
+      fi
     done
 
-    keep_sub_count=${#keep_sub_files[@]}
+    keep_sub_count=${#keep_sub_indexes[@]}
 
     if [[ "$keep_sub_count" -eq 0 ]]; then
       echo "  HINT: no English subtitle retained; proceeding without subtitles."
@@ -749,20 +681,14 @@ process_file() {
 
   ffargs=(-nostdin -hide_banner -v error -nostats -progress pipe:1 -stats_period 1 -i "$input")
 
-  for subtmp in "${keep_sub_files[@]}"; do
-    ffargs+=(-i "$subtmp")
-  done
-
   ffargs+=(-map "0:$primary_video")
 
   for idx in "${keep_audio_indexes[@]}"; do
     ffargs+=(-map "0:$idx")
   done
 
-  input_no=1
-  for subtmp in "${keep_sub_files[@]}"; do
-    ffargs+=(-map "$input_no:0")
-    input_no=$((input_no + 1))
+  for idx in "${keep_sub_indexes[@]}"; do
+    ffargs+=(-map "0:$idx")
   done
 
   ffargs+=(-c:v copy -c:a copy -c:s copy -map_metadata -1 -map_chapters -1 -metadata title=)
@@ -776,7 +702,7 @@ process_file() {
   done
 
   i=0
-  while [[ "$i" -lt ${#keep_sub_files[@]} ]]; do
+  while [[ "$i" -lt ${#keep_sub_indexes[@]} ]]; do
     ffargs+=("-metadata:s:s:$i" language=eng "-metadata:s:s:$i" title= "-disposition:s:$i" "${keep_sub_disps[$i]}")
     i=$((i + 1))
   done
@@ -851,7 +777,7 @@ process_file() {
   done
 
   i=1
-  while [[ "$i" -le ${#keep_sub_files[@]} ]]; do
+  while [[ "$i" -le ${#keep_sub_indexes[@]} ]]; do
     prop_args+=(--edit "track:s$i" --delete name --set language=eng)
     i=$((i + 1))
   done
@@ -959,7 +885,7 @@ process_file() {
     return 1
   fi
 
-  if [[ ${#out_sub_indexes[@]} -ne ${#keep_sub_files[@]} ]]; then
+  if [[ ${#out_sub_indexes[@]} -ne ${#keep_sub_indexes[@]} ]]; then
     echo "FAILED: subtitle stream count mismatch."
     FAILED=$((FAILED + 1))
     cleanup_current
@@ -974,7 +900,7 @@ process_file() {
     return 1
   fi
 
-  echo "Verifying video/audio stream-copy hashes..."
+  echo "Verifying retained stream-copy hashes..."
 
   src_hash="$(stream_copy_hash "$input" "$primary_video" || true)"
   dst_hash="$(stream_copy_hash "$CURRENT_TMP_OUTPUT" "${out_video_indexes[0]}" || true)"
@@ -993,6 +919,21 @@ process_file() {
 
     if [[ -z "$src_hash" || -z "$dst_hash" || "$src_hash" != "$dst_hash" ]]; then
       echo "FAILED: audio stream hash mismatch for retained audio #${keep_audio_indexes[$i]}."
+      FAILED=$((FAILED + 1))
+      cleanup_current
+      return 1
+    fi
+
+    i=$((i + 1))
+  done
+
+  i=0
+  while [[ "$i" -lt ${#keep_sub_indexes[@]} ]]; do
+    src_hash="$(stream_copy_hash "$input" "${keep_sub_indexes[$i]}" || true)"
+    dst_hash="$(stream_copy_hash "$CURRENT_TMP_OUTPUT" "${out_sub_indexes[$i]}" || true)"
+
+    if [[ -z "$src_hash" || -z "$dst_hash" || "$src_hash" != "$dst_hash" ]]; then
+      echo "FAILED: subtitle stream hash mismatch for retained subtitle #${keep_sub_indexes[$i]}."
       FAILED=$((FAILED + 1))
       cleanup_current
       return 1
@@ -1118,12 +1059,11 @@ printf 'Skipped existing:       %d\n' "$SKIPPED"
 printf 'Failed:                 %d\n' "$FAILED"
 echo
 printf 'Primary video kept:     %d\n' "$VIDEO_KEPT"
-printf 'Secondary video dropped:%d\n' "$VIDEO_DROPPED"
+printf 'Secondary video dropped: %d\n' "$VIDEO_DROPPED"
 printf 'English audio kept:     %d\n' "$AUDIO_KEPT"
 printf 'Other audio dropped:    %d\n' "$AUDIO_DROPPED"
 echo
-printf 'English SRT kept:       %d\n' "$SUB_SRT_KEPT"
-printf 'ASS/SSA -> SRT:         %d\n' "$SUB_ASS_CONVERTED"
+printf 'English subtitles kept: %d\n' "$SUB_KEPT"
 printf 'Subtitles dropped:      %d\n' "$SUB_DROPPED"
 printf 'No-English-sub hints:   %d\n' "$NO_SUB_HINTS"
 echo
