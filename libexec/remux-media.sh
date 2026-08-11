@@ -1,52 +1,45 @@
 #!/usr/bin/env bash
 #
-# remux_media.sh — Conservative MKV archive remuxer/sanitizer.
+# amux-remux
+#
+# Conservative MKV archive remuxer and sanitizer.
 #
 # Goals:
-#   - MKV input only (single file OR directory tree).
-#   - Preserve the primary/default video stream with stream copy (NO video re-encode).
-#   - Preserve English audio streams only with stream copy (NO audio re-encode).
-#   - Preserve all English subtitle streams in their ORIGINAL codec with stream copy.
-#   - For untagged text subtitles (ASS/SSA/SRT), show a dialogue sample when possible
-#     and ask whether they should be treated as English.
-#   - For untagged image subtitles (for example PGS), ask without text preview.
-#   - Subtitle decisions can be remembered for the rest of this run only.
-#   - Drop non-English audio/subtitles, attachments, data streams, chapters,
-#     global/track tags, track titles, old Segment UID and old container metadata.
-#   - Verify the output before it is finalized.
-#   - Never overwrite an existing destination file.
+#   - MKV input only: single file or recursive directory tree.
+#   - Preserve the primary/default video stream with stream copy.
+#   - Preserve English audio streams only with stream copy.
+#   - Preserve all English subtitle streams in their original codec.
+#   - Prompt for untagged audio/subtitle streams.
+#   - Drop non-English audio/subtitles.
+#   - Drop attachments, data streams, chapters, tags, titles and old UIDs.
+#   - Clear container muxer/writer fingerprints where possible.
+#   - Verify retained streams and output integrity before finalizing.
+#   - Never overwrite an existing destination.
 #   - Refuse symlinks.
 #
 # IMPORTANT — PROVENANCE LIMITATION
 #
 # This tool removes/rebuilds CONTAINER-level provenance.
 #
-# Retained video/audio/subtitle streams are intentionally stream-copied and are
-# therefore not re-encoded. Encoder-identifying information embedded INSIDE the encoded
-# bitstream may survive this operation. For example, HEVC produced by x265 can
-# contain x265 version/build/options information inside codec headers/SEI data.
+# Retained video/audio/subtitle streams are intentionally stream-copied and
+# therefore are not re-encoded. Encoder-identifying information embedded
+# INSIDE encoded bitstreams may survive this operation.
+#
+# For example, HEVC produced by x265 can contain x265 version/build/options
+# information inside codec headers or SEI data.
 #
 # Therefore this script MUST NOT be described as guaranteeing removal of all
 # bitstream-level provenance while stream-copy mode is used.
 #
-# Matroska also requires MuxingApp/WritingApp elements. This script clears their
+# Matroska requires MuxingApp/WritingApp elements. This script clears their
 # values after remuxing so tool/version fingerprints are minimized, but the
-# mandatory elements themselves may still exist as empty strings.
-#
-# Usage:
-#   remux_media.sh /path/to/file.mkv
-#   remux_media.sh /path/to/directory
-#   remux_media.sh --dry-run /path/to/directory
-#
-# Output:
-#   Directory input:
-#     /path/Season01 -> /path/Season01__remuxed/...
-#
-#   Single-file input:
-#     /path/movies/Episode.mkv -> /path/movies__remuxed/Episode.mkv
+# mandatory elements themselves may remain as empty strings.
 #
 set -Eo pipefail
 IFS=$'\n\t'
+
+PROGRAM_NAME="${AMUXIFY_COMMAND:-amux-remux}"
+PROGRAM_VERSION="${AMUXIFY_VERSION:-dev}"
 
 DRY_RUN=0
 TARGET=""
@@ -75,6 +68,7 @@ FFPROBE_TIMEOUT_SECS=60
 FFMPEG_TIMEOUT_SECS=3600
 
 TIMEOUT_BIN=""
+
 if command -v timeout >/dev/null 2>&1; then
   TIMEOUT_BIN="timeout"
 elif command -v gtimeout >/dev/null 2>&1; then
@@ -83,19 +77,61 @@ fi
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 [--dry-run] /path/to/file-or-directory
+Usage: $PROGRAM_NAME [--dry-run] /path/to/file-or-directory
 
-  --dry-run   Inspect, plan and prompt, but do not create output files.
+Rebuild MKV media into a sanitized archival container without re-encoding
+retained video, audio or subtitle streams.
 
-Rules:
-  - MKV only
-  - primary/default video only
-  - English audio only
-  - all English subtitle codecs are kept unchanged via stream copy
-  - untagged subtitles prompt for a decision
-  - no overwrite
-  - symlinks are refused
+Input:
+  A single .mkv file or a directory containing MKV files.
+  Directories are processed recursively.
+
+Output:
+  Directory input:
+    ./movies
+    -> ./movies__remuxed/...
+
+  Single-file input:
+    ./movies/Episode.mkv
+    -> ./movies__remuxed/Episode.mkv
+
+Options:
+  --dry-run
+      Inspect files, show keep/drop decisions and prompt where necessary,
+      but do not create output files.
+
+  -h, --help
+      Show this help.
+
+Media policy:
+  - MKV input only.
+  - Keep the primary/default video stream unchanged.
+  - Keep English audio streams unchanged.
+  - Keep English subtitle streams in their original codec.
+  - Drop non-English audio and subtitles.
+  - Untagged audio/subtitles require a decision.
+  - Drop attachments and data streams.
+  - Drop chapters, tags and track titles.
+  - Remove the old Segment UID.
+  - Clear muxing/writing application fingerprints.
+  - Never overwrite an existing output.
+  - Refuse symlinks.
+
+Verification:
+  - Output must parse with ffprobe and MKVToolNix.
+  - No attachments, chapters, global tags or track tags may remain.
+  - Retained video/audio/subtitle streams are SHA-256 stream-hash checked.
+  - Beginning and end of the output are decode-tested.
+
+Examples:
+  $PROGRAM_NAME ./Episode.mkv
+  $PROGRAM_NAME --dry-run ./Season01
+  $PROGRAM_NAME ./Season01
 EOF
+}
+
+die_usage() {
+  usage
   exit 2
 }
 
@@ -103,11 +139,13 @@ cleanup_current() {
   if [[ -n "$CURRENT_TMP_OUTPUT" && -e "$CURRENT_TMP_OUTPUT" ]]; then
     rm -f -- "$CURRENT_TMP_OUTPUT" 2>/dev/null || true
   fi
+
   CURRENT_TMP_OUTPUT=""
 
   if [[ -n "$CURRENT_WORKDIR" && -d "$CURRENT_WORKDIR" ]]; then
     rm -rf -- "$CURRENT_WORKDIR" 2>/dev/null || true
   fi
+
   CURRENT_WORKDIR=""
 }
 
@@ -126,8 +164,13 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
+    --version)
+      printf '%s %s\n' "$PROGRAM_NAME" "$PROGRAM_VERSION"
+      exit 0
+      ;;
     -h|--help)
       usage
+      exit 0
       ;;
     --)
       shift
@@ -135,24 +178,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     -*)
       echo "Unknown option: $1" >&2
-      usage
+      die_usage
       ;;
     *)
       if [[ -n "$TARGET" ]]; then
         echo "Only one input target is supported per run." >&2
-        usage
+        die_usage
       fi
+
       TARGET="$1"
       shift
       ;;
   esac
 done
 
-[[ -n "$TARGET" ]] || usage
+[[ -n "$TARGET" ]] || die_usage
 
-for cmd in find ffprobe ffmpeg mkvmerge mkvpropedit perl mktemp basename dirname mkdir mv rm grep sed head sort tr wc; do
+for cmd in find ffprobe ffmpeg mkvmerge mkvpropedit perl mktemp basename dirname mkdir mv rm grep sed head tr awk; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Missing dependency: $cmd" >&2
+
     case "$cmd" in
       ffprobe|ffmpeg)
         echo "On macOS: brew install ffmpeg" >&2
@@ -161,6 +206,7 @@ for cmd in find ffprobe ffmpeg mkvmerge mkvpropedit perl mktemp basename dirname
         echo "On macOS: brew install mkvtoolnix" >&2
         ;;
     esac
+
     exit 2
   fi
 done
@@ -198,7 +244,9 @@ safe_ffmpeg() {
 }
 
 abs_dir() {
-  (cd "$1" 2>/dev/null && pwd -P)
+  (
+    cd "$1" 2>/dev/null && pwd -P
+  )
 }
 
 abs_path_any() {
@@ -215,6 +263,7 @@ abs_path_any() {
   d="$(dirname "$p")"
   b="$(basename "$p")"
   rd="$(abs_dir "$d")" || return 1
+
   printf '%s/%s\n' "$rd" "$b"
 }
 
@@ -224,6 +273,7 @@ lowercase() {
 
 is_english_lang() {
   local lang
+
   lang="$(lowercase "${1:-}")"
 
   case "$lang" in
@@ -238,6 +288,7 @@ is_english_lang() {
 
 is_und_lang() {
   local lang
+
   lang="$(lowercase "${1:-}")"
 
   case "$lang" in
@@ -366,12 +417,27 @@ prompt_und_subtitle() {
     IFS= read -r answer
 
     case "$(lowercase "$answer")" in
-      y) return 0 ;;
-      a) SESSION_UND_SUB_POLICY="english"; return 0 ;;
-      n) return 1 ;;
-      d) SESSION_UND_SUB_POLICY="drop"; return 1 ;;
-      q) echo "Quit requested."; exit 130 ;;
-      *) echo "Please enter y, a, n, d or q." ;;
+      y)
+        return 0
+        ;;
+      a)
+        SESSION_UND_SUB_POLICY="english"
+        return 0
+        ;;
+      n)
+        return 1
+        ;;
+      d)
+        SESSION_UND_SUB_POLICY="drop"
+        return 1
+        ;;
+      q)
+        echo "Quit requested."
+        exit 130
+        ;;
+      *)
+        echo "Please enter y, a, n, d or q."
+        ;;
     esac
   done
 }
@@ -407,12 +473,27 @@ prompt_und_audio() {
     IFS= read -r answer
 
     case "$(lowercase "$answer")" in
-      y) return 0 ;;
-      a) SESSION_UND_AUDIO_POLICY="english"; return 0 ;;
-      n) return 1 ;;
-      d) SESSION_UND_AUDIO_POLICY="drop"; return 1 ;;
-      q) echo "Quit requested."; exit 130 ;;
-      *) echo "Please enter y, a, n, d or q." ;;
+      y)
+        return 0
+        ;;
+      a)
+        SESSION_UND_AUDIO_POLICY="english"
+        return 0
+        ;;
+      n)
+        return 1
+        ;;
+      d)
+        SESSION_UND_AUDIO_POLICY="drop"
+        return 1
+        ;;
+      q)
+        echo "Quit requested."
+        exit 130
+        ;;
+      *)
+        echo "Please enter y, a, n, d or q."
+        ;;
     esac
   done
 }
@@ -436,6 +517,7 @@ quick_decode_verify() {
 
 print_plan_header() {
   local file="$1"
+
   echo
   echo "------------------------------------------------------------"
   echo "[$PROCESSED/$TOTAL] $(basename "$file")"
@@ -453,7 +535,6 @@ process_file() {
   local -a keep_audio_disps=()
   local -a keep_sub_indexes=()
   local -a keep_sub_disps=()
-  local -a keep_sub_codecs=()
   local -a ffargs=()
   local -a prop_args=()
   local -a out_video_indexes=()
@@ -468,9 +549,7 @@ process_file() {
   local disp
   local channels
   local rate
-  local title
   local primary_video=""
-  local video_default=""
   local source_audio_count=0
   local source_sub_count=0
   local keep_sub_count=0
@@ -483,7 +562,6 @@ process_file() {
   local verify_json
   local mux_app
   local write_app
-  local remux_failed=0
 
   PROCESSED=$((PROCESSED + 1))
   print_plan_header "$input"
@@ -491,6 +569,7 @@ process_file() {
   if [[ -e "$output" || -L "$output" ]]; then
     echo "SKIPPED: destination already exists:"
     echo "  $output"
+
     SKIPPED=$((SKIPPED + 1))
     return 0
   fi
@@ -515,16 +594,18 @@ process_file() {
 
   # Primary video = first default video, otherwise first video.
   primary_video="${video_indexes[0]}"
+
   for idx in "${video_indexes[@]}"; do
     def="$(stream_disposition "$input" "$idx" default || true)"
+
     if [[ "$def" == "1" ]]; then
       primary_video="$idx"
-      video_default="1"
       break
     fi
   done
 
   codec="$(stream_field "$input" "$primary_video" codec_name || true)"
+
   echo "VIDEO"
   echo "  KEEP  #$primary_video $codec (primary/default, stream copy)"
 
@@ -532,6 +613,7 @@ process_file() {
     for idx in "${video_indexes[@]}"; do
       if [[ "$idx" != "$primary_video" ]]; then
         codec="$(stream_field "$input" "$idx" codec_name || true)"
+
         echo "  DROP  #$idx $codec (secondary video)"
         VIDEO_DROPPED=$((VIDEO_DROPPED + 1))
       fi
@@ -560,12 +642,15 @@ process_file() {
       if is_english_lang "$lang"; then
         keep_audio_indexes+=("$idx")
         keep_audio_disps+=("$disp")
+
         echo "  KEEP  #$idx $codec ${channels:-?}ch language=${lang:-eng} (stream copy)"
         AUDIO_KEPT=$((AUDIO_KEPT + 1))
+
       elif is_und_lang "$lang"; then
         if prompt_und_audio "$input" "$idx" "$codec" "$channels" "$rate"; then
           keep_audio_indexes+=("$idx")
           keep_audio_disps+=("$disp")
+
           echo "  KEEP  #$idx $codec untagged -> treat as English (stream copy)"
           AUDIO_KEPT=$((AUDIO_KEPT + 1))
         else
@@ -581,12 +666,13 @@ process_file() {
     if [[ ${#keep_audio_indexes[@]} -eq 0 ]]; then
       echo "FAILED: source has audio, but no English audio was retained."
       echo "        Refusing to create a silent archive copy."
+
       FAILED=$((FAILED + 1))
       return 1
     fi
   fi
 
-  CURRENT_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/remuxmedia.XXXXXX")"
+  CURRENT_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/amuxify-remux.XXXXXX")"
 
   echo
   echo "SUBTITLES"
@@ -607,12 +693,14 @@ process_file() {
       if is_english_lang "$lang"; then
         keep_sub_indexes+=("$idx")
         keep_sub_disps+=("$disp")
-        keep_sub_codecs+=("$codec")
+
         echo "  KEEP  #$idx codec=$codec language=${lang:-eng} (stream copy)"
         SUB_KEPT=$((SUB_KEPT + 1))
+
       elif is_und_lang "$lang"; then
         subnum=$((subnum + 1))
         preview_file="$CURRENT_WORKDIR/sub_preview_${subnum}.srt"
+
         rm -f -- "$preview_file" 2>/dev/null || true
 
         if ! make_subtitle_preview "$input" "$idx" "$codec" "$preview_file"; then
@@ -622,7 +710,7 @@ process_file() {
         if prompt_und_subtitle "$input" "$idx" "$codec" "$preview_file"; then
           keep_sub_indexes+=("$idx")
           keep_sub_disps+=("$disp")
-          keep_sub_codecs+=("$codec")
+
           echo "  KEEP  #$idx codec=$codec language=und -> tag eng (stream copy)"
           SUB_KEPT=$((SUB_KEPT + 1))
         else
@@ -661,6 +749,7 @@ process_file() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo
     echo "DRY RUN: no output created."
+
     cleanup_current
     return 0
   fi
@@ -672,6 +761,7 @@ process_file() {
   if [[ -e "$CURRENT_TMP_OUTPUT" || -L "$CURRENT_TMP_OUTPUT" ]]; then
     echo "FAILED: temporary output already exists:"
     echo "  $CURRENT_TMP_OUTPUT"
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -696,12 +786,14 @@ process_file() {
   ffargs+=(-metadata:s:v:0 language= -metadata:s:v:0 title= -disposition:v:0 default)
 
   i=0
+
   while [[ "$i" -lt ${#keep_audio_indexes[@]} ]]; do
     ffargs+=("-metadata:s:a:$i" language=eng "-metadata:s:a:$i" title= "-disposition:a:$i" "${keep_audio_disps[$i]}")
     i=$((i + 1))
   done
 
   i=0
+
   while [[ "$i" -lt ${#keep_sub_indexes[@]} ]]; do
     ffargs+=("-metadata:s:s:$i" language=eng "-metadata:s:s:$i" title= "-disposition:s:$i" "${keep_sub_disps[$i]}")
     i=$((i + 1))
@@ -712,8 +804,6 @@ process_file() {
   echo
   echo "REMUXING"
 
-  # Parse FFmpeg progress in a subshell. The entire pipeline fails if FFmpeg
-  # fails because pipefail is enabled.
   if ! safe_ffmpeg "$FFMPEG_TIMEOUT_SECS" "${ffargs[@]}" |
     (
       current_us=""
@@ -734,12 +824,15 @@ process_file() {
                 BEGIN {
                   current = current_us / 1000000
                   pct = (current / total) * 100
+
                   if (pct < 0) pct = 0
                   if (pct > 100) pct = 100
 
                   if (speed + 0 > 0) {
                     remain = (total - current) / speed
+
                     if (remain < 0) remain = 0
+
                     printf "\r  Remuxing: %5.1f%% | speed: %sx | ETA: %02d:%02d   ",
                       pct, speed, int(remain / 60), int(remain) % 60
                   } else {
@@ -759,6 +852,7 @@ process_file() {
   then
     echo
     echo "FAILED: FFmpeg remux failed."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -766,17 +860,29 @@ process_file() {
 
   echo "Cleaning Matroska metadata..."
 
-  prop_args=("$CURRENT_TMP_OUTPUT" --tags all: --chapters "" --edit info --delete title --delete date --delete segment-uid --set muxing-application= --set writing-application=)
+  prop_args=(
+    "$CURRENT_TMP_OUTPUT"
+    --tags all:
+    --chapters ""
+    --edit info
+    --delete title
+    --delete date
+    --delete segment-uid
+    --set muxing-application=
+    --set writing-application=
+  )
 
   prop_args+=(--edit track:v1 --delete name --set language=und)
 
   i=1
+
   while [[ "$i" -le ${#keep_audio_indexes[@]} ]]; do
     prop_args+=(--edit "track:a$i" --delete name --set language=eng)
     i=$((i + 1))
   done
 
   i=1
+
   while [[ "$i" -le ${#keep_sub_indexes[@]} ]]; do
     prop_args+=(--edit "track:s$i" --delete name --set language=eng)
     i=$((i + 1))
@@ -784,6 +890,7 @@ process_file() {
 
   if ! mkvpropedit "${prop_args[@]}" >/dev/null; then
     echo "FAILED: mkvpropedit metadata cleanup failed."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -793,6 +900,7 @@ process_file() {
 
   if ! safe_ffprobe "$FFPROBE_TIMEOUT_SECS" -v error -show_format -show_streams -- "$CURRENT_TMP_OUTPUT" >/dev/null 2>&1; then
     echo "FAILED: ffprobe cannot parse remuxed output."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -800,6 +908,7 @@ process_file() {
 
   if ! verify_json="$(mkvmerge -J "$CURRENT_TMP_OUTPUT" 2>/dev/null)"; then
     echo "FAILED: mkvmerge cannot identify remuxed output."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -807,6 +916,7 @@ process_file() {
 
   if ! printf '%s\n' "$verify_json" | grep -Eq '"attachments"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
     echo "FAILED: verification found attachments."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -814,6 +924,7 @@ process_file() {
 
   if ! printf '%s\n' "$verify_json" | grep -Eq '"chapters"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
     echo "FAILED: verification found chapters."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -821,6 +932,7 @@ process_file() {
 
   if ! printf '%s\n' "$verify_json" | grep -Eq '"global_tags"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
     echo "FAILED: verification found global tags."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -828,6 +940,7 @@ process_file() {
 
   if ! printf '%s\n' "$verify_json" | grep -Eq '"track_tags"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
     echo "FAILED: verification found track tags."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -835,6 +948,7 @@ process_file() {
 
   if printf '%s\n' "$verify_json" | grep -q '"track_name"'; then
     echo "FAILED: verification found one or more track names."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -842,6 +956,7 @@ process_file() {
 
   if printf '%s\n' "$verify_json" | grep -q '"segment_uid"'; then
     echo "FAILED: verification found a Segment UID."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -854,6 +969,7 @@ process_file() {
     echo "FAILED: muxing/writing application fingerprint is not empty."
     echo "  muxing_application:  ${mux_app:-<empty>}"
     echo "  writing_application: ${write_app:-<empty>}"
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -873,6 +989,7 @@ process_file() {
 
   if [[ ${#out_video_indexes[@]} -ne 1 ]]; then
     echo "FAILED: expected exactly 1 video stream; found ${#out_video_indexes[@]}."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -880,6 +997,7 @@ process_file() {
 
   if [[ ${#out_audio_indexes[@]} -ne ${#keep_audio_indexes[@]} ]]; then
     echo "FAILED: audio stream count mismatch."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -887,14 +1005,15 @@ process_file() {
 
   if [[ ${#out_sub_indexes[@]} -ne ${#keep_sub_indexes[@]} ]]; then
     echo "FAILED: subtitle stream count mismatch."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
   fi
 
-  # Ensure output contains no attachment/data stream types.
   if safe_ffprobe "$FFPROBE_TIMEOUT_SECS" -v error -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 -- "$CURRENT_TMP_OUTPUT" 2>/dev/null | grep -Eq '^(attachment|data)$'; then
     echo "FAILED: output contains attachment/data stream."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -907,18 +1026,21 @@ process_file() {
 
   if [[ -z "$src_hash" || -z "$dst_hash" || "$src_hash" != "$dst_hash" ]]; then
     echo "FAILED: video stream hash mismatch; refusing output."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
   fi
 
   i=0
+
   while [[ "$i" -lt ${#keep_audio_indexes[@]} ]]; do
     src_hash="$(stream_copy_hash "$input" "${keep_audio_indexes[$i]}" || true)"
     dst_hash="$(stream_copy_hash "$CURRENT_TMP_OUTPUT" "${out_audio_indexes[$i]}" || true)"
 
     if [[ -z "$src_hash" || -z "$dst_hash" || "$src_hash" != "$dst_hash" ]]; then
       echo "FAILED: audio stream hash mismatch for retained audio #${keep_audio_indexes[$i]}."
+
       FAILED=$((FAILED + 1))
       cleanup_current
       return 1
@@ -928,12 +1050,14 @@ process_file() {
   done
 
   i=0
+
   while [[ "$i" -lt ${#keep_sub_indexes[@]} ]]; do
     src_hash="$(stream_copy_hash "$input" "${keep_sub_indexes[$i]}" || true)"
     dst_hash="$(stream_copy_hash "$CURRENT_TMP_OUTPUT" "${out_sub_indexes[$i]}" || true)"
 
     if [[ -z "$src_hash" || -z "$dst_hash" || "$src_hash" != "$dst_hash" ]]; then
       echo "FAILED: subtitle stream hash mismatch for retained subtitle #${keep_sub_indexes[$i]}."
+
       FAILED=$((FAILED + 1))
       cleanup_current
       return 1
@@ -946,6 +1070,7 @@ process_file() {
 
   if ! quick_decode_verify "$CURRENT_TMP_OUTPUT"; then
     echo "FAILED: output failed beginning/end decode verification."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -959,6 +1084,7 @@ process_file() {
 
   if [[ -e "$output" || -L "$output" ]]; then
     echo "FAILED: destination appeared during processing; refusing overwrite."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -966,6 +1092,7 @@ process_file() {
 
   if ! mv -- "$CURRENT_TMP_OUTPUT" "$output"; then
     echo "FAILED: could not finalize output."
+
     FAILED=$((FAILED + 1))
     cleanup_current
     return 1
@@ -975,6 +1102,7 @@ process_file() {
   cleanup_current
 
   echo "PASS: $output"
+
   SUCCEEDED=$((SUCCEEDED + 1))
   return 0
 }
@@ -985,12 +1113,14 @@ TARGET_ABS="$(abs_path_any "$TARGET")" || {
 }
 
 INPUT_IS_DIR=0
+
 if [[ -d "$TARGET_ABS" ]]; then
   INPUT_IS_DIR=1
 fi
 
 INPUT_ROOT=""
 OUTPUT_ROOT=""
+
 declare -a FILES=()
 declare -a OUTPUTS=()
 
@@ -1000,6 +1130,7 @@ if [[ "$INPUT_IS_DIR" -eq 1 ]]; then
 
   # Refuse any symlink anywhere in the source tree.
   first_link="$(find "$INPUT_ROOT" -type l -print -quit 2>/dev/null || true)"
+
   if [[ -n "$first_link" ]]; then
     echo "REFUSED: symlink found inside input tree:" >&2
     echo "  $first_link" >&2
@@ -1008,7 +1139,7 @@ if [[ "$INPUT_IS_DIR" -eq 1 ]]; then
 
   while IFS= read -r -d '' f; do
     FILES+=("$f")
-  done < <(find "$INPUT_ROOT" -type f ! -name '.DS_Store' \( -iname '*.mkv' \) -print0)
+  done < <(find "$INPUT_ROOT" -type f ! -name '.DS_Store' -iname '*.mkv' -print0)
 
   TOTAL=${#FILES[@]}
 
@@ -1023,15 +1154,18 @@ if [[ "$INPUT_IS_DIR" -eq 1 ]]; then
   done
 else
   ext="$(lowercase "${TARGET_ABS##*.}")"
+
   if [[ "$ext" != "mkv" ]]; then
-    echo "REFUSED: v1 supports MKV input only: $TARGET_ABS" >&2
+    echo "REFUSED: only MKV input is supported: $TARGET_ABS" >&2
     exit 1
   fi
 
   INPUT_ROOT="$(dirname "$TARGET_ABS")"
   OUTPUT_ROOT="$(dirname "$INPUT_ROOT")/$(basename "$INPUT_ROOT")__remuxed"
+
   FILES+=("$TARGET_ABS")
   OUTPUTS+=("$OUTPUT_ROOT/$(basename "$TARGET_ABS")")
+
   TOTAL=1
 fi
 
@@ -1044,28 +1178,30 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 i=0
+
 while [[ "$i" -lt "$TOTAL" ]]; do
   if ! process_file "${FILES[$i]}" "${OUTPUTS[$i]}"; then
     :
   fi
+
   i=$((i + 1))
 done
 
 echo
 echo "----------- REMUX SUMMARY -----------"
-printf 'Files discovered:       %d\n' "$TOTAL"
-printf 'Remuxed successfully:   %d\n' "$SUCCEEDED"
-printf 'Skipped existing:       %d\n' "$SKIPPED"
-printf 'Failed:                 %d\n' "$FAILED"
+printf 'Files discovered:         %d\n' "$TOTAL"
+printf 'Remuxed successfully:     %d\n' "$SUCCEEDED"
+printf 'Skipped existing:         %d\n' "$SKIPPED"
+printf 'Failed:                   %d\n' "$FAILED"
 echo
-printf 'Primary video kept:     %d\n' "$VIDEO_KEPT"
-printf 'Secondary video dropped: %d\n' "$VIDEO_DROPPED"
-printf 'English audio kept:     %d\n' "$AUDIO_KEPT"
-printf 'Other audio dropped:    %d\n' "$AUDIO_DROPPED"
+printf 'Primary video kept:       %d\n' "$VIDEO_KEPT"
+printf 'Secondary video dropped:  %d\n' "$VIDEO_DROPPED"
+printf 'English audio kept:       %d\n' "$AUDIO_KEPT"
+printf 'Other audio dropped:      %d\n' "$AUDIO_DROPPED"
 echo
-printf 'English subtitles kept: %d\n' "$SUB_KEPT"
-printf 'Subtitles dropped:      %d\n' "$SUB_DROPPED"
-printf 'No-English-sub hints:   %d\n' "$NO_SUB_HINTS"
+printf 'English subtitles kept:   %d\n' "$SUB_KEPT"
+printf 'Subtitles dropped:        %d\n' "$SUB_DROPPED"
+printf 'No-English-sub hints:     %d\n' "$NO_SUB_HINTS"
 echo
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
