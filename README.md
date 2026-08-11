@@ -95,6 +95,55 @@ Example:
 
 `amux-clean ./dir`
 
+## Installation
+
+### Manual installation
+
+Clone the repository and install into a user-owned prefix:
+
+`make install PREFIX="$HOME/.local"`
+
+Make sure `$HOME/.local/bin` is on your `PATH`.
+
+For zsh on macOS:
+
+`export PATH="$HOME/.local/bin:$PATH"`
+
+Then verify:
+
+`amux-remux --version`
+
+Installed commands:
+
+- `amux-clean`
+- `amux-remux`
+- `amux-scan`
+- `amux-scan-all`
+
+To uninstall:
+
+`make uninstall PREFIX="$HOME/.local"`
+
+### Run without installing
+
+From the repository root:
+
+`make setup`
+
+Then run commands directly:
+
+`./bin/amux-remux --help`
+
+### System-wide installation
+
+The default prefix is `/usr/local`:
+
+`make install`
+
+Depending on directory ownership, this may require elevated permissions:
+
+`sudo make install`
+
 ## Workflow
 
 Optional: normalize episode filenames first.

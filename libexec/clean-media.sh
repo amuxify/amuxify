@@ -123,7 +123,7 @@ clean_file() {
 
   # MKV/Matroska requires MKVToolNix because ExifTool cannot write MKV files.
   if [[ "$path" == *.[mM][kK][vV] ]]; then
-    if ! mkvpropedit "$path" --tags all: --edit info --delete title; then
+    if ! mkvpropedit "$path" --tags all: --edit info --delete title >/dev/null; then
       echo "  ERROR: mkvpropedit failed" >&2
       FAILED=$((FAILED + 1))
       return
