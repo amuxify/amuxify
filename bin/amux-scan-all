@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+exec "$ROOT/libexec/scan-media.sh" --strict-permissions --allow-data-tag text "$@"
