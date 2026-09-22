@@ -140,6 +140,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ $# -gt 0 ]]; then
+  TARGETS+=("$@")
+fi
+
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   die_usage
 fi

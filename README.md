@@ -224,6 +224,25 @@ These are the files intended for archival or NAS copy.
 
 This fully decodes the media streams and is substantially slower than the normal scan.
 
+## Exit status
+
+All commands use the same convention:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. For `amux-scan`, no file was flagged. For `amux-clean`, every file was cleaned. |
+| `1` | At least one file failed, was flagged, or could not be processed. |
+| `2` | Usage error or missing dependency. |
+| `130` | Interrupted, or stdin closed while a decision was pending. |
+
+`amux-clean` exits non-zero when any file fails; `amux-remux` exits non-zero when any output fails verification.
+
+## Unattended runs
+
+`amux-remux` prompts for untagged (`und`) audio and subtitle streams only when stdin is a terminal. Under cron, a hook, or a pipe it applies `AMUXIFY_UND_POLICY` instead, which defaults to `drop`:
+
+`AMUXIFY_UND_POLICY=english amux-remux ./dir </dev/null`
+
 ## Provenance limitation
 
 `amux-remux` removes and rebuilds container-level provenance.
