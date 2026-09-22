@@ -43,6 +43,13 @@ die_usage() {
   exit 2
 }
 
+on_interrupt() {
+  printf '\nInterrupted.\n' >&2
+  exit 130
+}
+
+trap on_interrupt INT TERM
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
@@ -56,6 +63,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       usage
       exit 0
+      ;;
+    --)
+      shift
+      break
       ;;
     -*)
       echo "Unknown option: $1" >&2
@@ -71,6 +82,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ $# -gt 0 ]]; then
+  if [[ -n "$TARGET" || $# -gt 1 ]]; then
+    echo "Only one target may be specified." >&2
+    die_usage
+  fi
+
+  TARGET="$1"
+fi
 
 [[ -n "$TARGET" ]] || die_usage
 
@@ -169,4 +189,8 @@ echo "Cleaned:              $CLEANED"
 echo "ExifTool unsupported: $UNSUPPORTED"
 echo "Failed:               $FAILED"
 
-[[ "$FAILED" -eq 0 ]]
+if [[ "$FAILED" -gt 0 ]]; then
+  exit 1
+fi
+
+exit 0
