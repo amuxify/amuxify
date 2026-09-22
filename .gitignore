@@ -1,16 +1,18 @@
 .DS_Store
-
-# Local/editor files
 .vscode/
 .idea/
-
-# Temporary files
 *.tmp
 *.swp
 *~
 
-# Generated launcher files
-bin/amux-clean
-bin/amux-remux
-bin/amux-scan
-bin/amux-scan-all
+# Build output
+/bin/amuxify
+/dist/
+/testdata/out/
+/site/public/
+
+# Legacy generated launchers
+/legacy/bin/
+
+# Personal notes, never committed
+AGENT.md

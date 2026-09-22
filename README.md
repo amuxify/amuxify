@@ -1,298 +1,133 @@
 # amuxify
 
-Strict MKV media-ingest tools for macOS.
+**The ingest gate for self-hosted media.** Verify, sanitize, normalize, prove.
 
-`amuxify` scans, sanitizes, remuxes, cleans, and verifies media before archival storage while preserving retained video, audio, and subtitle streams without re-encoding.
+amuxify sits between "downloaded or purchased" and "in the library". It runs once
+per file, changes nothing it cannot prove is safe, and exits with a verdict your
+download client, Sonarr, Radarr or cron job can act on.
 
-> Use at your own risk. Keep original media until you have independently verified the generated output.
+```
+$ amuxify scan ~/incoming
+PASS  /home/me/incoming/Show.S01E01.mkv
+WARN  /home/me/incoming/Movie.2019.mkv
+      WARN  LINK_IN_TAG        1 link(s) in metadata: tag COMMENT: http://tracker.example/x
+BLOCK /home/me/incoming/Movie.2019.Sub.mkv
+      BLOCK ATTACH_EXEC        attachment #1 "font.ttf" (font/ttf, 71 KiB) contains executable PE/DOS executable
+
+BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1
+```
+
+It is not a transcoder, a renamer or a library manager. Streams are never
+re-encoded. Every remux is verified by hashing each kept stream against the
+source before the output is placed.
+
+> Keep originals until you have checked the output yourself. See [docs/safety.md](docs/safety.md).
 
 ## Commands
 
-- `amux-scan`
-- `amux-scan-all`
-- `amux-remux`
-- `amux-clean`
-
-## Command overview
-
-### `amux-scan`
-
-Strict media safety scan.
-
-Runs `scan-media.sh` with strict executable-permission checking enabled.
-
-Example:
-
-`amux-scan ./dir`
-
-### `amux-scan-all`
-
-Recommended scan command for the archival workflow.
-
-Runs the same scanner with:
-
-- strict executable-permission checking
-- legacy `text` data-stream tags allowed in addition to the default `tmcd`
-
-Example:
-
-`amux-scan-all ./dir`
-
-Optional deep decode:
-
-`amux-scan-all --deep ./dir`
-
-Optional ClamAV scan:
-
-`amux-scan-all --clamav ./dir`
-
-### `amux-remux`
-
-Sanitizes MKV containers while stream-copying retained media.
-
-Policy:
-
-- MKV input only
-- primary/default video only
-- English audio only
-- English subtitles retained in their original codec
-- untagged audio/subtitles prompt for a decision
-- non-English audio/subtitles dropped
-- attachments dropped
-- data streams dropped
-- chapters dropped
-- global and track tags dropped
-- track titles dropped
-- old Segment UID removed
-- muxing/writing application values cleared
-- retained video/audio/subtitle streams verified with SHA-256 stream hashes
-- beginning and end of output decode-tested
-- symlinks refused
-- existing output never overwritten
-
-Example:
-
-`amux-remux ./dir`
-
-Preview without creating files:
-
-`amux-remux --dry-run ./dir`
-
-### `amux-clean`
-
-Removes writable filesystem and container metadata.
-
-Behavior:
-
-- recursively processes directories
-- clears macOS extended attributes
-- removes writable metadata with ExifTool
-- cleans writable Matroska tags/titles with MKVToolNix
-- ignores `.DS_Store`
-- does not re-encode media
-
-Example:
-
-`amux-clean ./dir`
-
-## Installation
-
-### Manual installation
-
-Clone the repository and install into a user-owned prefix:
-
-`make install PREFIX="$HOME/.local"`
-
-Make sure `$HOME/.local/bin` is on your `PATH`.
-
-For zsh on macOS:
-
-`export PATH="$HOME/.local/bin:$PATH"`
-
-Then verify:
-
-`amux-remux --version`
-
-Installed commands:
-
-- `amux-clean`
-- `amux-remux`
-- `amux-scan`
-- `amux-scan-all`
-
-To uninstall:
-
-`make uninstall PREFIX="$HOME/.local"`
-
-### Run without installing
-
-From the repository root:
-
-`make setup`
-
-Then run commands directly:
-
-`./bin/amux-remux --help`
-
-### System-wide installation
-
-The default prefix is `/usr/local`:
-
-`make install`
-
-Depending on directory ownership, this may require elevated permissions:
-
-`sudo make install`
-
-## Workflow
-
-Optional: normalize episode filenames first.
-
-Example:
-
-`Filename (2000) - S01E01 - Title case.mkv`
-
-Rename to:
-
-- `S01E01.mkv`
-- `S01E02.mkv`
-- `S01E03.mkv`
-
-Run from inside the folder:
-
-`for f in *.mkv; do ep="$(printf '%s\n' "$f" | perl -ne 'if (/[sS](\d{1,2})[eE](\d{1,2})/) { printf "S%02dE%02d", $1, $2 }')"; [[ -n "$ep" ]] && mv -n -- "$f" "$ep.mkv"; done`
-
-This accepts names such as `s1e1`, `S01E01`, or `s01e02` and normalizes them to `S01E01.mkv`, `S01E01.mkv`, or `S01E02.mkv`.
-
-### 1. Scan source
-
-`amux-scan-all ./dir`
-
-Expect: no `BLOCKED` files.
-
-### 2. Preview remux
-
-`amux-remux --dry-run ./dir`
-
-Expect: shows what will be kept or dropped and may prompt about untagged audio or subtitle streams.
-
-### 3. Remux
-
-`amux-remux ./dir`
-
-Expect: creates:
-
-`./dir__remuxed`
-
-The remux process verifies:
-
-- output parses with ffprobe
-- output parses with MKVToolNix
-- no attachments remain
-- no chapters remain
-- no global tags remain
-- no track tags remain
-- no track titles remain
-- old Segment UID is removed
-- muxing/writing application values are empty
-- expected stream counts match
-- no attachment/data streams remain
-- retained video/audio/subtitle stream hashes match the source
-- beginning and end decode successfully
-
-A successful run ends with:
-
-`PASSED: all created outputs passed verification.`
-
-### 4. Clean remuxed files
-
-`amux-clean ./dir__remuxed`
-
-Expect: writable metadata and macOS extended attributes are cleaned.
-
-### 5. Final scan
-
-`amux-scan-all ./dir__remuxed`
-
-Expect: clean pass.
-
-These are the files intended for archival or NAS copy.
-
-### Optional full decode verification
-
-`amux-scan-all --deep ./dir__remuxed`
-
-This fully decodes the media streams and is substantially slower than the normal scan.
-
-## Exit status
-
-All commands use the same convention:
-
-| Code | Meaning |
-|---|---|
-| `0` | Success. For `amux-scan`, no file was flagged. For `amux-clean`, every file was cleaned. |
-| `1` | At least one file failed, was flagged, or could not be processed. |
-| `2` | Usage error or missing dependency. |
-| `130` | Interrupted, or stdin closed while a decision was pending. |
-
-`amux-clean` exits non-zero when any file fails; `amux-remux` exits non-zero when any output fails verification.
-
-## Unattended runs
-
-`amux-remux` prompts for untagged (`und`) audio and subtitle streams only when stdin is a terminal. Under cron, a hook, or a pipe it applies `AMUXIFY_UND_POLICY` instead, which defaults to `drop`:
-
-`AMUXIFY_UND_POLICY=english amux-remux ./dir </dev/null`
-
-## Provenance limitation
-
-`amux-remux` removes and rebuilds container-level provenance.
-
-Retained video, audio, and subtitle streams are stream-copied rather than re-encoded. Encoder-identifying information embedded inside encoded bitstreams may therefore survive the remux.
-
-For example, HEVC produced by x265 may contain x265 build or encoding-option information inside codec headers or SEI data.
-
-`amuxify` should therefore not be considered a bitstream-level provenance removal tool.
-
-## Requirements
-
-Runtime dependencies include:
-
-- FFmpeg / ffprobe
-- MKVToolNix
-- ExifTool
-- Perl
-
-Optional:
-
-- ClamAV for `--clamav`
-- GNU coreutils for `gtimeout` on macOS
-
-## Development
-
-Create generated command wrappers and set executable permissions:
-
-`make setup`
-
-Run repository checks:
-
-`make test`
-
-Run release checks:
-
-`make release-check`
-
-Install manually under `/usr/local`:
-
-`make install`
-
-Override the install prefix if needed:
-
-`make install PREFIX=/some/path`
-
-Remove a manual installation:
-
-`make uninstall`
+| Command | What it does | Writes |
+|---|---|---|
+| `amuxify scan <path>...` | Inspect files and sidecars, report findings, verdict per file | nothing (unless `--quarantine`) |
+| `amuxify remux <path>...` | Rebuild any supported container into a sanitized MKV with mkvmerge, verify, place | `<root>__remuxed/` or `--output`, or `--in-place` |
+| `amuxify clean <path>...` | Strip metadata, provenance atoms and extended attributes in place, tracks untouched | the file, after stream-hash verification |
+| `amuxify doctor` | Check tools, version floors, profile and environment | nothing |
+| `amuxify profile [show <name>]` | List or print built-in profiles | nothing |
+
+Input containers: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV.
+Output is always Matroska written by mkvmerge. ffmpeg never writes an MKV.
+
+## Verdicts and exit status
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `PASS` | 0 | Nothing to report |
+| `WARN` | 1 | Something to know about; file is usable |
+| usage | 2 | Bad arguments or missing tool |
+| `FAIL` | 3 | Integrity problem: unparseable, truncated, hash mismatch, mislabeled |
+| `BLOCK` | 4 | Security problem: executable payloads, polyglots, bidi names, blocked sidecars. Never overridable |
+| interrupted | 130 | Ctrl-C or SIGTERM; temp files removed |
+
+The worst verdict of the run is the exit code. `--json` prints the full report on
+stdout with the same codes; the schema is documented in [docs/report.md](docs/report.md).
+
+## Profiles
+
+A profile is a TOML file. Four are built in; `homelab` is the default.
+
+| Profile | Languages | Chapters | Fonts | Commentary | Links / provenance | Verify |
+|---|---|---|---|---|---|---|
+| `homelab` | keep all | keep | keep if text subs | keep | warn | quick |
+| `anime` | keep all, prefer original | keep | keep | drop | warn | quick |
+| `archive` | English only | drop | drop | drop | fail | quick |
+| `strict` | English only | drop | drop | drop | fail | full + ClamAV |
+
+```sh
+amuxify profile show homelab > my.toml   # edit, then
+amuxify --profile ./my.toml remux ~/incoming
+```
+
+Every key is documented in [docs/profiles.md](docs/profiles.md). Unknown keys are
+rejected so a typo cannot silently widen a policy.
+
+## Install
+
+Binaries for Linux (amd64, arm64, armv7) and macOS (arm64, amd64) are on the
+[releases page](https://github.com/nxame/amuxify/releases) with SHA-256 sums.
+
+```sh
+# script: downloads, verifies the checksum, installs to /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/nxame/amuxify/main/install.sh | sh
+
+# Homebrew
+brew install nxame/tap/amuxify
+
+# Docker (run as the uid that owns the library, never root)
+docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/nxame/amuxify scan /data
+
+# from source
+make build && ./bin/amuxify doctor
+```
+
+amuxify drives external tools: **MKVToolNix 50+** (mkvmerge, mkvpropedit) and
+**ffmpeg 4.4+** (5.0+ recommended). exiftool and clamscan are optional.
+`amuxify doctor` tells you what is missing. See [docs/install.md](docs/install.md).
+
+## Safety guarantees
+
+1. Never overwrites an existing path; a collision is a `FAIL`.
+2. Writes a temp file beside the destination, fsyncs, then renames. Never across filesystems.
+3. Symlinks are skipped per file, never followed, never abort a tree.
+4. Every ffmpeg and ffprobe call carries `-protocol_whitelist file,pipe` and a timeout.
+5. Every kept stream's SHA-256 matches source and output, or the output is deleted.
+6. In-place mode preserves owner, group, mode and mtime.
+7. Extended attribute removal touches only `user.*` (Linux) and `com.apple.*` (macOS).
+8. `--verify none` is refused together with `--in-place`.
+9. `BLOCK` cannot be overridden by any flag.
+10. Refuses to modify files as root unless `--allow-root`.
+
+Each guarantee has a test. Details in [docs/safety.md](docs/safety.md).
+
+## Unattended use
+
+amuxify never prompts. Untagged-language tracks follow `languages.und` in the
+profile (`keep`, `drop`, or `assume:<lang>`). Hook adapters for SABnzbd, NZBGet,
+Sonarr and Radarr arrive in 0.3; until then call `amuxify scan` or
+`amuxify remux --in-place` from your post-processing script and branch on the
+exit code. Examples in [docs/hooks.md](docs/hooks.md).
+
+## Upgrading from 0.1.x
+
+The Bash scripts are frozen under `legacy/`. `amux-scan`, `amux-scan-all`,
+`amux-remux` and `amux-clean` are shims that call `amuxify --profile archive`
+for one release. Behaviour changes are listed in [MIGRATION.md](MIGRATION.md).
+
+## Documentation
+
+- [docs/install.md](docs/install.md), [docs/profiles.md](docs/profiles.md), [docs/safety.md](docs/safety.md)
+- [docs/hooks.md](docs/hooks.md), [docs/report.md](docs/report.md), [docs/comparison.md](docs/comparison.md)
+- [docs/design.md](docs/design.md), [MIGRATION.md](MIGRATION.md), [CHANGELOG.md](CHANGELOG.md)
+- [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
 
-BSD 3-Clause License.
+BSD-3-Clause. See [LICENSE](LICENSE).

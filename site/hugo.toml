@@ -1,0 +1,6 @@
+baseURL = "https://amuxify.com/"
+title = "amuxify"
+languageCode = "en"
+disableKinds = ["taxonomy", "term", "RSS"]
+[markup.goldmark.renderer]
+unsafe = false

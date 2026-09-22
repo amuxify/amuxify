@@ -1,0 +1,56 @@
+# amuxify profile: archive
+#
+# The original amuxify 0.1 behaviour for a private, English-only archive of
+# media bought from sources you do not trust. Drop everything that is not
+# the primary video, English audio and English subtitles. Drop chapters,
+# attachments, titles, tags, and every provenance marker. Any link or
+# purchase identifier is a failure, not a warning.
+description = "English-only archive: drop chapters, attachments, all metadata; links and provenance fail."
+
+[languages]
+keep = ["eng"]
+prefer_original = false
+und = "drop"
+
+[audio]
+drop_commentary = true
+keep_first = false
+
+[subtitles]
+keep_forced = false
+drop_sdh_duplicates = false
+scan_links = true
+links = "fail"
+
+[chapters]
+keep = false
+
+[attachments]
+fonts = "drop"
+cover_art = "drop"
+other = "block"
+
+[metadata]
+strip_title = true
+strip_tags = true
+strip_track_titles = true
+strip_provenance = true
+links = "fail"
+provenance = "fail"
+
+[streams]
+allow_data_tags = ["tmcd", "text"]
+
+[verify]
+tier = "quick"
+stream_hash = true
+
+[safety]
+refuse_root = true
+hardlinks = "skip"
+exec_permissions = "fail"
+clamav = "optional"
+
+[sidecars]
+allow = ["srt", "ass", "ssa", "sub", "idx", "vtt", "sfv", "par2", "md5", "sha256"]
+block = ["lnk", "url", "exe", "scr", "com", "pif", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "msi", "msp", "dmg", "pkg", "app", "sh", "command", "py", "pl", "rb", "deb", "rpm", "apk", "iso", "img", "reg", "cpl", "dll", "so", "dylib", "nfo", "txt", "html", "htm"]

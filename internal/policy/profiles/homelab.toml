@@ -1,0 +1,55 @@
+# amuxify profile: homelab (default)
+#
+# Keep everything a Jellyfin, Plex or Kodi user expects: every language,
+# chapters, fonts for styled subtitles, cover art. Strip what nobody needs:
+# container title, tags, encoder fingerprints, purchase and provenance atoms.
+# Never prompt.
+description = "Keep all languages, chapters and fonts; strip titles, tags and provenance; never prompt."
+
+[languages]
+keep = ["*"]
+prefer_original = true
+und = "keep"
+
+[audio]
+drop_commentary = false
+keep_first = false
+
+[subtitles]
+keep_forced = true
+drop_sdh_duplicates = false
+scan_links = true
+links = "warn"
+
+[chapters]
+keep = true
+
+[attachments]
+fonts = "keep_if_text_subs"
+cover_art = "keep"
+other = "block"
+
+[metadata]
+strip_title = true
+strip_tags = true
+strip_track_titles = false
+strip_provenance = true
+links = "warn"
+provenance = "warn"
+
+[streams]
+allow_data_tags = ["tmcd", "text"]
+
+[verify]
+tier = "quick"
+stream_hash = true
+
+[safety]
+refuse_root = true
+hardlinks = "skip"
+exec_permissions = "warn"
+clamav = "off"
+
+[sidecars]
+allow = ["nfo", "srt", "ass", "ssa", "sub", "idx", "vtt", "sfv", "par2", "md5", "sha256", "jpg", "jpeg", "png", "webp", "txt"]
+block = ["lnk", "url", "exe", "scr", "com", "pif", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "msi", "msp", "dmg", "pkg", "app", "sh", "command", "py", "pl", "rb", "deb", "rpm", "apk", "iso", "img", "reg", "cpl", "dll", "so", "dylib"]
