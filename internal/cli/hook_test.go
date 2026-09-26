@@ -96,6 +96,9 @@ func TestHookUsage(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a.nfo"), "nfo\n")
 	none := testutil.Profile(t, "[verify]\ntier=\"none\"\n")
+	// q is the directory a wrapper wrote after a bare --quarantine, which
+	// must never be created by a refused invocation.
+	q := filepath.Join(t.TempDir(), "q")
 	for _, tc := range []struct {
 		name string
 		env  []string
@@ -114,6 +117,10 @@ func TestHookUsage(t *testing.T) {
 		{"radarr with a stray argument", jobEnv("radarr", dir), []string{"hook", "radarr", "extra"}, 2, "hook radarr: unexpected argument \"extra\"; the adapter reads the job from the environment\n"},
 		{"sabnzbd with one positional", jobEnv("sabnzbd", dir), []string{"hook", "sabnzbd", "--quarantine", dir}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 1 beginning with \"" + dir + "\"; if it was meant as the quarantine directory write --quarantine=" + dir},
 		{"sabnzbd with six positionals", nil, []string{"hook", "sabnzbd", dir, "n", "c", "1", "tv", "g"}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 6 beginning with \"" + dir + "\"\n"},
+		{"sabnzbd with nine positionals from the environment form", jobEnv("sabnzbd", dir), []string{"hook", "sabnzbd", "--quarantine", q, dir, "n", "c", "1", "tv", "g", "0", ""}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 9 beginning with \"" + q + "\"; if it was meant as the quarantine directory write --quarantine=" + q + "\n"},
+		{"sabnzbd with nine positionals from the argument form", nil, []string{"hook", "sabnzbd", "--quarantine", q, dir, "n", "c", "1", "tv", "g", "0", ""}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 9 beginning with \"" + q + "\"; if it was meant as the quarantine directory write --quarantine=" + q + "\n"},
+		{"sabnzbd with nine positionals and no bare --quarantine", nil, []string{"hook", "sabnzbd", q, dir, "n", "c", "1", "tv", "g", "0", ""}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 9 beginning with \"" + q + "\"\n"},
+		{"sabnzbd with ten positionals", nil, []string{"hook", "sabnzbd", "--quarantine", q, dir, "n", "c", "1", "tv", "g", "0", "", "x"}, 2, "got 10 beginning with \"" + q + "\"; if it was meant as the quarantine directory write --quarantine=" + q + "\n"},
 		{"sonarr without env", nil, []string{"hook", "sonarr"}, 2, "hook sonarr: not started by Sonarr: sonarr_eventtype is not set"},
 		{"radarr without env", nil, []string{"hook", "radarr"}, 2, "hook radarr: not started by Radarr: radarr_eventtype is not set"},
 		{"sonarr download without a path", []string{"sonarr_eventtype=Download"}, []string{"hook", "sonarr"}, 2, "event Download without sonarr_episodefile_path"},
@@ -161,6 +168,9 @@ func TestHookUsage(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "a.nfo")); err != nil {
 		t.Error("a usage error touched the download")
+	}
+	if _, err := os.Lstat(q); err == nil {
+		t.Error("a refused invocation created the quarantine directory")
 	}
 	// A usage error is never a verdict: the block file stays and no hook
 	// ever runs ingest with tier none, whatever the flag order.
@@ -1025,9 +1035,48 @@ func TestHookArgumentInjection(t *testing.T) {
 		if code != 1 || !strings.Contains(out, "BLOCK "+url) {
 			t.Errorf("exit %d\n%s", code, out)
 		}
+	})
+	t.Run("SABnzbd's seven parameters from an older version still pass", func(t *testing.T) {
 		hookEnv(t)
 		if code, out, _ := run(t, "--dry-run", "hook", "sabnzbd", dir, "n", "c", "1", "tv", "g", "0"); code != 1 || !strings.Contains(out, "BLOCK "+url) {
 			t.Errorf("seven parameters: exit %d\n%s", code, out)
+		}
+	})
+	t.Run("a directory after a bare --quarantine in front of SABnzbd's parameters is refused", func(t *testing.T) {
+		// The natural wrapper edit `hook sabnzbd --quarantine /q "$@"` puts
+		// the directory first and SABnzbd's eight parameters after it. The
+		// count is one too many, so the run is refused before the
+		// environment is read, the hint names the directory, and the block
+		// file is neither quarantined under q nor under the state
+		// directory.
+		sab := []string{dir, "n", "c", "1", "tv", "g", "0", ""}
+		state := t.TempDir()
+		for _, tc := range []struct {
+			name string
+			env  []string
+		}{
+			{"environment form", jobEnv("sabnzbd", dir)},
+			{"argument form", nil},
+		} {
+			hookEnv(t, tc.env...)
+			args := append([]string{"--state-dir", state, "hook", "sabnzbd", "--quarantine", "--remove-blocked-sidecars", q}, sab...)
+			code, out, errs := run(t, args...)
+			if code != 2 || out != "" {
+				t.Errorf("%s: exit %d stdout %q stderr %q", tc.name, code, out, errs)
+			}
+			want := "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 9 beginning with " + fmt.Sprintf("%q", q) + "; if it was meant as the quarantine directory write --quarantine=" + q + "\n"
+			if ls := lines(errs); len(ls) != 1 || !strings.HasSuffix(errs, want) {
+				t.Errorf("%s: stderr %q, want a single line ending %q", tc.name, errs, want)
+			}
+			if _, err := os.Lstat(url); err != nil {
+				t.Errorf("%s: the block file was moved or removed", tc.name)
+			}
+			if _, err := os.Lstat(q); err == nil {
+				t.Errorf("%s: the refused directory was created", tc.name)
+			}
+			if _, err := os.Lstat(filepath.Join(state, "quarantine")); err == nil {
+				t.Errorf("%s: the state quarantine directory was created", tc.name)
+			}
 		}
 	})
 
