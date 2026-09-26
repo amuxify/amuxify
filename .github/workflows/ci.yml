@@ -31,7 +31,7 @@ jobs:
           ./bin/amuxify ingest --dry-run testdata/out || status=$?
           test "$status" -eq 4
       # enabled by WP2
-      # - run: sonarr_eventtype=Test ./bin/amuxify hook sonarr
+      - run: sonarr_eventtype=Test ./bin/amuxify hook sonarr
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -39,4 +39,4 @@ jobs:
       - run: docker build --build-arg VERSION=ci -t amuxify:ci .
       - run: docker run --rm -u 1000:1000 amuxify:ci doctor
       # enabled by WP2
-      # - run: docker run --rm -u 1000:1000 -e sonarr_eventtype=Test amuxify:ci hook sonarr
+      - run: docker run --rm -u 1000:1000 -e sonarr_eventtype=Test amuxify:ci hook sonarr
