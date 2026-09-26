@@ -31,7 +31,8 @@ input, mkvmerge as the only MKV writer. The repository moved to
 - Stable exit codes 0/1/2/3/4/130 and a JSON report.
 - `doctor` with version floors (MKVToolNix 50, ffmpeg 4.4).
 - Static release binaries for Linux and macOS, Docker image at
-  `ghcr.io/amuxify/amuxify`, checksum-verified `install.sh`.
+  `ghcr.io/amuxify/amuxify`, Homebrew cask in `amuxify/homebrew-tap`,
+  checksum-verified `install.sh`.
 
 ### Changed
 

@@ -78,6 +78,9 @@ Binaries for Linux (amd64, arm64, armv7) and macOS (arm64, amd64) are on the
 # script: downloads, verifies the checksum, installs to /usr/local/bin
 curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
 
+# Homebrew
+brew install --cask amuxify/tap/amuxify
+
 # Docker (run as the uid that owns the library, never root)
 docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/amuxify/amuxify scan /data
 
