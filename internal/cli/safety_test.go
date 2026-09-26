@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -250,6 +251,34 @@ func TestVersionAndHelp(t *testing.T) {
 	// Extra arguments after help and version are ignored, never executed.
 	if code, _, _ := run(t, "version", "scan", "/"); code != 0 {
 		t.Error("version with trailing arguments failed")
+	}
+	// The help page lists every global flag with the help string bind gives
+	// it, each on its own line, so the two cannot drift apart.
+	_, _, help := run(t, "help")
+	fs := flag.NewFlagSet("amuxify", flag.ContinueOnError)
+	(&Global{}).bind(fs)
+	n := 0
+	fs.VisitAll(func(f *flag.Flag) {
+		n++
+		_, usage := flag.UnquoteUsage(f)
+		found := false
+		for _, line := range strings.Split(help, "\n") {
+			if strings.HasPrefix(line, "  --"+f.Name+" ") && strings.HasSuffix(line, usage) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("help lacks a line for --%s with %q:\n%s", f.Name, usage, help)
+		}
+	})
+	if n == 0 {
+		t.Fatal("no global flags bound")
+	}
+	if !strings.Contains(help, "--timeout <duration>    per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean)\n") {
+		t.Errorf("help lacks the --timeout line:\n%s", help)
+	}
+	if !strings.Contains(help, "amuxify "+Version+" - the ingest gate") || strings.Contains(help, "%!") {
+		t.Errorf("help header or format verbs broken:\n%s", help)
 	}
 }
 

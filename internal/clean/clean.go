@@ -282,6 +282,43 @@ func (c *Cleaner) cleanMatroska(ctx context.Context, fr *report.FileResult, info
 
 // cleanRewrite stream-copies into a temp file with all container metadata
 // dropped, verifies stream hashes, then replaces the original.
+// inertFormatTags counts the format tags that ffprobe reports for every
+// MP4-family file and that a rewrite can never remove: the ftyp brand
+// fields. Counting them would make the rewrite run again on a file it has
+// just cleaned. The encoder tag is not on this list: ffmpeg does not write
+// it back under -bitexact, so its presence means the file was not cleaned.
+func inertFormatTags(tags map[string]string) int {
+	n := 0
+	for k := range tags {
+		switch strings.ToLower(k) {
+		case "major_brand", "minor_version", "compatible_brands":
+			n++
+		}
+	}
+	return n
+}
+
+// inertStreamTag reports whether a stream tag is one the MP4 muxer writes
+// on its own with a fixed value (the default handler names and ffmpeg's own
+// vendor id), so it survives every rewrite. Any other value, including a
+// handler name that carries text of someone's choosing, still counts as
+// metadata to strip.
+func inertStreamTag(key, value string) bool {
+	switch strings.ToLower(key) {
+	case "handler_name":
+		switch value {
+		case "VideoHandler", "SoundHandler", "SubtitleHandler", "DataHandler":
+			return true
+		}
+	case "vendor_id":
+		switch value {
+		case "FFMP", "[0][0][0][0]":
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo, muxer string) {
 	var what []string
 	if info.Container == "mp4" {
@@ -298,12 +335,12 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 			}
 		}
 	}
-	if len(info.Tags) > 0 {
-		what = append(what, fmt.Sprintf("%d format tag(s)", len(info.Tags)))
+	if n := len(info.Tags) - inertFormatTags(info.Tags); n > 0 {
+		what = append(what, fmt.Sprintf("%d format tag(s)", n))
 	}
 	for _, s := range info.Streams {
-		for k := range s.Tags {
-			if strings.EqualFold(k, "language") {
+		for k, v := range s.Tags {
+			if strings.EqualFold(k, "language") || inertStreamTag(k, v) {
 				continue
 			}
 			what = append(what, fmt.Sprintf("stream #%d tag %s", s.Index, k))

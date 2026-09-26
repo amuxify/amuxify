@@ -210,9 +210,19 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		return fr
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
-		return fr
+	// In place, the destination sits beside the source in a directory that
+	// exists and was walked without following symlinks. Otherwise the
+	// mirrored directory chain is created component by component so a
+	// symlink planted inside the output tree cannot redirect the remuxed
+	// file outside the root the user named (guarantee 4). The refusal is
+	// reported as REMUX_FAIL because the finding codes are frozen and, from
+	// the caller's point of view, the remux of this file did not happen; the
+	// message carries the reason.
+	if !r.InPlace {
+		if err := fsutil.MkdirAllUnder(outRoot, filepath.Dir(dest)); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
 	}
 	tmp := fsutil.TempName(dest)
 	_ = os.Remove(tmp)
@@ -487,15 +497,10 @@ func (r *Remuxer) verifyOutput(ctx context.Context, fr *report.FileResult, src *
 		}
 		fr.Addf(CodeHashOK, report.Pass, "%d stream(s) verified identical to source", n)
 	}
-	switch r.tier() {
-	case "none":
-	case "full":
-		if err := r.Verifier.DecodeFull(ctx, tmp); err != nil {
-			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
-			return false
-		}
-	default:
-		if err := r.Verifier.DecodeHeadTail(ctx, tmp); err != nil {
+	// The output carries the source's video and audio streams, so the
+	// source probe decides whether there is anything to decode.
+	if tier := r.tier(); tier != "none" {
+		if err := r.Verifier.Decode(ctx, tmp, src, tier == "full"); err != nil {
 			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
 			return false
 		}
