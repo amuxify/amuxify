@@ -1610,3 +1610,322 @@ func TestPlantedTempSymlinkRefused(t *testing.T) {
 		})
 	}
 }
+
+// finding returns the first finding of fr with the given code.
+func finding(fr report.FileResult, code string) (report.Finding, bool) {
+	for _, f := range fr.Findings {
+		if f.Code == code {
+			return f, true
+		}
+	}
+	return report.Finding{}, false
+}
+
+// byBase indexes results by the base name of their path.
+func byBase(res []report.FileResult) map[string]report.FileResult {
+	out := map[string]report.FileResult{}
+	for _, fr := range res {
+		out[filepath.Base(fr.Path)] = fr
+	}
+	return out
+}
+
+// collisionPair puts two fixtures into a fresh directory under the names
+// first and second, which share a stem so both rebuild to <stem>.mkv.
+func collisionPair(t *testing.T, first, second string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, as := range map[string]string{"sample.mov": first, "sample.webm": second} {
+		src := testutil.Copy(t, name)
+		if err := os.Rename(src, filepath.Join(dir, as)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// A dry run of two files that rebuild to one destination, ep.mov and
+// ep.webm, reports the second with the OUTPUT_EXISTS the live run gives,
+// for --output and for --in-place, and writes nothing. The plan lives in
+// the Remuxer for the whole run, so the collision is also found when the
+// two files arrive as separate positional paths, which is how the CLI
+// calls RemuxPath; a fresh Remuxer starts a fresh plan.
+func TestDryRunPredictsDestinationCollision(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, inPlace := range []bool{false, true} {
+		mode := "output"
+		if inPlace {
+			mode = "in place"
+		}
+		t.Run(mode, func(t *testing.T) {
+			outRoot := filepath.Join(t.TempDir(), "out")
+			mk := func(t *testing.T, dry bool) *Remuxer {
+				rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+				rm.DryRun, rm.InPlace = dry, inPlace
+				if !inPlace {
+					rm.OutputRoot = outRoot
+				}
+				return rm
+			}
+			destOf := func(dir string) string {
+				if inPlace {
+					return filepath.Join(dir, "ep.mkv")
+				}
+				return filepath.Join(outRoot, "ep.mkv")
+			}
+			check := func(t *testing.T, res []report.FileResult, dest string) report.FileResult {
+				t.Helper()
+				if len(res) != 2 {
+					t.Fatalf("results %d", len(res))
+				}
+				mov, webm := byBase(res)["ep.mov"], byBase(res)["ep.webm"]
+				if !mov.Has(CodeDryRun) || mov.Output != dest || mov.Has(CodeOutputExists) {
+					t.Errorf("ep.mov: %v %q", codes(mov), mov.Output)
+				}
+				f, ok := finding(webm, CodeOutputExists)
+				if !ok || f.Severity != report.Fail || f.Message != dest+" already exists" {
+					t.Errorf("ep.webm: %v %q", codes(webm), f.Message)
+				}
+				if webm.Verdict != report.Fail || webm.Has(CodeDryRun) || webm.Output != "" {
+					t.Errorf("ep.webm: %s %v %q", webm.Verdict, codes(webm), webm.Output)
+				}
+				return webm
+			}
+
+			dir := collisionPair(t, "ep.mov", "ep.webm")
+			before := map[string]string{"ep.mov": fileSHA(t, filepath.Join(dir, "ep.mov")), "ep.webm": fileSHA(t, filepath.Join(dir, "ep.webm"))}
+			rm := mk(t, true)
+			res, err := rm.RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			webm := check(t, res, destOf(dir))
+
+			// The same Remuxer keeps its plan across RemuxPath calls: the
+			// same two files as positional paths collide as well.
+			rm = mk(t, true)
+			var split []report.FileResult
+			for _, name := range []string{"ep.mov", "ep.webm"} {
+				one, err := rm.RemuxPath(context.Background(), filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				split = append(split, one...)
+			}
+			check(t, split, destOf(dir))
+
+			// A fresh Remuxer is a fresh run, so the first file plans again
+			// instead of colliding with the earlier dry run.
+			again, err := mk(t, true).RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, again, destOf(dir))
+
+			for name, sum := range before {
+				if fileSHA(t, filepath.Join(dir, name)) != sum {
+					t.Errorf("%s changed", name)
+				}
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+				t.Errorf("input dir now holds %d entries", len(entries))
+			}
+			if _, err := os.Lstat(outRoot); err == nil {
+				t.Error("dry run created the output root")
+			}
+			if l := leftovers(t, dir); len(l) != 0 {
+				t.Errorf("temp files left: %v", l)
+			}
+
+			// The live run gives the second file the same findings.
+			liveDir := collisionPair(t, "ep.mov", "ep.webm")
+			live, err := mk(t, false).RemuxPath(context.Background(), liveDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveWebm := byBase(live)["ep.webm"]
+			if f, ok := finding(liveWebm, CodeOutputExists); !ok || f.Message != destOf(liveDir)+" already exists" {
+				t.Fatalf("live ep.webm: %v", codes(liveWebm))
+			}
+			if strings.Join(codes(liveWebm), ",") != strings.Join(codes(webm), ",") {
+				t.Errorf("collision findings differ: dry %v, live %v", codes(webm), codes(liveWebm))
+			}
+			if _, err := os.Lstat(destOf(liveDir)); err != nil {
+				t.Errorf("live run did not place %s: %v", destOf(liveDir), err)
+			}
+		})
+	}
+}
+
+// On a case-insensitive filesystem Ep.mov and ep.webm rebuild to one entry,
+// so the dry run must report the second with OUTPUT_EXISTS just as the
+// live run does, although the two planned names differ in case. That
+// holds for an output root the dry run has not created, whose filesystem
+// is the one of its nearest existing ancestor.
+func TestDryRunCollisionFoldsCase(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	if !caseInsensitiveDir(t, t.TempDir()) {
+		t.Skip("the temp directory's filesystem is case-sensitive; see TestDryRunCollisionKeepsCase")
+	}
+	for _, inPlace := range []bool{false, true} {
+		mode := "output"
+		if inPlace {
+			mode = "in place"
+		}
+		t.Run(mode, func(t *testing.T) {
+			outRoot := filepath.Join(t.TempDir(), "out")
+			mk := func(t *testing.T, dry bool) *Remuxer {
+				rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+				rm.DryRun, rm.InPlace = dry, inPlace
+				if !inPlace {
+					rm.OutputRoot = outRoot
+				}
+				return rm
+			}
+			destDir := func(dir string) string {
+				if inPlace {
+					return dir
+				}
+				return outRoot
+			}
+			dir := collisionPair(t, "Ep.mov", "ep.webm")
+			res, err := mk(t, true).RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 2 {
+				t.Fatalf("results %d", len(res))
+			}
+			mov, webm := byBase(res)["Ep.mov"], byBase(res)["ep.webm"]
+			if !mov.Has(CodeDryRun) || mov.Output != filepath.Join(destDir(dir), "Ep.mkv") {
+				t.Errorf("Ep.mov: %v %q", codes(mov), mov.Output)
+			}
+			want := filepath.Join(destDir(dir), "ep.mkv") + " already exists"
+			if f, ok := finding(webm, CodeOutputExists); !ok || f.Severity != report.Fail || f.Message != want {
+				t.Errorf("ep.webm: %v %q", codes(webm), f.Message)
+			}
+			if webm.Has(CodeDryRun) || webm.Output != "" || webm.Verdict != report.Fail {
+				t.Errorf("ep.webm: %s %v %q", webm.Verdict, codes(webm), webm.Output)
+			}
+			if _, err := os.Lstat(outRoot); err == nil {
+				t.Error("dry run created the output root")
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+				t.Errorf("input dir now holds %d entries", len(entries))
+			}
+
+			liveDir := collisionPair(t, "Ep.mov", "ep.webm")
+			live, err := mk(t, false).RemuxPath(context.Background(), liveDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveWebm := byBase(live)["ep.webm"]
+			if f, ok := finding(liveWebm, CodeOutputExists); !ok || f.Message != filepath.Join(destDir(liveDir), "ep.mkv")+" already exists" {
+				t.Fatalf("live ep.webm: %v", codes(liveWebm))
+			}
+			if strings.Join(codes(liveWebm), ",") != strings.Join(codes(webm), ",") {
+				t.Errorf("collision findings differ: dry %v, live %v", codes(webm), codes(liveWebm))
+			}
+		})
+	}
+}
+
+// On a case-sensitive filesystem Ep.mkv and ep.mkv are two entries, so
+// Ep.mov and ep.webm are two distinct plans and neither collides.
+func TestDryRunCollisionKeepsCase(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
+	if caseInsensitiveDir(t, t.TempDir()) {
+		t.Skip("the temp directory's filesystem folds case; see TestDryRunCollisionFoldsCase")
+	}
+	for _, inPlace := range []bool{false, true} {
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.DryRun, rm.InPlace = true, inPlace
+		if !inPlace {
+			rm.OutputRoot = filepath.Join(t.TempDir(), "out")
+		}
+		dir := collisionPair(t, "Ep.mov", "ep.webm")
+		res, err := rm.RemuxPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results %d", len(res))
+		}
+		for _, fr := range res {
+			if !fr.Has(CodeDryRun) || fr.Has(CodeOutputExists) || fr.Output == "" {
+				t.Errorf("inPlace=%v %s: %v %q", inPlace, filepath.Base(fr.Path), codes(fr), fr.Output)
+			}
+		}
+		if res[0].Output == res[1].Output {
+			t.Errorf("inPlace=%v: both plan %s", inPlace, res[0].Output)
+		}
+	}
+}
+
+// The planned-name comparison itself, with the per-directory case answer
+// seeded so both branches run whatever filesystem hosts the tests: names
+// that differ only in case collide when the directory folds case and are
+// distinct when it does not, other directories never collide, and
+// RemuxPath does not clear the plan. Nothing here touches the disk.
+func TestPlannedCollisionComparesPerDirectory(t *testing.T) {
+	fold := filepath.Join(string(filepath.Separator), "fold")
+	exact := filepath.Join(string(filepath.Separator), "exact")
+	rm := &Remuxer{caseFold: map[string]bool{fold: true, exact: false}}
+	for _, dir := range []string{fold, exact} {
+		if rm.plannedCollision(filepath.Join(dir, "ep.mkv")) {
+			t.Errorf("%s: collision before anything was planned", dir)
+		}
+		rm.plan(filepath.Join(dir, "Ep.mkv"))
+		if !rm.plannedCollision(filepath.Join(dir, "Ep.mkv")) {
+			t.Errorf("%s: the exact name does not collide", dir)
+		}
+		if rm.plannedCollision(filepath.Join(dir, "other.mkv")) {
+			t.Errorf("%s: a different name collides", dir)
+		}
+	}
+	if !rm.plannedCollision(filepath.Join(fold, "ep.mkv")) || !rm.plannedCollision(filepath.Join(fold, "EP.MKV")) {
+		t.Error("a folding directory does not fold case")
+	}
+	if rm.plannedCollision(filepath.Join(exact, "ep.mkv")) || rm.plannedCollision(filepath.Join(exact, "EP.MKV")) {
+		t.Error("an exact directory folds case")
+	}
+	if rm.plannedCollision(filepath.Join(fold, "sub", "Ep.mkv")) {
+		t.Error("a plan leaks into a subdirectory")
+	}
+	// A dry run over a missing path fails before it could reset the plan,
+	// and the plan of the earlier call is still there afterwards.
+	rm.DryRun = true
+	if _, err := rm.RemuxPath(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("RemuxPath of a missing path succeeded")
+	}
+	if !rm.plannedCollision(filepath.Join(fold, "ep.mkv")) {
+		t.Error("RemuxPath cleared the plan")
+	}
+}
+
+// foldsCase agrees with a probe that writes a file, for an existing
+// directory and for a directory that does not exist yet, and answers
+// case-sensitive at the filesystem root where nothing can be probed.
+func TestFoldsCaseDetection(t *testing.T) {
+	dir := t.TempDir()
+	want := caseInsensitiveDir(t, dir)
+	if got := foldsCase(dir); got != want {
+		t.Errorf("foldsCase(%s) = %v, probe says %v", dir, got, want)
+	}
+	missing := filepath.Join(dir, "out", "Season 1")
+	if got := foldsCase(missing); got != want {
+		t.Errorf("foldsCase(%s) = %v, probe says %v", missing, got, want)
+	}
+	if foldsCase(string(filepath.Separator)) {
+		t.Error("the root folds case")
+	}
+	rm := &Remuxer{}
+	if a, b := rm.foldsCase(dir), rm.foldsCase(dir); a != want || b != want || rm.caseFold[dir] != want {
+		t.Errorf("cached answer %v %v %v, want %v", a, b, rm.caseFold[dir], want)
+	}
+	for in, out := range map[string]string{"Ep.mkv": "eP.MKV", "123": "", "": "", "üï": "", "ünï": "üNï"} {
+		if got := flipCase(in); got != out {
+			t.Errorf("flipCase(%q) = %q, want %q", in, got, out)
+		}
+	}
+}
