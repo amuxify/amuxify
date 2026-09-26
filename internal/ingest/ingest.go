@@ -83,10 +83,10 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 	if !fi.IsDir() {
 		scanRoot = filepath.Dir(abs)
 	}
-	paths, err := scan.Walk(abs)
-	if err != nil {
-		return nil, err
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files,
+	// which raises the run verdict to FAIL.
+	paths, walkErr := scan.Walk(abs)
 	var out []report.FileResult
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -98,7 +98,7 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // merge folds a stage result into fr so the verdict rises with its findings.

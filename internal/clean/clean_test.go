@@ -670,3 +670,28 @@ func TestCleanPathWalk(t *testing.T) {
 		t.Error("cancelled context ignored")
 	}
 }
+
+// An unreadable directory inside the tree is reported as an error after the
+// readable files are cleaned, never dropped (review C2).
+func TestCleanReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n")
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "b.nfo"), "nfo\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	c, _ := newCleaner(t, nil, mustProfile(t, "homelab"))
+	res, err := c.CleanPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("err %v, want one naming %s", err, locked)
+	}
+	if len(res) != 1 || res[0].Path != ok {
+		t.Fatalf("results %v", res)
+	}
+}

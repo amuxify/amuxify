@@ -83,10 +83,9 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	if !fi.IsDir() {
 		scanRoot = filepath.Dir(abs)
 	}
-	paths, err := Walk(abs)
-	if err != nil {
-		return nil, err
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	paths, walkErr := Walk(abs)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -98,7 +97,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.

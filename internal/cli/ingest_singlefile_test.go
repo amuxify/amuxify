@@ -95,3 +95,86 @@ func TestIngestSingleFileQuarantine(t *testing.T) {
 		}
 	})
 }
+
+// A directory the process cannot read never turns into PASS with zero
+// files: the run carries an ERROR line naming it, the verdict is FAIL and
+// the exit code is the failure code of each caller (review C2).
+func TestUnreadableDirectoryFailsTheRun(t *testing.T) {
+	testutil.Stubs(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	mk := func(t *testing.T, withReadable bool) (string, string) {
+		t.Helper()
+		root := t.TempDir()
+		if withReadable {
+			write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n")
+		}
+		locked := filepath.Join(root, "locked")
+		write(t, filepath.Join(locked, "payload.url"), "[InternetShortcut]\nURL=http://x\n")
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		return root, locked
+	}
+	t.Run("ingest", func(t *testing.T) {
+		root, locked := mk(t, true)
+		code, out, errb := run(t, "ingest", root)
+		if code != 3 || !strings.Contains(out, "ERROR "+root+": cannot read "+locked) || !strings.Contains(out, "FAIL:") {
+			t.Errorf("exit %d, want 3 with an ERROR line naming %s\n%s%s", code, locked, out, errb)
+		}
+		if !strings.Contains(out, filepath.Join(root, "a", "ok.nfo")) {
+			t.Errorf("readable file dropped:\n%s", out)
+		}
+	})
+	t.Run("ingest dry run", func(t *testing.T) {
+		root, _ := mk(t, false)
+		code, out, errb := run(t, "--dry-run", "ingest", root)
+		if code != 3 || !strings.Contains(out, "ERROR ") {
+			t.Errorf("exit %d, want 3\n%s%s", code, out, errb)
+		}
+	})
+	t.Run("scan", func(t *testing.T) {
+		root, _ := mk(t, false)
+		code, out, errb := run(t, "scan", root)
+		if code != 3 || !strings.Contains(out, "ERROR ") {
+			t.Errorf("exit %d, want 3\n%s%s", code, out, errb)
+		}
+	})
+	t.Run("unreadable root", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "job")
+		write(t, filepath.Join(root, "payload.url"), "x")
+		if err := os.Chmod(root, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+		hookEnv(t, jobEnv("nzbget", root)...)
+		code, out, errb := run(t, "hook", "nzbget")
+		if code != 94 || strings.Contains(out, "PASS") {
+			t.Errorf("exit %d, want 94\n%s%s", code, out, errb)
+		}
+	})
+	for _, tc := range []struct {
+		adapter string
+		want    int
+	}{{"sabnzbd", 1}, {"nzbget", 94}} {
+		t.Run("hook "+tc.adapter, func(t *testing.T) {
+			root, locked := mk(t, true)
+			hookEnv(t, jobEnv(tc.adapter, root)...)
+			code, out, errb := run(t, "hook", tc.adapter)
+			if code != tc.want {
+				t.Errorf("exit %d, want %d\n%s%s", code, tc.want, out, errb)
+			}
+			if !strings.Contains(out+errb, "cannot read "+locked) {
+				t.Errorf("no ERROR line naming %s:\n%s%s", locked, out, errb)
+			}
+			if strings.Contains(out, "amuxify: PASS") || strings.Contains(out, "PASS: ") {
+				t.Errorf("run reported PASS:\n%s", out)
+			}
+			if tc.adapter == "nzbget" {
+				checkNZBGetOutput(t, out, errb, false)
+			}
+		})
+	}
+}

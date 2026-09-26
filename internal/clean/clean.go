@@ -75,10 +75,9 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	paths, err := scan.Walk(abs)
-	if err != nil {
-		return nil, err
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	paths, walkErr := scan.Walk(abs)
 	var out []report.FileResult
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -90,7 +89,7 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // CleanFile cleans one path.
