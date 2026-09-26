@@ -115,29 +115,59 @@ func (r *FileResult) Has(code string) bool {
 	return false
 }
 
-// Summary is the run-level report.
+// SchemaID identifies the report shape. It changes only for a breaking change.
+const SchemaID = "amuxify.report/1"
+
+// HookInfo records the adapter that started an ingest run (hook runs only).
+type HookInfo struct {
+	Adapter  string `json:"adapter"`
+	Event    string `json:"event"`
+	Label    string `json:"label,omitempty"`
+	Category string `json:"category,omitempty"`
+	FailOn   string `json:"fail_on"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// Summary is the run-level report. Its JSON form is the wire format that
+// docs/report.md documents and that TestFieldSetFrozen pins: fields are only
+// ever added, and the arrays and maps are present and empty rather than
+// absent or null.
 type Summary struct {
+	Schema   string         `json:"schema"`
 	Tool     string         `json:"tool"`
 	Version  string         `json:"version"`
 	Command  string         `json:"command"`
-	Profile  string         `json:"profile,omitempty"`
+	Profile  string         `json:"profile"`
+	Hook     *HookInfo      `json:"hook,omitempty"`
 	Started  time.Time      `json:"started"`
 	Finished time.Time      `json:"finished"`
 	Verdict  Severity       `json:"verdict"`
 	Counts   map[string]int `json:"counts"`
 	Files    []FileResult   `json:"files"`
-	Errors   []string       `json:"errors,omitempty"`
+	Errors   []string       `json:"errors"`
 }
+
+// now returns the current time in UTC with whole seconds, so timestamps
+// marshal as RFC 3339 with a Z suffix and no fraction.
+func now() time.Time { return time.Now().UTC().Truncate(time.Second) }
 
 // NewSummary starts a report for one run.
 func NewSummary(tool, version, command, profile string) *Summary {
-	return &Summary{Tool: tool, Version: version, Command: command, Profile: profile,
-		Started: time.Now(), Counts: map[string]int{}}
+	return &Summary{Schema: SchemaID, Tool: tool, Version: version, Command: command, Profile: profile,
+		Started: now(), Counts: map[string]int{}, Files: []FileResult{}, Errors: []string{}}
 }
 
-// Append records a file result and updates counts and the run verdict.
+// Append records a file result and updates counts and the run verdict. A
+// result without findings is stored with an empty findings slice so that it
+// marshals as an empty array.
 func (s *Summary) Append(r FileResult) {
 	r.Millis = r.Duration.Milliseconds()
+	if r.Findings == nil {
+		r.Findings = []Finding{}
+	}
+	if s.Counts == nil {
+		s.Counts = map[string]int{}
+	}
 	s.Files = append(s.Files, r)
 	s.Counts[r.Verdict.String()]++
 	s.Verdict = Worst(s.Verdict, r.Verdict)
@@ -150,9 +180,33 @@ func (s *Summary) Error(msg string) {
 }
 
 // Close stamps the finish time.
-func (s *Summary) Close() { s.Finished = time.Now() }
+func (s *Summary) Close() { s.Finished = now() }
 
-// WriteJSON emits the machine-readable form.
+// MarshalJSON normalises the collections so that a Summary assembled by hand,
+// without NewSummary or Append, still marshals with present, empty arrays and
+// maps rather than null. The caller's slices are never modified.
+func (s Summary) MarshalJSON() ([]byte, error) {
+	type plain Summary
+	p := plain(s)
+	if p.Counts == nil {
+		p.Counts = map[string]int{}
+	}
+	if p.Errors == nil {
+		p.Errors = []string{}
+	}
+	files := make([]FileResult, len(p.Files))
+	for i, f := range p.Files {
+		if f.Findings == nil {
+			f.Findings = []Finding{}
+		}
+		files[i] = f
+	}
+	p.Files = files
+	return json.Marshal(p)
+}
+
+// WriteJSON emits the machine-readable form: one indented object followed by
+// a newline.
 func (s *Summary) WriteJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

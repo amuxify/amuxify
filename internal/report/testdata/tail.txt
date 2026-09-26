@@ -1,0 +1,3 @@
+ERROR /srv/incoming/gone.mkv: lstat /srv/incoming/gone.mkv: no such file or directory
+
+BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1
