@@ -10,10 +10,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
@@ -182,6 +184,23 @@ func TestSymlinkVariantsNeverFollowed(t *testing.T) {
 	}
 }
 
+// toolsRequired mirrors testutil: AMUXIFY_REQUIRE_TOOLS set to 1, true or
+// yes turns a skip over a tool or environment problem into a failure, so CI
+// cannot go green on a test that never ran (review C18).
+func toolsRequired() bool {
+	v := strings.TrimSpace(os.Getenv("AMUXIFY_REQUIRE_TOOLS"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
+
+// skipOrFail skips the test, or fails it under AMUXIFY_REQUIRE_TOOLS.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if toolsRequired() {
+		t.Fatalf("required (AMUXIFY_REQUIRE_TOOLS set): "+format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 func TestBidiNameBlocks(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -207,7 +226,7 @@ func TestBidiNameBlocks(t *testing.T) {
 			body = "plain text\n"
 		}
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Skipf("filesystem refuses the name %q: %v", n, err)
+			skipOrFail(t, "filesystem refuses the name %q: %v", n, err)
 		}
 	}
 	res, err := s.ScanPath(context.Background(), dir)
@@ -904,7 +923,7 @@ func TestExeAttachmentOutsideTailIsBlocked(t *testing.T) {
 		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
 		"-t", "6", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-c:a", "aac", "-shortest", video)
 	if err != nil || res.ExitCode != 0 {
-		t.Skipf("cannot build the padded video with ffmpeg: %v %s", err, res.Stderr)
+		skipOrFail(t, "cannot build the padded video with ffmpeg: %v %s", err, res.Stderr)
 	}
 	payload := write(t, filepath.Join(dir, "payload.bin"), "\x7fELF\x02\x01\x01\x00payload", 0o644)
 	out := filepath.Join(dir, "big_exe.mkv")
@@ -1123,4 +1142,175 @@ func TestCorpusVerdicts(t *testing.T) {
 			t.Errorf("scan removed %s", rel)
 		}
 	}
+}
+
+// A caller that hands the file itself as the scan root, or a root the file
+// does not sit under, still gets the file placed under the quarantine
+// directory by its base name. The destination is never the quarantine root
+// itself, so the move can never be refused as "outside" or clobber the
+// directory (review C1).
+func TestQuarantineWithFileAsRootUsesBaseName(t *testing.T) {
+	noTools(t)
+	q := filepath.Join(t.TempDir(), "quarantine")
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	for _, root := range []string{"file", "unrelated", "empty", "dot"} {
+		t.Run(root, func(t *testing.T) {
+			src := write(t, filepath.Join(t.TempDir(), "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			var r string
+			switch root {
+			case "file":
+				r = src
+			case "unrelated":
+				r = t.TempDir()
+			case "empty":
+				r = ""
+			case "dot":
+				r = "."
+			}
+			res := s.ScanFile(context.Background(), src, r)
+			fr := res.File
+			expect(t, fr, report.Block, CodeSidecarBlocked)
+			dest := filepath.Join(q, "x.url")
+			requireQuarantineFinding(t, fr, report.Block, "moved to "+dest)
+			if b, err := os.ReadFile(dest); err != nil || !strings.Contains(string(b), "InternetShortcut") {
+				t.Fatalf("quarantined copy at %s: %v", dest, err)
+			}
+			if _, err := os.Lstat(src); err == nil {
+				t.Fatal("source still present after quarantine")
+			}
+			if fi, err := os.Lstat(q); err != nil || !fi.IsDir() {
+				t.Fatalf("quarantine root is not a directory: %v", err)
+			}
+			if err := os.Remove(dest); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// lockDir removes every permission bit from dir for the test and restores
+// them at cleanup so the temp tree can be deleted. Root ignores mode bits,
+// so the caller skips under uid 0.
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+// An unreadable directory never disappears from a run. The readable files
+// are still reported and the walk returns an error naming the directory,
+// which the callers record at run level, so a tree whose only media sits
+// in a mode-000 corner is never PASS with zero files (review C2).
+func TestWalkReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n", 0o644)
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "payload.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	lockDir(t, locked)
+
+	paths, err := Walk(root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("Walk error %v, want one naming %s", err, locked)
+	}
+	if len(paths) != 1 || paths[0] != ok {
+		t.Fatalf("paths %v, want only %s", paths, ok)
+	}
+
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	res, err := s.ScanPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), locked) {
+		t.Fatalf("ScanPath error %v", err)
+	}
+	if len(res) != 1 || res[0].File.Path != ok {
+		t.Fatalf("results %d", len(res))
+	}
+	expect(t, res[0].File, report.Pass, CodeSidecarOK)
+
+	// The root itself unreadable: nothing is listed and the error says so.
+	lockedRoot := filepath.Join(t.TempDir(), "root")
+	write(t, filepath.Join(lockedRoot, "payload.url"), "x", 0o644)
+	lockDir(t, lockedRoot)
+	res, err = s.ScanPath(context.Background(), lockedRoot)
+	if err == nil || len(res) != 0 {
+		t.Fatalf("unreadable root: %d results, err %v", len(res), err)
+	}
+}
+
+// Quarantine works when the quarantine directory sits on another
+// filesystem: the file is copied, verified and removed from the tree, and a
+// file already at the destination is still never replaced (review C3).
+func TestQuarantineAcrossFilesystems(t *testing.T) {
+	noTools(t)
+	orig := fsutil.Place
+	fsutil.Place = func(src, dest string) error {
+		return &os.LinkError{Op: "rename", Old: src, New: dest, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() { fsutil.Place = orig })
+	root := t.TempDir()
+	q := filepath.Join(t.TempDir(), "quarantine")
+	src := write(t, filepath.Join(root, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	res, err := s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(q, "sub", "x.url")
+	requireQuarantineFinding(t, res[0].File, report.Block, "moved to "+dest)
+	if b, err := os.ReadFile(dest); err != nil || !strings.Contains(string(b), "http://x") {
+		t.Fatalf("copy at %s: %v", dest, err)
+	}
+	if _, err := os.Lstat(src); err == nil {
+		t.Fatal("source still in the tree")
+	}
+	// The copy path creates the file itself with mode 0600; a rename would
+	// have kept the source's 0644, so this proves the cross-device path ran.
+	if fi, err := os.Lstat(dest); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("quarantined copy mode %v, want 0600 from the cross-device copy", fi.Mode().Perm())
+	}
+	// Second file with the same mirrored name: refused, both intact.
+	write(t, src, "[InternetShortcut]\nURL=http://second\n", 0o644)
+	res, err = s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireQuarantineFinding(t, res[0].File, report.Warn, "quarantine failed")
+	if b, _ := os.ReadFile(dest); !strings.Contains(string(b), "http://x") {
+		t.Fatalf("first quarantined file overwritten: %q", b)
+	}
+	if _, err := os.Lstat(src); err != nil {
+		t.Fatal("source removed although the quarantine slot was taken")
+	}
+}
+
+// Review C18: the skip helper honours AMUXIFY_REQUIRE_TOOLS the way
+// testutil does, including the hostile spellings that must not count.
+func TestSkipOrFailHonoursRequireTools(t *testing.T) {
+	for v, want := range map[string]bool{"1": true, "true": true, "YES": true, " yes ": true,
+		"": false, "0": false, "no": false, "false": false, "11": false, "1;rm -rf /": false, "true false": false} {
+		t.Setenv("AMUXIFY_REQUIRE_TOOLS", v)
+		if got := toolsRequired(); got != want {
+			t.Errorf("AMUXIFY_REQUIRE_TOOLS=%q: required %v, want %v", v, got, want)
+		}
+	}
+	// With the variable unset skipOrFail skips rather than fails: the test
+	// process reaches the skip and its result is SKIP, not FAIL.
+	t.Setenv("AMUXIFY_REQUIRE_TOOLS", "")
+	skipped := t.Run("skips when unset", func(t *testing.T) {
+		skipOrFail(t, "tool missing")
+		t.Fatal("skipOrFail returned")
+	})
+	if !skipped {
+		t.Error("skipOrFail failed the subtest with AMUXIFY_REQUIRE_TOOLS unset")
+	}
+	// With it set, skipOrFail calls t.Fatalf, which cannot be observed
+	// without failing this test; the predicate it branches on is asserted
+	// above.
 }

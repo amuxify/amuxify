@@ -670,3 +670,129 @@ func TestCleanPathWalk(t *testing.T) {
 		t.Error("cancelled context ignored")
 	}
 }
+
+// An unreadable directory inside the tree is reported as an error after the
+// readable files are cleaned, never dropped (review C2).
+func TestCleanReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n")
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "b.nfo"), "nfo\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	c, _ := newCleaner(t, nil, mustProfile(t, "homelab"))
+	res, err := c.CleanPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("err %v, want one naming %s", err, locked)
+	}
+	if len(res) != 1 || res[0].Path != ok {
+		t.Fatalf("results %v", res)
+	}
+}
+
+// Review C10: the audio-tags advice names --strip-audio-tags only for the
+// clean command, which has that flag; under ingest it names no flag.
+func TestAudioTagsAdviceFollowsTheCommand(t *testing.T) {
+	noTools(t)
+	info := &probe.MediaInfo{Container: "mp3", Streams: []probe.Stream{{Index: 0, Type: "audio", Codec: "mp3"}}}
+	for _, tc := range []struct{ command, want string }{
+		{"", "audio tags left alone (use --strip-audio-tags)"},
+		{"clean", "audio tags left alone (use --strip-audio-tags)"},
+		{"ingest", "audio tags left alone; ingest does not strip audio tags"},
+	} {
+		c, tr := newCleaner(t, nil, mustProfile(t, "homelab"))
+		c.Command = tc.command
+		path := write(t, filepath.Join(t.TempDir(), "a.mp3"), "ID3\x03\x00\x00\x00\x00\x00\x00")
+		sum := fileSHA(t, path)
+		fr := report.FileResult{Path: path, Info: map[string]string{}}
+		c.cleanMedia(context.Background(), &fr, path, "mp3", info)
+		var got string
+		for _, f := range fr.Findings {
+			if f.Code == CodeSkipped {
+				got = f.Message
+			}
+		}
+		if got != tc.want {
+			t.Errorf("command %q: SKIPPED %q, want %q", tc.command, got, tc.want)
+		}
+		if fr.Verdict != report.Pass || fileSHA(t, path) != sum || len(tr.all()) != 0 {
+			t.Errorf("command %q: %s, file changed %v, tools %v", tc.command, fr.Verdict, fileSHA(t, path) != sum, tr.all())
+		}
+	}
+}
+
+// Review C17, guarantee 7: the attribute-name predicate is tested on every
+// platform with hostile names, including the namespaces the filesystem test
+// above cannot set without privileges.
+func TestInNamespaceHostileNames(t *testing.T) {
+	user := []string{"user."}
+	apple := []string{"com.apple."}
+	both := []string{"user.", "com.apple."}
+	cases := []struct {
+		name     string
+		prefixes []string
+		want     bool
+	}{
+		{"", both, false},
+		{"user", user, false},
+		{"user.", user, false},
+		{"user.x", user, true},
+		{"user.x", apple, false},
+		{"USER.x", user, false},
+		{"User.x", user, false},
+		{" user.x", user, false},
+		{"trusted.user.x", user, false},
+		{"trusted.x", both, false},
+		{"security.selinux", both, false},
+		{"security.capability", both, false},
+		{"system.posix_acl_access", both, false},
+		{"com.apple.quarantine", apple, true},
+		{"com.apple.quarantine", user, false},
+		{"com.apple.", apple, false},
+		{"com.apple", apple, false},
+		{"com.applex.y", apple, false},
+		{"COM.APPLE.quarantine", apple, false},
+		{"local.com.apple.x", apple, false},
+		{"user\x00.x", user, false},
+		{"\x00user.x", user, false},
+		{"\nuser.x", user, false},
+		{"user.x\n", user, true},
+		{"user.\x00", user, true},
+		{"user.x", nil, false},
+		{"user.x", []string{""}, false},
+		{"", []string{""}, false},
+	}
+	for _, tc := range cases {
+		if got := inNamespace(tc.name, tc.prefixes); got != tc.want {
+			t.Errorf("inNamespace(%q, %q) = %v, want %v", tc.name, tc.prefixes, got, tc.want)
+		}
+	}
+	// The live prefixes: security labels and the trusted namespace are
+	// outside on every platform, and nothing matches where amuxify strips
+	// no attributes at all.
+	for _, n := range []string{"security.selinux", "trusted.amuxifytest", "system.nfs4_acl", "", "user", "com.apple"} {
+		if inNamespace(n, xattrPrefixes()) {
+			t.Errorf("%q counted as removable on %s", n, runtime.GOOS)
+		}
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		if !inNamespace("com.apple.quarantine", xattrPrefixes()) || inNamespace("user.x", xattrPrefixes()) {
+			t.Error("darwin prefixes wrong")
+		}
+	case "linux", "freebsd":
+		if !inNamespace("user.x", xattrPrefixes()) || inNamespace("com.apple.quarantine", xattrPrefixes()) {
+			t.Error("linux prefixes wrong")
+		}
+	default:
+		if xattrPrefixes() != nil {
+			t.Errorf("unexpected prefixes on %s", runtime.GOOS)
+		}
+	}
+}
