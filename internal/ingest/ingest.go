@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -74,6 +75,14 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 		return nil, err
 	}
 	inputRoot, outRoot := in.Remuxer.Roots(abs, fi.IsDir())
+	// The scan root is the tree quarantine mirrors. For a single file it is
+	// the file's directory, as in scan.ScanPath; the file itself would make
+	// the mirrored path "." and the quarantine destination the quarantine
+	// root, which can never be a file.
+	scanRoot := abs
+	if !fi.IsDir() {
+		scanRoot = filepath.Dir(abs)
+	}
 	paths, err := scan.Walk(abs)
 	if err != nil {
 		return nil, err
@@ -83,7 +92,7 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		fr := in.IngestFile(ctx, p, abs, inputRoot, outRoot)
+		fr := in.IngestFile(ctx, p, scanRoot, inputRoot, outRoot)
 		if in.Progress != nil {
 			in.Progress(fr)
 		}

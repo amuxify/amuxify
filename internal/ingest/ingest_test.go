@@ -1709,3 +1709,57 @@ func in0(t *testing.T, r *exec.Runner) *Ingester {
 	in, _ := newIngester(t, &exec.Runner{Timeout: r.Timeout}, mustProfile(t, "homelab"))
 	return in
 }
+
+// A single blocked file given as the ingest root is quarantined under the
+// quarantine directory by its base name, the way scan.ScanPath does it. The
+// Sonarr and Radarr adapters always hand over one file, so this is the path
+// every arr quarantine takes (review C1).
+func TestIngestSingleFileRootQuarantines(t *testing.T) {
+	noTools(t)
+	for _, name := range []string{"x.url", "empty.mkv", "movie‮vkm.mkv"} {
+		t.Run(name, func(t *testing.T) {
+			body := "[InternetShortcut]\nURL=http://x\n"
+			if strings.HasSuffix(name, ".mkv") {
+				body = ""
+			}
+			src := write(t, filepath.Join(t.TempDir(), name), body)
+			q := filepath.Join(t.TempDir(), "quarantine")
+			in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+			in.Scanner.Quarantine = q
+			in.RemoveBlockedSidecars = true
+			in.apply(t)
+			res, err := in.IngestPath(context.Background(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%d results", len(res))
+			}
+			fr := res[0]
+			dest := filepath.Join(q, name)
+			f, ok := finding(fr, scan.CodeQuarantined)
+			if !ok || f.Severity != report.Block || f.Message != "moved to "+dest {
+				t.Fatalf("QUARANTINED finding %+v ok=%v, want BLOCK moved to %s (%v)", f, ok, dest, codes(fr))
+			}
+			if fr.Verdict != report.Block {
+				t.Errorf("verdict %s", fr.Verdict)
+			}
+			if _, err := os.Lstat(dest); err != nil {
+				t.Errorf("not in quarantine: %v", err)
+			}
+			if _, err := os.Lstat(src); err == nil {
+				t.Error("source still in place")
+			}
+			if fi, err := os.Lstat(q); err != nil || !fi.IsDir() {
+				t.Errorf("quarantine root is not a directory: %v", err)
+			}
+			// A quarantined sidecar is never also removed by the cleaner.
+			if fr.Has(clean.CodeSidecarRemove) || fr.Has(clean.CodeCleanFail) {
+				t.Errorf("cleaner touched a quarantined file: %v", codes(fr))
+			}
+			if got := tr.all(); len(got) != 0 {
+				t.Errorf("tools ran: %v", got)
+			}
+		})
+	}
+}

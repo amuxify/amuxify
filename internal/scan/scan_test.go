@@ -1124,3 +1124,48 @@ func TestCorpusVerdicts(t *testing.T) {
 		}
 	}
 }
+
+// A caller that hands the file itself as the scan root, or a root the file
+// does not sit under, still gets the file placed under the quarantine
+// directory by its base name. The destination is never the quarantine root
+// itself, so the move can never be refused as "outside" or clobber the
+// directory (review C1).
+func TestQuarantineWithFileAsRootUsesBaseName(t *testing.T) {
+	noTools(t)
+	q := filepath.Join(t.TempDir(), "quarantine")
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	for _, root := range []string{"file", "unrelated", "empty", "dot"} {
+		t.Run(root, func(t *testing.T) {
+			src := write(t, filepath.Join(t.TempDir(), "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			var r string
+			switch root {
+			case "file":
+				r = src
+			case "unrelated":
+				r = t.TempDir()
+			case "empty":
+				r = ""
+			case "dot":
+				r = "."
+			}
+			res := s.ScanFile(context.Background(), src, r)
+			fr := res.File
+			expect(t, fr, report.Block, CodeSidecarBlocked)
+			dest := filepath.Join(q, "x.url")
+			requireQuarantineFinding(t, fr, report.Block, "moved to "+dest)
+			if b, err := os.ReadFile(dest); err != nil || !strings.Contains(string(b), "InternetShortcut") {
+				t.Fatalf("quarantined copy at %s: %v", dest, err)
+			}
+			if _, err := os.Lstat(src); err == nil {
+				t.Fatal("source still present after quarantine")
+			}
+			if fi, err := os.Lstat(q); err != nil || !fi.IsDir() {
+				t.Fatalf("quarantine root is not a directory: %v", err)
+			}
+			if err := os.Remove(dest); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

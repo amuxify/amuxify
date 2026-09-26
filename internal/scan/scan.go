@@ -554,10 +554,18 @@ func (s *Scanner) polyglot(path string, size int64) string {
 
 func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	rel, err := filepath.Rel(root, fr.Path)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "" || rel == "." || strings.HasPrefix(rel, "..") {
+		// A caller that hands the file itself as the root, or a root the
+		// file does not sit under, still gets the file placed under the
+		// quarantine directory by its base name; the destination is never
+		// the quarantine root itself.
 		rel = filepath.Base(fr.Path)
 	}
 	dest := filepath.Join(s.Quarantine, rel)
+	if dest == filepath.Clean(s.Quarantine) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
+		return
+	}
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
 	// elsewhere (guarantee 4).
