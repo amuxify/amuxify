@@ -25,8 +25,21 @@ All notable changes to amuxify will be documented in this file.
   compatibility policy.
 - A named test for every guarantee in docs/safety.md, and integration tests over
   the fixture corpus that skip when tools are missing and fail in CI.
+- Hardening: every directory in a quarantine or output path is checked for
+  symlinks before a file is placed under it; the tools run with a UTF-8 locale
+  so that their output is read the same everywhere; decode verification checks
+  the streams ffprobe reported rather than a fixed set; cleaning an MP4 twice
+  leaves it unchanged; a tool named by a `tools.*` override must be executable
+  or `doctor` reports it; a cancelled or timed-out run reports the cancellation
+  as such instead of a tool failure; `amuxify help` lists the global flags;
+  `ingest` skips a symlink with a warning and never follows it.
+- The terminal report escapes control characters (other than tab) and Unicode
+  bidirectional, zero-width and line separator controls in paths, messages,
+  details and the hook adapters' own lines as `\xNN` or `\uNNNN`, so a file
+  name cannot forge or overwrite a line. The JSON report carries the raw value.
 
 ### Changed
+
 
 - JSON: `started` and `finished` are UTC with whole seconds; `files`, `findings`
   and `errors` are `[]` rather than absent or `null`; `profile` is always present.
@@ -37,6 +50,22 @@ All notable changes to amuxify will be documented in this file.
 ### Fixed
 
 - The `--timeout` help text listed the wrong probe default.
+- Review fixes. An in-place rebuild places its output through the same
+  no-clobber path as every other write and never overwrites a file at the
+  destination. An `ingest` run whose root is a single file quarantines that
+  file correctly. A quarantine move across devices copies the file safely
+  instead of failing or leaving two copies. A directory that cannot be read
+  fails the run instead of being silently skipped. A hook run
+
+  under `--json` writes exactly one JSON document to stdout and its own log
+  lines to stderr, reports an interruption on stderr, and refuses a positional
+  argument the adapter does not take, with a hint when a directory was written
+  after a bare `--quarantine`. The NZBGet wrapper honours `AMUXIFY_PROFILE`
+  behind its own `NZBPO_PROFILE` option like the other wrappers. The release
+  workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
+  `Dockerfile.sabnzbd` installs the wrapper under
+  `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
+
 
 ## 0.2.0
 
