@@ -116,7 +116,7 @@ the options in its web interface, which arrive as `NZBPO_PROFILE` and
 ### NZBGET POST-PROCESSING SCRIPT                                          ###
 ##############################################################################
 
-exec amuxify --profile "${NZBPO_PROFILE:-homelab}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"
+exec amuxify --profile "${NZBPO_PROFILE:-${AMUXIFY_PROFILE:-homelab}}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"
 ```
 
 Copy it into the directory that NZBGet's `ScriptDir` setting names and make it
@@ -255,9 +255,12 @@ The global flags apply before the subcommand as everywhere: `--profile`,
 `--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`, `--state-dir`,
 `--allow-root` and `--trace`. `--dry-run` reports what each file would get
 (`ROUTE` under `--verbose` shows the plan) and changes nothing. `AMUXIFY_PROFILE`
-sets the default profile; the wrappers pass it through with `homelab` as the
+sets the default profile; every wrapper passes it through with `homelab` as the
 fallback, so setting that variable in the client's environment is enough to
-switch profiles without editing the script.
+switch profiles without editing the script. The NZBGet wrapper puts its own
+`NZBPO_PROFILE` option first and falls back to `AMUXIFY_PROFILE` and then
+`homelab`, like the others.
+
 
 ## cron or systemd timer over an incoming folder
 
@@ -278,14 +281,16 @@ The `ghcr.io/amuxify/amuxify` image carries the four wrappers under
 
 A hook has to run inside the container that calls it, so the simplest layout is
 a derived image: start from the client's image, add ffmpeg and MKVToolNix, and
-copy the binary and the wrapper out of the amuxify image. This is
-`contrib/hooks/Dockerfile.sabnzbd`:
+copy the binary and the wrapper out of the amuxify image. The wrapper goes
+under `/usr/local/share/amuxify/hooks/`, outside `/config`, so that mounting
+`/config` from the host (which every linuxserver.io image expects) does not
+hide it. This is `contrib/hooks/Dockerfile.sabnzbd`:
 
 ```Dockerfile
 FROM lscr.io/linuxserver/sabnzbd:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
 COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sabnzbd.sh /config/scripts/
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/
 ```
 
 The same four lines work for the other three images; change the base image and
@@ -295,29 +300,35 @@ the wrapper name:
 FROM lscr.io/linuxserver/nzbget:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
 COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-nzbget.sh /config/scripts/
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-nzbget.sh /usr/local/share/amuxify/hooks/
 ```
 
 ```Dockerfile
 FROM lscr.io/linuxserver/sonarr:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
 COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sonarr.sh /config/scripts/
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sonarr.sh /usr/local/share/amuxify/hooks/
 ```
 
 ```Dockerfile
 FROM lscr.io/linuxserver/radarr:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
 COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-radarr.sh /config/scripts/
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-radarr.sh /usr/local/share/amuxify/hooks/
 ```
 
-Then point the client at `/config/scripts/<wrapper>` as described above. If
-you mount `/config` from the host, the mount hides the wrapper copied into the
-image; copy it into the mounted folder instead, from `contrib/hooks/` in the
-release archive. Run the derived container with the `PUID` and `PGID` of the
-user that owns the library, as you would the plain image, so that amuxify
-writes files with the right owner and does not refuse to run as root.
+Then point the client at the wrapper where the image put it. In SABnzbd set
+the scripts folder (Config, Folders) to `/usr/local/share/amuxify/hooks` and
+assign `amuxify-sabnzbd.sh` per category; in NZBGet set `ScriptDir` to
+`/usr/local/share/amuxify/hooks`; in Sonarr and Radarr give the Custom Script
+the path `/usr/local/share/amuxify/hooks/amuxify-sonarr.sh` or
+`amuxify-radarr.sh`. If the client already has a scripts folder under
+`/config` that you want to keep, copy or symlink the wrapper into it from
+the container, or copy it from `contrib/hooks/` in the release archive into the
+mounted folder on the host. Run the derived container with the `PUID` and
+`PGID` of the user that owns the library, as you would the plain image, so
+that amuxify writes files with the right owner and does not refuse to run as
+root.
 
 When you cannot rebuild the client's image, run amuxify as a sidecar: a second
 container with the same paths mounted at the same locations, started by a cron

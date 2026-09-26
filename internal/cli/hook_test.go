@@ -1078,7 +1078,7 @@ func TestContribHooks(t *testing.T) {
 			"### OPTIONS",
 			"#Profile=homelab",
 			"#FailOn=fail",
-			`exec amuxify --profile "${NZBPO_PROFILE:-homelab}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"`,
+			`exec amuxify --profile "${NZBPO_PROFILE:-${AMUXIFY_PROFILE:-homelab}}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"`,
 		}, []string{"eval"}},
 		{"amuxify-sonarr.sh", []string{`exec amuxify --profile "${AMUXIFY_PROFILE:-homelab}" hook sonarr`, "On Import, On Upgrade and On Import Complete"}, []string{"eval"}},
 		{"amuxify-radarr.sh", []string{`exec amuxify --profile "${AMUXIFY_PROFILE:-homelab}" hook radarr`, "On Import and On Upgrade."}, []string{"eval"}},
@@ -1122,6 +1122,51 @@ func TestContribHooks(t *testing.T) {
 			if out, err := osexec.Command(sh, "-n", p).CombinedOutput(); err != nil {
 				t.Errorf("sh -n: %v\n%s", err, out)
 			}
+			// Every wrapper honours AMUXIFY_PROFILE the same way: it is
+			// the fallback for the profile, with homelab behind it, on the
+			// one exec line. NZBGet's own option comes first there.
+			if strings.Count(s, `${AMUXIFY_PROFILE:-homelab}`) != 1 || strings.Count(s, "--profile \"") != 1 {
+				t.Errorf("AMUXIFY_PROFILE is not passed through exactly once:\n%s", s)
+			}
+			execLine := ""
+			for _, l := range strings.Split(s, "\n") {
+				if strings.HasPrefix(l, "exec ") {
+					execLine = l
+				}
+			}
+			if !strings.Contains(execLine, `${AMUXIFY_PROFILE:-homelab}`) {
+				t.Errorf("the exec line does not read AMUXIFY_PROFILE: %q", execLine)
+			}
+			if shErr == nil {
+				// Run the exec line with a fake amuxify on PATH and see
+				// which profile it receives: AMUXIFY_PROFILE from the
+				// environment, and for NZBGet the NZBPO_PROFILE option
+				// first.
+				bin := t.TempDir()
+				fake := filepath.Join(bin, "amuxify")
+				if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, tc := range []struct {
+					env  []string
+					want string
+				}{
+					{nil, "homelab"},
+					{[]string{"AMUXIFY_PROFILE=anime"}, "anime"},
+					{[]string{"AMUXIFY_PROFILE=anime", "NZBPO_PROFILE=strict"}, map[bool]string{true: "strict", false: "anime"}[tc.name == "amuxify-nzbget.sh"]},
+				} {
+					cmd := osexec.Command(sh, p)
+					cmd.Env = append([]string{"PATH=" + bin}, tc.env...)
+					out, err := cmd.Output()
+					if err != nil {
+						t.Fatalf("%v: %v", tc.env, err)
+					}
+					args := strings.Split(strings.TrimSpace(string(out)), "\n")
+					if len(args) < 2 || args[0] != "--profile" || args[1] != tc.want {
+						t.Errorf("%v: the wrapper passed %q, want --profile %s", tc.env, args, tc.want)
+					}
+				}
+			}
 		})
 	}
 	t.Run("Dockerfile.sabnzbd", func(t *testing.T) {
@@ -1129,12 +1174,28 @@ func TestContribHooks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, c := range []string{"FROM lscr.io/linuxserver/sabnzbd:", "COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify", "/usr/share/amuxify/hooks/amuxify-sabnzbd.sh /config/scripts/"} {
+		// The wrapper is installed outside /config, so a bind mount of
+		// /config cannot hide it; the docs say how to point SABnzbd at it.
+		for _, c := range []string{"FROM lscr.io/linuxserver/sabnzbd:", "COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify", "/usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/"} {
 			if !strings.Contains(string(data), c) {
 				t.Errorf("missing %q", c)
 			}
 		}
+		if strings.Contains(string(data), "/config/") {
+			t.Errorf("the image writes under /config, which a bind mount hides:\n%s", data)
+		}
+		docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "hooks.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(docs), string(data)) {
+			t.Error("docs/hooks.md does not show contrib/hooks/Dockerfile.sabnzbd verbatim")
+		}
+		if strings.Contains(string(docs), "/config/scripts/\n") {
+			t.Error("docs/hooks.md still copies a wrapper into /config/scripts/")
+		}
 	})
+
 	t.Run("packaging ships the scripts", func(t *testing.T) {
 		df, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
 		if err != nil {
