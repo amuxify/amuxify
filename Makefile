@@ -61,7 +61,9 @@ release-check: fmt test build
 	@grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' VERSION
 	@grep -q "^## $(VERSION)" CHANGELOG.md || { echo "CHANGELOG.md has no entry for $(VERSION)"; exit 1; }
 	@./bin/$(PROJECT) version | grep -q "$(VERSION)"
+	@grep -q "ghcr.io/amuxify/$(PROJECT):$(VERSION) " contrib/hooks/Dockerfile.sabnzbd || { echo "contrib/hooks/Dockerfile.sabnzbd does not pull the $(VERSION) image"; exit 1; }
 	@echo "Release checks passed for $(VERSION)."
+
 
 clean:
 	rm -rf bin/$(PROJECT) dist "$(FIXTURES)"
