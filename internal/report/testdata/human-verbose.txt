@@ -1,0 +1,20 @@
+WARN  /srv/incoming/movie.mkv
+      WARN  LINK_IN_TAG        1 link(s) in metadata: tag COMMENT: http://x.example
+            tag COMMENT: http://x.example
+      PASS  HASH_OK            2 stream(s) verified identical to source
+      PASS  PLACED             written and verified
+      PASS  ROUTE              remux: #1 default flag false -> true
+      -> /srv/incoming__remuxed/movie.mkv
+      * keep #0 video h264 und: primary video
+      * keep #1 audio aac eng default: language eng
+PASS  /srv/incoming/movie.nfo
+      PASS  SIDECAR_OK         allowed sidecar .nfo
+      PASS  NFO_KODI           Kodi movie nfo
+      PASS  NOTHING_TO_CLEAN   sidecar; nothing to clean
+      PASS  ROUTE              skip: sidecar
+BLOCK /srv/incoming/readme.exe
+      BLOCK SIDECAR_BLOCKED    blocked sidecar type .exe
+      PASS  ROUTE              skip: sidecar
+ERROR /srv/incoming/gone.mkv: lstat /srv/incoming/gone.mkv: no such file or directory
+
+BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1
