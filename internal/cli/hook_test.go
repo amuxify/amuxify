@@ -1083,37 +1083,68 @@ func TestHookArgumentInjection(t *testing.T) {
 		// The same wrapper edit against a SABnzbd that passes seven
 		// parameters yields exactly eight positionals, which the count alone
 		// accepts, and the parser would ingest the stray directory as the
-		// completed one. The directory exists here, as a wrapper's
-		// quarantine directory normally does, and args[1] is the completed
-		// directory, which SABnzbd never puts second. The run is refused
-		// before the environment is read, the hint names the directory, the
-		// block file stays, and nothing is written under the stray
-		// directory or the state directory.
-		qdir := t.TempDir()
-		sab := []string{dir, "n", "c", "1", "tv", "g", "0"}
-		state := t.TempDir()
+		// completed one. The tell is args[1]: SABnzbd never puts a directory
+		// second, so the shifted shape is refused whatever stands at args[0],
+		// an existing directory, a symlink to one, or a path the wrapper has
+		// not created yet. The run is refused before the environment is
+		// read, the hint names the path as written, the block file stays,
+		// nothing is written under the stray directory or its symlink target,
+		// a missing one is not created, and no state quarantine directory
+		// appears. The fixture is this subtest's own copy so a regression
+		// here cannot cascade into later subtests through the shared a.url.
+		fdir := t.TempDir()
+		furl := write(t, filepath.Join(fdir, "a.url"), "x\n")
+		fbefore := tree(t, fdir)
+		sab := []string{fdir, "n", "c", "1", "tv", "g", "0"}
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		missing := filepath.Join(t.TempDir(), "q")
 		for _, tc := range []struct {
 			name string
 			env  []string
+			qdir string
 		}{
-			{"environment form", jobEnv("sabnzbd", dir)},
-			{"argument form", nil},
+			{"existing directory, environment form", jobEnv("sabnzbd", fdir), t.TempDir()},
+			{"existing directory, argument form", nil, t.TempDir()},
+			{"symlink to a directory, environment form", jobEnv("sabnzbd", fdir), link},
+			{"symlink to a directory, argument form", nil, link},
+			{"not yet created, environment form", jobEnv("sabnzbd", fdir), missing},
+			{"not yet created, argument form", nil, missing},
 		} {
+			state := t.TempDir()
 			hookEnv(t, tc.env...)
-			args := append([]string{"--state-dir", state, "hook", "sabnzbd", "--quarantine", "--remove-blocked-sidecars", qdir}, sab...)
+			args := append([]string{"--state-dir", state, "hook", "sabnzbd", "--quarantine", "--remove-blocked-sidecars", tc.qdir}, sab...)
 			code, out, errs := run(t, args...)
 			if code != 2 || out != "" {
 				t.Errorf("%s: exit %d stdout %q stderr %q", tc.name, code, out, errs)
 			}
-			want := "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 8 beginning with " + fmt.Sprintf("%q", qdir) + "; if it was meant as the quarantine directory write --quarantine=" + qdir + "\n"
+			want := "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 8 beginning with " + fmt.Sprintf("%q", tc.qdir) + "; if it was meant as the quarantine directory write --quarantine=" + tc.qdir + "\n"
 			if ls := lines(errs); len(ls) != 1 || !strings.HasSuffix(errs, want) {
 				t.Errorf("%s: stderr %q, want a single line ending %q", tc.name, errs, want)
 			}
-			if _, err := os.Lstat(url); err != nil {
+			if _, err := os.Lstat(furl); err != nil {
 				t.Errorf("%s: the block file was moved or removed", tc.name)
 			}
-			if entries, err := os.ReadDir(qdir); err != nil || len(entries) != 0 {
-				t.Errorf("%s: the stray directory was written to: %v %v", tc.name, entries, err)
+			unchanged(t, fbefore, tree(t, fdir))
+			switch tc.qdir {
+			case missing:
+				if _, err := os.Lstat(missing); err == nil {
+					t.Errorf("%s: the missing directory was created", tc.name)
+				}
+			case link:
+				if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("%s: the symlink was replaced or removed: %v", tc.name, err)
+				}
+				if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+					t.Errorf("%s: the symlink target was written to: %v %v", tc.name, entries, err)
+				}
+			default:
+				if entries, err := os.ReadDir(tc.qdir); err != nil || len(entries) != 0 {
+					t.Errorf("%s: the stray directory was written to: %v %v", tc.name, entries, err)
+				}
 			}
 			if _, err := os.Lstat(filepath.Join(state, "quarantine")); err == nil {
 				t.Errorf("%s: the state quarantine directory was created", tc.name)

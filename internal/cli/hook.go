@@ -182,16 +182,18 @@ func (g *Global) hookTest(ctx context.Context, a hook.Adapter) int {
 // ingest the stray directory as the completed one. The tell is args[1]:
 // SABnzbd's second parameter is the name of the original NZB file, never a
 // directory, while in the shifted shape it is the completed directory. So
-// when a bare --quarantine is set and both args[0] and args[1] are existing
-// directories (checked with Lstat, so a symlink does not count), the eight
-// are refused with the same hint. A genuine eight-parameter call has a file
-// name in args[1] and is not affected.
+// when a bare --quarantine is set and args[1] is an existing directory, the
+// eight are refused with the same hint. The check keys on args[1] alone and
+// asks nothing of args[0], because the wrapper's quarantine directory may
+// be a symlink or may not exist yet, and either would otherwise let the
+// shifted shape through. A genuine eight-parameter call has a file name in
+// args[1] and is not affected.
 func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
 	bare := o.quarantine.set && o.quarantine.dir == ""
 	switch {
 	case len(args) == 0:
 		return ""
-	case a == hook.SABnzbd && len(args) == 8 && bare && isDir(args[0]) && isDir(args[1]):
+	case a == hook.SABnzbd && len(args) == 8 && bare && isDir(args[1]):
 		// Refused below: a directory shifted in front of seven parameters.
 	case a == hook.SABnzbd && (len(args) == 7 || len(args) == 8):
 		return ""
@@ -208,10 +210,11 @@ func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
 	return msg
 }
 
-// isDir reports whether path is an existing directory itself, not a symlink
-// to one.
+// isDir reports whether path names an existing directory, following a
+// symlink to one, since a directory reached through a symlink is still a
+// directory SABnzbd would never pass as its second parameter.
 func isDir(path string) bool {
-	fi, err := os.Lstat(path)
+	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
 }
 
