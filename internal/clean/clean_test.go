@@ -147,7 +147,7 @@ func TestXattrPrefixesPerGOOS(t *testing.T) {
 	}
 }
 
-// Guarantee 10: only the listed xattr namespaces are removed.
+// Guarantee 7: only the listed xattr namespaces are removed.
 func TestStripXattrsOnlyListedNamespaces(t *testing.T) {
 	noTools(t)
 	var keep, remove string
@@ -236,7 +236,7 @@ func TestStripXattrsOnlyListedNamespaces(t *testing.T) {
 	}
 }
 
-// Guarantee 9: blocked sidecars are removed only on explicit request.
+// Sidecar policy: blocked sidecars are removed only on explicit request.
 func TestBlockedSidecarRemovedOnlyWithFlag(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -527,7 +527,7 @@ func TestMp4RewriteRefusesSwappedTemp(t *testing.T) {
 	}
 }
 
-// Guarantee 6 and 5: the MP4 rewrite goes through a temp file, keeps the
+// Guarantees 2, 5 and 6: the MP4 rewrite goes through a temp file, keeps the
 // stream bytes and the file identity, and removes the purchase atoms.
 func TestMp4RewriteRemovesProvenance(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge)

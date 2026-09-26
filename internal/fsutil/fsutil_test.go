@@ -267,7 +267,8 @@ func TestReplaceInPlaceNeverWritesThroughSymlink(t *testing.T) {
 	}
 }
 
-// Guarantee 3: hard links are counted so callers can refuse to break them.
+// Hard-link policy: hard links are counted so callers can refuse to break
+// them, because a hard-linked file is never edited in place.
 func TestNlinkCountsHardLinks(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.mkv")
@@ -402,7 +403,7 @@ func TestAbsCleansTraversal(t *testing.T) {
 	}
 }
 
-// Guarantee 4: output and quarantine placement never leave the tree the
+// Guarantee 3: output and quarantine placement never leave the tree the
 // user named. MkdirAllUnder creates the requested path component by
 // component and refuses any planted symlink on the way.
 func TestMkdirAllUnderCreatesDeepPaths(t *testing.T) {

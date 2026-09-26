@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -45,7 +46,7 @@ func asUser(t *testing.T, uid int) {
 	t.Cleanup(func() { fsutil.Geteuid = orig })
 }
 
-// Guarantee 8: modifying commands refuse to run as root. That includes
+// Guarantee 10: modifying commands refuse to run as root. That includes
 // ingest and every hook adapter, which is where a container running as root
 // would hit it, so the rows below cover each of them with the flags that
 // delete or move files. Nothing under the directory may change and no
@@ -499,7 +500,8 @@ func TestExitCodesFollowVerdict(t *testing.T) {
 	}
 }
 
-// Guarantee 8: --dry-run changes nothing anywhere.
+// Dry run: --dry-run changes nothing anywhere, under every command and
+// with every flag that would otherwise move or delete a file.
 func TestDryRunTouchesNothing(t *testing.T) {
 	testutil.Stubs(t)
 	asUser(t, 1000)
@@ -553,6 +555,11 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 	if escaped == p || strings.ContainsAny(escaped, "\x1b\r\n‮") {
 		t.Fatalf("test setup: %q", escaped)
 	}
+	// A raw newline or carriage return in the name would start a line, or
+	// what the terminal shows as a line, with a verdict followed by the
+	// planted word instead of a path. A genuine verdict line has the
+	// absolute path after the verdict, so this cannot match one.
+	forged := regexp.MustCompile(`^(PASS|BLOCK) +forged`)
 	for _, args := range [][]string{
 		{"scan", dir},
 		{"--verbose", "scan", dir},
@@ -572,8 +579,10 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 					t.Errorf("%v: raw %U in %q", args, r, l)
 				}
 			}
-			if strings.HasPrefix(l, "PASS  /forged") || strings.HasPrefix(l, "BLOCK /forged") {
-				t.Errorf("%v: forged verdict line %q", args, l)
+			for _, part := range strings.Split(l, "\r") {
+				if forged.MatchString(part) {
+					t.Errorf("%v: forged verdict line %q", args, l)
+				}
 			}
 		}
 		if !strings.Contains(out, " "+escaped+"\n") {
