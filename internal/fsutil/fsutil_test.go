@@ -231,6 +231,48 @@ func TestReplaceInPlacePreservesModeAndMtime(t *testing.T) {
 	}
 }
 
+// CopyIdentity carries mode and mtime from one file to another without
+// moving either, so a verified output can take its source's identity before
+// it is placed under a new name (guarantee 6).
+func TestCopyIdentityCopiesModeAndMtime(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "movie.mp4")
+	out := filepath.Join(dir, "movie.mkv")
+	writeFile(t, src, "source", 0o644)
+	writeFile(t, out, "output", 0o600)
+	if err := os.Chmod(src, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2019, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := os.Chtimes(src, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyIdentity(src, out); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode: got %o want 640", fi.Mode().Perm())
+	}
+	if got := fi.ModTime().Truncate(time.Second); !got.Equal(stamp) {
+		t.Fatalf("mtime: got %v want %v", got, stamp)
+	}
+	// Neither file moved or changed content.
+	if readFile(t, src) != "source" || readFile(t, out) != "output" {
+		t.Fatal("CopyIdentity touched file content")
+	}
+	// A missing source is an error and leaves the target alone.
+	if err := CopyIdentity(filepath.Join(dir, "missing"), out); err == nil {
+		t.Fatal("CopyIdentity accepted a missing source")
+	}
+	if fi2, _ := os.Stat(out); fi2 == nil || fi2.Mode().Perm() != fi.Mode().Perm() {
+		t.Fatal("target changed after a failed CopyIdentity")
+	}
+}
+
 // ReplaceInPlace is only for files that exist; a missing destination must not
 // turn into a plain create, because the caller never verified against it.
 func TestReplaceInPlaceRefusesMissingDest(t *testing.T) {

@@ -1674,7 +1674,10 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if err := os.Rename(src, path); err != nil {
 			t.Fatal(err)
 		}
-		victim := write(t, filepath.Join(t.TempDir(), "victim.mp4"), "victim bytes")
+		// The victim is real media so a remuxer that followed the link
+		// would succeed; the guard must refuse instead.
+		victim := testutil.Copy(t, "purchased.mp4")
+		victimBefore := fileSHA(t, victim)
 		sc := in0(t, r).Scanner.ScanFile(context.Background(), path, dir)
 		if sc.Info == nil || sc.File.Verdict >= report.Fail {
 			t.Fatalf("scan: %v", codes(sc.File))
@@ -1685,18 +1688,22 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if err := os.Symlink(victim, path); err != nil {
 			t.Skipf("symlink: %v", err)
 		}
-		in := in0(t, r)
+		in, tr := newIngester(t, &exec.Runner{Timeout: r.Timeout}, mustProfile(t, "homelab"))
 		fr := in.Remuxer.RemuxScanned(context.Background(), sc, dir, dir+"__remuxed")
-		if b, _ := os.ReadFile(victim); string(b) != "victim bytes" {
-			t.Errorf("symlink target changed: %q", b)
+		if fileSHA(t, victim) != victimBefore {
+			t.Error("symlink target changed")
 		}
-		if fr.Verdict < report.Fail {
-			t.Logf("remuxer result on swapped path: %s %v", fr.Verdict, codes(fr))
+		if fr.Verdict < report.Fail || !fr.Has(remux.CodeRemuxFail) || fr.Has(remux.CodePlaced) || fr.Output != "" {
+			t.Errorf("remuxer result on swapped path: %s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+		}
+		if got := tr.all(); len(got) != 0 {
+			t.Errorf("tools ran against the swapped path: %v", got)
 		}
 		if _, err := os.Lstat(filepath.Join(dir, "a.mkv")); err == nil {
-			if fi, _ := os.Lstat(victim); fi == nil || fi.Size() != int64(len("victim bytes")) {
-				t.Error("victim rewritten")
-			}
+			t.Error("output placed for a swapped source")
+		}
+		if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("the planted symlink was replaced: %v", err)
 		}
 		if got := leftovers(t, dir); len(got) != 0 {
 			t.Errorf("temp files left: %v", got)

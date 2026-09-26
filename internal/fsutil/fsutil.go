@@ -53,21 +53,31 @@ func PlaceNoClobber(tmp, dest string) error {
 	return os.Rename(tmp, dest)
 }
 
-// ReplaceInPlace renames tmp over dest, preserving dest's ownership, mode and
-// modification time. Used only by --in-place after verification passed.
-func ReplaceInPlace(tmp, dest string) error {
-	fi, err := os.Stat(dest)
+// CopyIdentity gives path the mode, ownership and modification time of the
+// file at from, so an output written beside its source can carry the
+// source's identity before it is placed. Ownership is best effort: chown
+// fails for a non-root user changing the owner, which is fine.
+func CopyIdentity(from, path string) error {
+	fi, err := os.Stat(from)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, fi.Mode().Perm()); err != nil {
+	if err := os.Chmod(path, fi.Mode().Perm()); err != nil {
 		return err
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		// Best effort: chown fails for non-root users changing owner, which is fine.
-		_ = os.Chown(tmp, int(st.Uid), int(st.Gid))
+		_ = os.Chown(path, int(st.Uid), int(st.Gid))
 	}
-	_ = os.Chtimes(tmp, time.Now(), fi.ModTime())
+	_ = os.Chtimes(path, time.Now(), fi.ModTime())
+	return nil
+}
+
+// ReplaceInPlace renames tmp over dest, preserving dest's ownership, mode and
+// modification time. Used only by --in-place after verification passed.
+func ReplaceInPlace(tmp, dest string) error {
+	if err := CopyIdentity(dest, tmp); err != nil {
+		return err
+	}
 	return os.Rename(tmp, dest)
 }
 
