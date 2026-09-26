@@ -24,7 +24,9 @@ SECURITY.md.
    Test: `fsutil.TestPlaceNoClobberRefusesExisting`, `remux.TestOutputExistsBeforeAnyTool`.
 2. **Temp, fsync, rename.** Output is written as `.amuxify-<name>.tmp` in the
    destination directory, fsynced, then renamed. Same filesystem always; a
-   crash leaves at most a temp file, which the next run ignores.
+   crash leaves at most a temp file, which the next run ignores. Only a name
+   of exactly that shape is ignored: a file that borrows the `.amuxify-`
+   prefix without the `.tmp` suffix is scanned like any other.
    Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`.
 3. **Symlinks are never followed.** Each symlink is reported `WARN SYMLINK` and
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
@@ -68,7 +70,8 @@ or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
 
 ## What scan looks at
 
-Filename: bidi and zero-width characters, double extensions, executable bit.
+Filename: bidi controls and every other Unicode format character (the
+zero-width and other invisible ones), double extensions, executable bit.
 Container: magic bytes versus extension, executable or archive signatures in the
 first and last MiB (polyglots), truncated MP4, ffprobe and `mkvmerge -J`
 parseability with warnings tolerated. Streams: no video, no audio, unknown or

@@ -362,6 +362,11 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 	if *tier != "" && *tier != "quick" && *tier != "full" && *tier != "none" {
 		return g.usageErr("scan: --verify must be quick, full or none")
 	}
+	if !g.DryRun {
+		if msg := checkQuarantineRoots("scan", *quarantine, fs.Args()); msg != "" {
+			return g.usageErr("%s", msg)
+		}
+	}
 	t, err := g.setup(*quarantine != "")
 	if err != nil {
 		return g.usageErr("%v", err)

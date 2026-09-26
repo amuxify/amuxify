@@ -2042,3 +2042,87 @@ func TestDryRunPredictsDestinationCollision(t *testing.T) {
 		t.Errorf("live run did not place %s: %v", liveDest, err)
 	}
 }
+
+// A quarantine directory inside the ingested tree is never walked: the
+// BLOCK file is moved once, a second run neither lists nor touches it, and
+// the rest of the tree is still processed. A root that is the quarantine
+// directory or lies inside it is refused before anything runs, whichever
+// way the directory is written.
+func TestIngestQuarantineInsideTree(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	tree := filepath.Join(root, "downloads")
+	url := write(t, filepath.Join(tree, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n")
+	write(t, filepath.Join(tree, "sub", "keep.nfo"), "nfo\n")
+	write(t, filepath.Join(tree, "ok.nfo"), "nfo\n")
+	// The ".." spelling is built by string concatenation: filepath.Join
+	// would clean it away before IngestPath saw it.
+	q := tree + "/sub/../quarantine/"
+	in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+	in.Scanner.Quarantine = q
+	in.RemoveBlockedSidecars = true
+	in.apply(t)
+	listed := func(res []report.FileResult) string {
+		var out []string
+		for _, r := range res {
+			rel, _ := filepath.Rel(tree, r.Path)
+			out = append(out, filepath.ToSlash(rel))
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
+	}
+	res, err := in.IngestPath(context.Background(), tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(res); got != "ok.nfo,sub/keep.nfo,sub/x.url" {
+		t.Fatalf("first run listed %s", got)
+	}
+	dest := filepath.Join(tree, "quarantine", "sub", "x.url")
+	fi, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatalf("not quarantined: %v", err)
+	}
+	if _, err := os.Lstat(url); err == nil {
+		t.Fatal("source still in place")
+	}
+	res, err = in.IngestPath(context.Background(), tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(res); got != "ok.nfo,sub/keep.nfo" {
+		t.Fatalf("second run listed %s; the quarantine directory was walked", got)
+	}
+	if now, err := os.Lstat(dest); err != nil || !os.SameFile(fi, now) {
+		t.Errorf("the quarantined file was touched: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, "quarantine", "quarantine")); err == nil {
+		t.Error("a nested quarantine directory was created")
+	}
+	before := len(tr.all())
+	for _, r := range []string{filepath.Join(tree, "quarantine"), filepath.Join(tree, "quarantine") + "/", filepath.Join(tree, "quarantine", "sub"), dest, filepath.Join(tree, "quarantine") + "/sub/../sub"} {
+		res, err := in.IngestPath(context.Background(), r)
+		if err == nil || !strings.Contains(err.Error(), "quarantine directory") {
+			t.Errorf("root %s: got %v, want a refusal", r, err)
+		}
+		if len(res) != 0 {
+			t.Errorf("root %s: %d results", r, len(res))
+		}
+	}
+	if got := tr.all(); len(got) != before {
+		t.Errorf("tools ran for a refused root: %v", got[before:])
+	}
+	if now, err := os.Lstat(dest); err != nil || !os.SameFile(fi, now) {
+		t.Errorf("a refused run touched the quarantined file: %v", err)
+	}
+	// The relative spelling names the same directory.
+	t.Chdir(tree)
+	in.Scanner.Quarantine = "quarantine"
+	if _, err := in.IngestPath(context.Background(), "quarantine/sub"); err == nil || !strings.Contains(err.Error(), "lies inside the quarantine directory") {
+		t.Errorf("relative root: got %v", err)
+	}
+	res, err = in.IngestPath(context.Background(), ".")
+	if err != nil || listed(res) != "ok.nfo,sub/keep.nfo" {
+		t.Errorf("relative run: %v listed %s", err, listed(res))
+	}
+}
