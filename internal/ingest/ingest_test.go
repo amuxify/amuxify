@@ -1565,17 +1565,19 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if len(res) != 1 || res[0].Path != dst {
 			t.Fatalf("results %+v", res)
 		}
-		if res[0].Has(scan.CodeMkvError) && res[0].Has(remux.CodeRefused) {
-			// The scan refused the file and nothing was written; that is the
-			// safe outcome, but the file should have been cleaned.
-			sameSnapshot(t, before, snapshot(t, dir))
-			if fileSHA(t, dst) != sum {
-				t.Fatal("refused file changed")
-			}
-			t.Skip("mkvmerge cannot open a path with non-ASCII characters under the C locale that cleanEnv in internal/exec/exec.go sets (LC_ALL=C, LANG=C); it truncates the path at the first non-ASCII byte and reports an open error, so every file under such a directory is refused; internal/exec/exec.go must pass a UTF-8 locale (for example C.UTF-8 or the caller's LANG when it is UTF-8)")
+		// The tools run under a UTF-8 locale, so the path reaches mkvmerge
+		// whole and the file is cleaned like any other conforming file.
+		if res[0].Has(scan.CodeMkvError) || res[0].Has(remux.CodeRefused) {
+			t.Fatalf("file under a non-ASCII directory was refused: %v", codes(res[0]))
 		}
 		if rt, _ := route(t, res[0]); rt != RouteClean || res[0].Verdict > report.Warn {
 			t.Errorf("%s %s %v", rt, res[0].Verdict, codes(res[0]))
+		}
+		if fileSHA(t, dst) == "" || len(snapshot(t, dir)) != len(before) {
+			t.Fatalf("tree changed shape: %v", snapshot(t, dir))
+		}
+		if sum == "" {
+			t.Fatal("unreadable source")
 		}
 	})
 	t.Run("original language with shell metacharacters", func(t *testing.T) {
