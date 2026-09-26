@@ -63,7 +63,7 @@ exactly what a script receives.
           "message": "remux: #1 default flag false -\u003e true"
         }
       ],
-      "output": "/srv/incoming__remuxed/movie.mkv",
+      "output": "/srv/incoming/movie.mkv",
       "actions": [
         "keep #0 video h264 und: primary video",
         "keep #1 audio aac eng default: language eng"
