@@ -98,7 +98,9 @@ PASS     tmpdir       /tmp
 WARN: usable with warnings
 ```
 
-Exit code 2 means a required tool is missing or too old.
+Exit code 0 means amuxify is usable, even when optional tools are missing and
+reported as `WARN`. Exit code 2 means a required tool is missing or too old, or
+the active profile is invalid.
 
 ## State directory
 

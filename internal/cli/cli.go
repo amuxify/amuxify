@@ -106,6 +106,7 @@ Global flags (before or after the command):
   --verbose, --quiet, --timeout <dur>, --state-dir <dir>, --allow-root, --trace
 
 Exit status: 0 PASS, 1 WARN, 2 usage error, 3 FAIL, 4 BLOCK, 130 interrupted.
+doctor exits 0 when usable (warnings shown), 2 when required tools are missing.
 Tool paths can be overridden with AMUXIFY_FFMPEG, AMUXIFY_MKVMERGE, and so on.
 `
 
@@ -280,6 +281,11 @@ func (g *Global) doctor(ctx context.Context, args []string) int {
 	}
 	r := &exec.Runner{Timeout: 30 * time.Second}
 	checks, worst := doctor.Run(ctx, r, g.Profile, g.StateDir)
+	// doctor answers "can amuxify run here?". Optional tools that are absent
+	// are reported as WARN but do not fail the check, so `amuxify doctor &&
+	// ...` works on a plain install. Missing or too-old required tools and an
+	// invalid profile exit 2.
+	usable := worst <= report.Warn
 	if g.JSON {
 		s := report.NewSummary("amuxify", Version, "doctor", g.Profile)
 		for _, c := range checks {
@@ -287,16 +293,23 @@ func (g *Global) doctor(ctx context.Context, args []string) int {
 			fr.Add(report.Finding{Code: strings.ToUpper(c.Name), Severity: c.Status, Message: c.Detail})
 			s.Append(fr)
 		}
-		return g.emit(s)
+		g.emit(s)
+		if usable {
+			return 0
+		}
+		return report.ExitCode(worst)
 	}
 	fmt.Fprintf(g.stdout, "amuxify %s\n%s", Version, doctor.Format(checks))
-	switch worst {
-	case report.Pass:
+	switch {
+	case worst == report.Pass:
 		fmt.Fprintln(g.stdout, "\nOK: ready")
-	case report.Warn:
+	case usable:
 		fmt.Fprintln(g.stdout, "\nWARN: usable with warnings")
 	default:
 		fmt.Fprintln(g.stdout, "\nMISSING: required tools or settings are missing")
+	}
+	if usable {
+		return 0
 	}
 	return report.ExitCode(worst)
 }
