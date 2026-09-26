@@ -18,4 +18,4 @@ var decodedHash = func(ctx context.Context, v *verify.Verifier, path string, s p
 
 // seamWired reports whether sameStream calls streamHash and decodedHash.
 // The tests that replace the seams skip until the remuxer is wired to them.
-var seamWired = false
+var seamWired = true
