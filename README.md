@@ -47,8 +47,10 @@ pass per file, in place. Every file under each path is scanned first. A video fi
 is already a Matroska file whose tracks, flags, attachments and chapters match the
 profile is cleaned in place with mkvpropedit; any other video file is rebuilt into a
 verified MKV that replaces the original. Audio and subtitle files are cleaned in place.
-Sidecars are scanned; with `--remove-blocked-sidecars` blocked ones are deleted. Files
-that scan as FAIL or BLOCK are never modified. There is no `--output` and no
+Sidecars are scanned; with `--remove-blocked-sidecars` blocked ones are deleted. A file
+that scans as BLOCK is never modified; a file that scans as FAIL is left alone as well
+unless `--force` asks for the rebuild anyway. There is no `--output` and no
+
 `--in-place` flag: ingest is in place by definition; `remux --output` is the
 non-destructive path and `--dry-run` shows the plan.
 
