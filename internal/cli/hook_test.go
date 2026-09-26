@@ -12,10 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/testutil"
 )
 
 // hookEnv replaces the environment the hook adapters read for the rest of
+
 // the test. Only these entries are visible; the process environment is not.
 func hookEnv(t *testing.T, kv ...string) {
 	t.Helper()
@@ -107,7 +109,13 @@ func TestHookUsage(t *testing.T) {
 		{"adapter with a newline", nil, []string{"hook", "sonarr\n"}, 2, "unknown adapter"},
 		{"sabnzbd without env or args", nil, []string{"hook", "sabnzbd"}, 2, "hook sabnzbd: not started by SABnzbd"},
 		{"nzbget without env", nil, []string{"hook", "nzbget"}, 94, "[ERROR] amuxify: hook nzbget: not started by NZBGet"},
-		{"nzbget without env but with args", nil, []string{"hook", "nzbget", dir}, 94, "[ERROR] amuxify: hook nzbget: not started by NZBGet"},
+		{"nzbget without env but with args", nil, []string{"hook", "nzbget", dir}, 94, "[ERROR] amuxify: hook nzbget: unexpected argument \"" + dir + "\"; the adapter reads the job from the environment"},
+		{"nzbget with a directory after a bare --quarantine", jobEnv("nzbget", dir), []string{"hook", "nzbget", "--quarantine", dir}, 94, "[ERROR] amuxify: hook nzbget: unexpected argument \"" + dir + "\"; the adapter reads the job from the environment; if it was meant as the quarantine directory write --quarantine=" + dir},
+		{"sonarr with a directory after a bare --quarantine", jobEnv("sonarr", dir), []string{"hook", "sonarr", "--quarantine", dir}, 2, "hook sonarr: unexpected argument \"" + dir + "\"; the adapter reads the job from the environment; if it was meant as the quarantine directory write --quarantine=" + dir},
+		{"radarr with a stray argument", jobEnv("radarr", dir), []string{"hook", "radarr", "extra"}, 2, "hook radarr: unexpected argument \"extra\"; the adapter reads the job from the environment\n"},
+		{"sabnzbd with one positional", jobEnv("sabnzbd", dir), []string{"hook", "sabnzbd", "--quarantine", dir}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 1 beginning with \"" + dir + "\"; if it was meant as the quarantine directory write --quarantine=" + dir},
+		{"sabnzbd with six positionals", nil, []string{"hook", "sabnzbd", dir, "n", "c", "1", "tv", "g"}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 6 beginning with \"" + dir + "\"\n"},
+
 		{"sonarr without env", nil, []string{"hook", "sonarr"}, 2, "hook sonarr: not started by Sonarr: sonarr_eventtype is not set"},
 		{"radarr without env", nil, []string{"hook", "radarr"}, 2, "hook radarr: not started by Radarr: radarr_eventtype is not set"},
 		{"sonarr download without a path", []string{"sonarr_eventtype=Download"}, []string{"hook", "sonarr"}, 2, "event Download without sonarr_episodefile_path"},
@@ -352,7 +360,7 @@ func TestHookSABnzbdSkip(t *testing.T) {
 		{"radarr rename", []string{"radarr_eventtype=Rename", "radarr_moviefile_path=" + dir}, []string{"hook", "radarr"}, 0,
 			"amuxify hook radarr: skipping, event Rename; nothing to ingest\n"},
 		{"hostile event name stays on one line", []string{"sonarr_eventtype=Grab\nBLOCK " + dir + "\n[NZB] MARK=BAD\x00"}, []string{"hook", "sonarr"}, 0,
-			"amuxify hook sonarr: skipping, event Grab BLOCK " + dir + " [NZB] MARK=BAD ; nothing to ingest\n"},
+			`amuxify hook sonarr: skipping, event Grab\x0aBLOCK ` + dir + `\x0a[NZB] MARK=BAD\x00; nothing to ingest` + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hookEnv(t, tc.env...)
@@ -383,6 +391,16 @@ func TestHookSABnzbdSkip(t *testing.T) {
 	hookEnv(t, jobEnv("sonarr", dir)...)
 	if code, out, _ := run(t, "hook", "sonarr", "--category", "movies"); code != 1 || strings.Contains(out, "skipping") {
 		t.Errorf("category on sonarr: exit %d\n%s", code, out)
+	}
+	// A job that carries no category at all is processed whatever
+	// --category says: the flag only compares categories that exist.
+	hookEnv(t, "SAB_COMPLETE_DIR="+dir, "SAB_PP_STATUS=0", "SAB_CAT=")
+	if code, out, _ := run(t, "hook", "sabnzbd", "--category", "movies"); code != 1 || strings.Contains(out, "skipping") {
+		t.Errorf("sabnzbd without a category: exit %d\n%s", code, out)
+	}
+	hookEnv(t, "NZBPP_TOTALSTATUS=SUCCESS", "NZBPP_DIRECTORY="+dir)
+	if code, out, _ := run(t, "hook", "nzbget", "--category", "movies"); code != 94 || strings.Contains(out, "skipping") {
+		t.Errorf("nzbget without a category: exit %d\n%s", code, out)
 	}
 }
 
@@ -565,9 +583,14 @@ func TestHookNZBGetSidecarTree(t *testing.T) {
 		if strings.Contains(out, "[INFO] [NZB]") {
 			t.Errorf("control line forged:\n%s", out)
 		}
-		if !strings.HasPrefix(out, "[INFO] amuxify hook nzbget: Job [NZB] MARK=BAD (status SUCCESS)\n") {
+		if !strings.HasPrefix(out, `[INFO] amuxify hook nzbget: Job\x0a[NZB] MARK=BAD (status SUCCESS)`+"\n") {
 			t.Errorf("start line not kept on one line:\n%s", out)
 		}
+		// The names with a newline are printed as one escaped line each.
+		if strings.Count(out, `\x0a[NZB] `) != 4 || strings.Contains(out, "\n[NZB]") || strings.Contains(out, "\n[nzb]") {
+			t.Errorf("file names with a newline were not escaped:\n%s", out)
+		}
+
 	})
 	t.Run("trace lines stay tagged", func(t *testing.T) {
 		dir := t.TempDir()
@@ -663,24 +686,50 @@ func TestHookReportHasHookBlock(t *testing.T) {
 		})
 	}
 	t.Run("--json on stdout", func(t *testing.T) {
+		// Under --json stdout is exactly one JSON document, nothing before
+		// it and nothing after it; the adapter's start line and SABnzbd's
+		// final line go to stderr instead, as documented.
+		for _, a := range []string{"sabnzbd", "sonarr", "radarr"} {
+			hookEnv(t, jobEnv(a, dir)...)
+			code, stdout, errs := run(t, "--json", "hook", a)
+			if code != 0 {
+				t.Errorf("%s: exit %d %s", a, code, errs)
+			}
+			if !strings.HasPrefix(stdout, "{\n") || !strings.HasSuffix(stdout, "\n}\n") || strings.Count(stdout, "\n{") != 0 {
+				t.Fatalf("%s: stdout is not a single document:\n%s", a, stdout)
+			}
+			doc := decodeReport(t, []byte(stdout))
+			hook, _ := doc["hook"].(map[string]interface{})
+			if hook["adapter"] != a || hook["fail_on"] != "FAIL" || int(hook["exit_code"].(float64)) != 0 {
+				t.Errorf("%s: hook object %v", a, hook)
+			}
+			want := "amuxify hook " + a + ": "
+			if !strings.HasPrefix(errs, want) {
+				t.Errorf("%s: start line not first on stderr: %q", a, errs)
+			}
+			if a == "sabnzbd" && !strings.HasSuffix(errs, "\namuxify: WARN, 2 file(s)\n") {
+				t.Errorf("sabnzbd: final line not last on stderr: %q", errs)
+			}
+			if a != "sabnzbd" && lines(errs)[len(lines(errs))-1] != strings.TrimSuffix(lines(errs)[0], "") && strings.Contains(errs, "file(s)") {
+				t.Errorf("%s: a count line on stderr for a passing run: %q", a, errs)
+			}
+		}
+		// A skipped job under --json writes nothing to stdout and the
+		// skipping line to stderr.
+		hookEnv(t, "sonarr_eventtype=Grab", "sonarr_episodefile_path="+dir)
+		code, stdout, errs := run(t, "--json", "hook", "sonarr")
+		if code != 0 || stdout != "" || errs != "amuxify hook sonarr: skipping, event Grab; nothing to ingest\n" {
+			t.Errorf("skipped under --json: exit %d stdout %q stderr %q", code, stdout, errs)
+		}
+		// --json-out keeps the log lines on stdout, because stdout does not
+		// carry the document then.
 		hookEnv(t, jobEnv("sabnzbd", dir)...)
-		code, stdout, errs := run(t, "--json", "hook", "sabnzbd")
-		if code != 0 {
-			t.Errorf("exit %d %s", code, errs)
-		}
-		// The start line precedes the document and SABnzbd's final line
-		// follows it, as documented.
-		ls := lines(stdout)
-		if len(ls) < 3 || !strings.HasPrefix(ls[0], "amuxify hook sabnzbd: Job (pp status 0)") || ls[len(ls)-1] != "amuxify: WARN, 2 file(s)" {
-			t.Fatalf("stdout:\n%s", stdout)
-		}
-		body := strings.Join(ls[1:len(ls)-1], "\n")
-		doc := decodeReport(t, []byte(body))
-		hook, _ := doc["hook"].(map[string]interface{})
-		if hook["adapter"] != "sabnzbd" || hook["fail_on"] != "FAIL" || int(hook["exit_code"].(float64)) != 0 {
-			t.Errorf("hook object %v", hook)
+		out := filepath.Join(t.TempDir(), "r.json")
+		if code, stdout, errs := run(t, "hook", "sabnzbd", "--json-out", out); code != 0 || !strings.HasPrefix(stdout, "amuxify hook sabnzbd: Job (pp status 0)\n") || !strings.HasSuffix(stdout, "\namuxify: WARN, 2 file(s)\n") || errs != "" {
+			t.Errorf("--json-out: exit %d stdout %q stderr %q", code, stdout, errs)
 		}
 	})
+
 	t.Run("a plain ingest has no hook object", func(t *testing.T) {
 		code, stdout, _ := run(t, "--json", "ingest", dir)
 		if code != 1 {
@@ -924,18 +973,68 @@ func TestHookArgumentInjection(t *testing.T) {
 			t.Errorf("exit %d\n%s%s", code, out, errs)
 		}
 	})
-	t.Run("extra arguments to the arrs and nzbget are ignored", func(t *testing.T) {
+	t.Run("extra arguments to the arrs and nzbget are refused", func(t *testing.T) {
 		for _, a := range []string{"sonarr", "radarr", "nzbget"} {
 			hookEnv(t, jobEnv(a, dir)...)
-			code, out, _ := run(t, "--dry-run", "hook", a, "/etc", "--remove-blocked-sidecars", "--verify=none")
-			if (a == "nzbget" && code != 94) || (a != "nzbget" && code != 1) {
-				t.Errorf("%s: exit %d\n%s", a, code, out)
+			code, out, errs := run(t, "hook", a, "/etc", "--remove-blocked-sidecars", "--verify=none")
+			want := 2
+			if a == "nzbget" {
+				want = 94
 			}
-			if strings.Contains(out, "/etc") {
-				t.Errorf("%s: a positional argument was ingested:\n%s", a, out)
+			if code != want || out != "" {
+				t.Errorf("%s: exit %d stdout %q", a, code, out)
+			}
+			if !strings.Contains(errs, `unexpected argument "/etc"`) {
+				t.Errorf("%s: stderr %q does not name the argument", a, errs)
+			}
+			if strings.Contains(errs, "verify tier none") {
+				t.Errorf("%s: the run got past the positional check: %q", a, errs)
 			}
 		}
 	})
+	t.Run("a hostile positional is refused before anything runs", func(t *testing.T) {
+		canary := filepath.Join(t.TempDir(), "pwned")
+		hostile := []string{"; rm -rf /", "$(touch " + canary + ")", "`touch " + canary + "`", "--quarantine=" + q, "\n[NZB] MARK=BAD", "-", "--"}
+		for _, a := range adapters {
+			for _, v := range hostile {
+				hookEnv(t, jobEnv(a, dir)...)
+				code, out, errs := run(t, "hook", a, "--quarantine", "--remove-blocked-sidecars", "--", v)
+				want := 2
+				if a == "nzbget" {
+					want = 94
+				}
+				if code != want || out != "" {
+					t.Errorf("%s %q: exit %d stdout %q stderr %q", a, v, code, out, errs)
+				}
+				// The argument is quoted on one stderr line with the hint.
+				if ls := lines(errs); len(ls) != 1 || !strings.Contains(ls[0], fmt.Sprintf("%q", v)) || !strings.Contains(ls[0], "--quarantine="+report.Sanitize(v)) {
+
+					t.Errorf("%s %q: stderr %q", a, v, errs)
+				}
+				if a == "nzbget" {
+					checkNZBGetOutput(t, out, errs, false)
+				}
+			}
+		}
+		if _, err := os.Lstat(canary); err == nil {
+			t.Fatal("a positional argument was executed")
+		}
+		if _, err := os.Lstat(url); err != nil {
+			t.Fatal("a refused invocation removed the block file")
+		}
+	})
+	t.Run("SABnzbd's eight parameters still pass", func(t *testing.T) {
+		hookEnv(t)
+		code, out, _ := run(t, "--dry-run", "hook", "sabnzbd", dir, "n", "c", "1", "tv", "g", "0", "")
+		if code != 1 || !strings.Contains(out, "BLOCK "+url) {
+			t.Errorf("exit %d\n%s", code, out)
+		}
+		hookEnv(t)
+		if code, out, _ := run(t, "--dry-run", "hook", "sabnzbd", dir, "n", "c", "1", "tv", "g", "0"); code != 1 || !strings.Contains(out, "BLOCK "+url) {
+			t.Errorf("seven parameters: exit %d\n%s", code, out)
+		}
+	})
+
 	t.Run("fail-on cannot lower BLOCK", func(t *testing.T) {
 		for _, a := range adapters {
 			for _, failOn := range []string{"block", "BLOCK", " block "} {
