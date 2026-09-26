@@ -39,4 +39,7 @@ const (
 	CodeUndTrack       = "UND_TRACK"
 	CodeHDR            = "HDR"
 	CodeQuarantined    = "QUARANTINED"
+	CodeNfoKodi        = "NFO_KODI"
+	CodeNfoText        = "NFO_TEXT"
+	CodeLinkInSidecar  = "LINK_IN_SIDECAR"
 )
