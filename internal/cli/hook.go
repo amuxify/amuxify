@@ -176,8 +176,24 @@ func (g *Global) hookTest(ctx context.Context, a hook.Adapter) int {
 // because SABnzbd appends its parameters after whatever the wrapper wrote,
 // so a stray directory in front of them shows up as one parameter too many
 // and args[0] is that directory.
+//
+// A stray directory in front of an older SABnzbd's seven parameters makes
+// exactly eight, which the count alone accepts, and the parser would then
+// ingest the stray directory as the completed one. The tell is args[1]:
+// SABnzbd's second parameter is the name of the original NZB file, never a
+// directory, while in the shifted shape it is the completed directory. So
+// when a bare --quarantine is set and both args[0] and args[1] are existing
+// directories (checked with Lstat, so a symlink does not count), the eight
+// are refused with the same hint. A genuine eight-parameter call has a file
+// name in args[1] and is not affected.
 func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
-	if len(args) == 0 || (a == hook.SABnzbd && (len(args) == 7 || len(args) == 8)) {
+	bare := o.quarantine.set && o.quarantine.dir == ""
+	switch {
+	case len(args) == 0:
+		return ""
+	case a == hook.SABnzbd && len(args) == 8 && bare && isDir(args[0]) && isDir(args[1]):
+		// Refused below: a directory shifted in front of seven parameters.
+	case a == hook.SABnzbd && (len(args) == 7 || len(args) == 8):
 		return ""
 	}
 	var msg string
@@ -186,10 +202,17 @@ func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
 	} else {
 		msg = fmt.Sprintf("unexpected argument %q; the adapter reads the job from the environment", args[0])
 	}
-	if o.quarantine.set && o.quarantine.dir == "" {
+	if bare {
 		msg += fmt.Sprintf("; if it was meant as the quarantine directory write --quarantine=%s", report.Sanitize(args[0]))
 	}
 	return msg
+}
+
+// isDir reports whether path is an existing directory itself, not a symlink
+// to one.
+func isDir(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.IsDir()
 }
 
 // writeJSONOut writes the report to a new file. An existing file, a symlink
