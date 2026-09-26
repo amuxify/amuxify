@@ -44,7 +44,6 @@ func validateIngestOpts(o *ingestOpts, cmd string, args []string) string {
 	if o.quarantine.set && o.quarantine.dir == "" {
 		if _, err := os.Lstat(args[0]); err != nil {
 			return fmt.Sprintf("%s: %q does not exist; if it was meant as the quarantine directory write --quarantine=%s", cmd, args[0], report.Sanitize(args[0]))
-
 		}
 	}
 	return ""

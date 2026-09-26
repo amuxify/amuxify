@@ -13,7 +13,6 @@ adapter's own lines (the start line, the skipping line and SABnzbd's closing
 count line) move to stderr. The hook adapters add `--json-out <file>`, which
 writes the JSON report to a file while stdout keeps the lines the caller logs.
 
-
 ## The adapters
 
 | Adapter | What it reads | When it skips | Exit codes |
@@ -33,7 +32,6 @@ interruption code (130, or 94 for NZBGet). When the environment is missing
 altogether (for example `SAB_COMPLETE_DIR` unset and no arguments, or
 `sonarr_eventtype` unset) the adapter reports that it was not started by that
 program and exits with the usage code.
-
 
 The hook flags are `--fail-on warn|fail|block` (default `fail`), `--category
 <glob>`, `--json-out <file>` and the ingest flags `--verify`, `--hardlinks`,
@@ -96,14 +94,12 @@ omitted under `--quiet`. Under `--json` it goes to stderr together with the
 start line, so that stdout holds the JSON document alone; use `--json-out
 <file>` when you want the report as a file and the log lines on stdout.
 
-
 `--category <glob>` limits the adapter to jobs whose `SAB_CAT` matches the
 pattern (case-insensitive, `path.Match` syntax, so `tv*` matches `tv` and
 `tv-4k`). Other jobs print a skipping line and exit 0. A job that carries no
 category at all is processed regardless of the flag. Assigning the script per
 category in SABnzbd does the same job without the flag; the flag is for one
 script shared by several categories.
-
 
 ## NZBGet
 
@@ -251,7 +247,6 @@ parameters, so the stray word is a usage error, and the message says to write
 `--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
 cleared under `--dry-run`.
 
-
 `--remove-blocked-sidecars` deletes sidecar files whose extension is on the
 profile's block list (`SIDECAR_BLOCKED`). Without it they are reported and left
 in place. Nothing else is ever deleted.
@@ -270,7 +265,6 @@ matches; the match is case-insensitive and uses `path.Match` patterns. A job
 that carries no category is processed regardless of the flag, and Sonarr and
 Radarr never pass one, so the flag is ignored for them.
 
-
 `--json-out <file>` writes the JSON report to a new file in addition to whatever
 the global flags print. The file must not exist yet: amuxify never overwrites
 it and never follows a symlink in its place, so give each run its own path. A
@@ -286,7 +280,6 @@ fallback, so setting that variable in the client's environment is enough to
 switch profiles without editing the script. The NZBGet wrapper puts its own
 `NZBPO_PROFILE` option first and falls back to `AMUXIFY_PROFILE` and then
 `homelab`, like the others.
-
 
 ## cron or systemd timer over an incoming folder
 
