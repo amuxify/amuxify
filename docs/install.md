@@ -111,7 +111,8 @@ reported as `WARN`. Exit code 2 means a required tool is missing or too old, or
 the active profile is invalid.
 
 The `locale` line shows the locale every tool is run under. amuxify keeps your
-own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale and falls back
+own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale (messages are
+still requested in English through `LC_MESSAGES=C`) and falls back
 to `C.UTF-8` otherwise. Some older systems, for example those with glibc before
 2.35, do not ship a `C.UTF-8` locale, and mkvmerge then refuses to start with
 "The locale could not be set properly". The check runs `mkvmerge --version`
