@@ -227,8 +227,10 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 
 	// The scan refused symlinks, but a remux takes minutes and mkvmerge
 	// opens whatever the path names when it starts, so the source is
-	// checked again right before it is handed over (guarantee 3).
-	if err := sourceIsRegular(fr.Path); err != nil {
+	// checked again right before it is handed over (guarantee 3). The
+	// check also pins the file's identity: fi is what sat at the path when
+	// this remux began, and every later check requires the same file.
+	if err := sourceUnchanged(fr.Path, fi); err != nil {
 		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 		return fr
 	}
@@ -315,10 +317,13 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		return fr
 	}
 	// In place. The source is checked once more before it is replaced or
-	// removed, so a symlink planted during the run is never followed.
-	if err := sourceIsRegular(fr.Path); err != nil {
+	// removed: a symlink planted during the run is never followed, and a
+	// different file renamed onto the path after the last read of the
+	// source is never replaced or deleted, because what was rebuilt and
+	// verified is not that file.
+	if err := sourceUnchanged(fr.Path, fi); err != nil {
 		cleanup()
-		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the unplaced output was discarded", err)
 		return fr
 	}
 	switch {
@@ -356,6 +361,12 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "identity: %v", err)
 			return fr
 		}
+		placed, err := os.Lstat(tmp)
+		if err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "temp file: %v", err)
+			return fr
+		}
 		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
 			cleanup()
 			if errors.Is(err, fsutil.ErrExists) {
@@ -363,6 +374,19 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			} else {
 				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
 			}
+			return fr
+		}
+		// The source is checked one last time now that the output sits at
+		// dest: were it replaced in the meantime, removing it would delete
+		// a file that was never rebuilt. The output is then taken back
+		// again, provided dest still is the file this run placed there.
+		if err := sourceUnchanged(fr.Path, fi); err != nil {
+			if rerr := removeOwn(dest, placed); rerr != nil {
+				fr.Output = dest
+				fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the rebuilt file stays at %s: %v", err, dest, rerr)
+				return fr
+			}
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the placed output was removed again", err)
 			return fr
 		}
 		if err := os.Remove(fr.Path); err != nil {
@@ -376,23 +400,43 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	return fr
 }
 
-// sourceIsRegular reports an error when path no longer names a regular
-// file: a symlink planted after the scan, a directory, a device or nothing
-// at all. The scan's own symlink check does not cover the time a remux
-// takes, so this runs right before the source is opened by a tool and
-// right before it is replaced.
-func sourceIsRegular(path string) error {
-	fi, err := os.Lstat(path)
+// sourceUnchanged reports an error when path no longer names the regular
+// file described by was: a symlink planted after the scan, a directory, a
+// device, nothing at all, or another regular file renamed onto the path,
+// which is told apart by inode, size and modification time. The scan's own
+// symlink check does not cover the time a remux takes, so this runs right
+// before the source is opened by a tool and right before it is replaced or
+// removed. A nil was means the file could not be examined when the remux
+// began, and nothing can be proven about it since.
+func sourceUnchanged(path string, was os.FileInfo) error {
+	now, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("source changed since the scan: %v", err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
+	if now.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is now a symlink; refusing to follow it (changed since the scan)", path)
 	}
-	if !fi.Mode().IsRegular() {
+	if !now.Mode().IsRegular() {
 		return fmt.Errorf("%s is no longer a regular file (changed since the scan)", path)
 	}
+	if was == nil || !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
+		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
+	}
 	return nil
+}
+
+// removeOwn removes path only when it still is the regular file described
+// by own, so that a file someone else put there in the meantime is left
+// alone.
+func removeOwn(path string, own os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(own, now) {
+		return fmt.Errorf("%s is not the file this run placed", path)
+	}
+	return os.Remove(path)
 }
 
 // hasEntry reports whether dir holds an entry spelled exactly name. On a
