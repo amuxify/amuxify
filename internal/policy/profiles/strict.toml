@@ -1,0 +1,52 @@
+# amuxify profile: strict
+#
+# archive plus full decode verification and a mandatory ClamAV pass.
+description = "Archive policy plus full decode verification and required ClamAV scan."
+
+[languages]
+keep = ["eng"]
+prefer_original = false
+und = "drop"
+
+[audio]
+drop_commentary = true
+keep_first = false
+
+[subtitles]
+keep_forced = false
+drop_sdh_duplicates = false
+scan_links = true
+links = "fail"
+
+[chapters]
+keep = false
+
+[attachments]
+fonts = "drop"
+cover_art = "drop"
+other = "block"
+
+[metadata]
+strip_title = true
+strip_tags = true
+strip_track_titles = true
+strip_provenance = true
+links = "fail"
+provenance = "fail"
+
+[streams]
+allow_data_tags = ["tmcd"]
+
+[verify]
+tier = "full"
+stream_hash = true
+
+[safety]
+refuse_root = true
+hardlinks = "skip"
+exec_permissions = "fail"
+clamav = "required"
+
+[sidecars]
+allow = ["srt", "ass", "ssa", "sub", "idx", "vtt", "sfv", "par2", "md5", "sha256"]
+block = ["lnk", "url", "exe", "scr", "com", "pif", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "msi", "msp", "dmg", "pkg", "app", "sh", "command", "py", "pl", "rb", "deb", "rpm", "apk", "iso", "img", "reg", "cpl", "dll", "so", "dylib", "nfo", "txt", "html", "htm"]

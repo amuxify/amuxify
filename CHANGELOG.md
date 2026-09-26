@@ -2,6 +2,57 @@
 
 All notable changes to amuxify will be documented in this file.
 
+## 0.2.0
+
+Rewrite in Go. One binary, four built-in profiles, every common container as
+input, mkvmerge as the only MKV writer. See MIGRATION.md for the full list of
+behaviour changes.
+
+### Added
+
+- `amuxify scan | remux | clean | doctor | profile` subcommands with shared
+  `--profile`, `--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`,
+  `--state-dir`, `--allow-root`, `--trace` flags.
+- Profiles as TOML: `homelab` (default), `anime`, `archive` (the 0.1.x rules),
+  `strict`. Custom profiles overlay the defaults; unknown keys are rejected.
+- Input containers: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV.
+- Link detection in titles, tags, chapter names, attachment names and text
+  subtitle tracks (`LINK_IN_TAG`, `LINK_IN_SUBS`).
+- MP4 provenance atom detection (`PURCHASE_ATOM`): `ownr`, `apID`, `purd`,
+  `xid `, `cprt`, `©too`, `©enc`, XMP boxes and others; `clean` removes them
+  and re-checks the result.
+- Attachment policy: fonts allowed with text subtitles, cover art by profile,
+  attachment payloads sniffed for executables and archives (`ATTACH_EXEC`).
+- Sidecar policy with allow and block lists (`SIDECAR_BLOCKED`, `SIDECAR_UNKNOWN`).
+- Truncation detection for MP4 (`TRUNCATED`), HDR and Dolby Vision preservation
+  check after remux (`HDR_LOST`).
+- Hard-link handling (`safety.hardlinks = skip | break | copy`), per-file
+  symlink skipping, root refusal, owner/mode/mtime preservation in place.
+- Stable exit codes 0/1/2/3/4/130 and a JSON report.
+- `doctor` with version floors (MKVToolNix 50, ffmpeg 4.4).
+- Static release binaries for Linux and macOS, Docker image, Homebrew tap,
+  checksum-verified `install.sh`.
+- Differential test against the frozen 0.1.x scripts.
+
+### Changed
+
+- Default policy keeps all languages, chapters and fonts; strips titles, tags
+  and provenance. The 0.1.x English-only behaviour is `--profile archive`.
+- Untagged-language tracks never prompt; `languages.und` decides.
+- Extended-attribute removal is limited to `user.*` and `com.apple.*`.
+
+### Deprecated
+
+- `amux-scan`, `amux-scan-all`, `amux-remux`, `amux-clean` are shims that call
+  `amuxify --profile archive ...`; removed in 0.4.
+
+### Removed
+
+- ffmpeg as MKV writer; `--strict-permissions`, `--allow-data-tag`, `--deep`
+  flags (now profile keys and `--verify full`); the exiftool hard dependency;
+  `ulimit`/`gtimeout` requirements.
+
+
 ## 0.1.1
 
 Safety release. No media-policy changes.

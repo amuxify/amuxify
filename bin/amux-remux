@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Compatibility shim: amux-remux is now "amuxify remux" with --profile archive.
+# This shim is kept for one release; see MIGRATION.md.
+echo "amux-remux: deprecated, use: amuxify --profile archive remux \"$@\"" >&2
+exec amuxify --profile archive remux "$@"

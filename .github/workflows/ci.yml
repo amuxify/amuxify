@@ -1,0 +1,37 @@
+name: ci
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install media tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg mkvtoolnix libimage-exiftool-perl
+      - name: Install media tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg mkvtoolnix exiftool
+      - run: make fmt
+      - run: make test
+      - run: make build
+      - run: ./bin/amuxify doctor
+      # The frozen 0.1.x Bash scripts under legacy/ assume macOS tooling, so
+      # the differential test only runs there.
+      - name: Differential test against legacy scripts
+        if: runner.os == 'macOS'
+        run: make difftest
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg VERSION=ci -t amuxify:ci .
+      - run: docker run --rm -u 1000:1000 amuxify:ci doctor
