@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
 	"github.com/amuxify/amuxify/internal/probe"
@@ -393,6 +394,135 @@ func TestMatroskaStripsTitleAndTags(t *testing.T) {
 		t.Fatalf("second pass: %v", codes(fr))
 	}
 	if l := leftovers(t, filepath.Dir(src)); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+func shq(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ffmpegWrapper installs a shell script as AMUXIFY_FFMPEG that runs the
+// real ffmpeg with the original arguments, then the after snippet, and exits
+// with ffmpeg's status. The Runner strips the environment, so every path a
+// snippet needs must be baked into it with shq. Tests use it to change the
+// filesystem after ffmpeg has written the temp file and before the cleaner
+// replaces the source with it.
+func ffmpegWrapper(t *testing.T, r *exec.Runner, after string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the wrapper is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	real, err := r.Path(exec.FFmpeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "ffmpeg")
+	body := "#!/bin/sh\n" + shq(real) + " \"$@\"\nrc=$?\n" + after + "\nexit $rc\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_FFMPEG", script)
+}
+
+// Guarantee 3 and 1 for the MP4 rewrite: once ffmpeg has written the temp
+// file, its name is swapped for a symlink to a victim that is itself a clean
+// copy of the same media, so every read that follows the link passes and
+// the run reaches the replacement. The replacement must refuse the link
+// rather than give the victim the source's mode and time and rename the
+// link over the source, and the refusal must be reported: the rewrite is a
+// failed clean, not a successful one. The victim is private with an old
+// stamp and the source is world-writable with a different one, so a
+// path-based identity copy would show on the victim. The source must keep
+// its bytes, its mode, its time and its single name, and only the planted
+// link may be removed.
+func TestMp4RewriteRefusesSwappedTemp(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge)
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits and symlinks differ on windows")
+	}
+	// The victim is a copy of the fixture that has already been cleaned,
+	// so that a probe, a stream hash and an atom parse through the link
+	// all look like this run's own output.
+	victim := testutil.Copy(t, "purchased.mp4")
+	prep, _ := newCleaner(t, r, mustProfile(t, "homelab"))
+	if pr := prep.CleanFile(context.Background(), victim); !pr.Has(CodeMetadata) {
+		t.Fatalf("the victim could not be prepared: %v", codes(pr))
+	}
+	victimBefore := fileSHA(t, victim)
+	if err := os.Chmod(victim, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victimStamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(victim, victimStamp, victimStamp); err != nil {
+		t.Fatal(err)
+	}
+	src := testutil.Copy(t, "purchased.mp4")
+	dir := filepath.Dir(src)
+	srcBefore := fileSHA(t, src)
+	if err := os.Chmod(src, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	srcStamp := time.Date(2010, 11, 12, 13, 14, 15, 0, time.UTC)
+	if err := os.Chtimes(src, srcStamp, srcStamp); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, ".amuxify-purchased.mp4.tmp")
+	// The swap runs after every ffmpeg call, but only turns a regular file
+	// at the temp name into the link once; the stream hash calls that
+	// follow see the link and leave it.
+	ffmpegWrapper(t, r, "if [ -f "+shq(tmp)+" ] && [ ! -L "+shq(tmp)+" ]; then rm -f "+shq(tmp)+" && ln -s "+shq(victim)+" "+shq(tmp)+"; fi")
+
+	c, tr := newCleaner(t, nil, mustProfile(t, "homelab"))
+	fr := c.CleanFile(context.Background(), src)
+	wroteTmp := false
+	for _, l := range tr.all() {
+		if strings.Contains(l, "ffmpeg") && strings.Contains(l, "-y ") && strings.HasSuffix(l, tmp) {
+			wroteTmp = true
+		}
+	}
+	if !wroteTmp {
+		t.Fatalf("ffmpeg never wrote the temp name: %v", tr.all())
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeCleanFail) || fr.Has(CodeMetadata) {
+		t.Fatalf("%s %v", fr.Verdict, codes(fr))
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeCleanFail && strings.Contains(f.Message, "symlink") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+	}
+	fi, err := os.Lstat(victim)
+	if err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+		t.Fatalf("victim is no longer a plain regular file with one name: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 || !fi.ModTime().Equal(victimStamp) {
+		t.Fatalf("victim identity rewritten through the planted link: mode %o mtime %v", fi.Mode().Perm(), fi.ModTime())
+	}
+	if fileSHA(t, victim) != victimBefore {
+		t.Fatal("victim rewritten")
+	}
+	fi, err = os.Lstat(src)
+	if err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+		t.Fatalf("source is no longer a plain regular file: %v", err)
+	}
+	if fi.Mode().Perm() != 0o666 || !fi.ModTime().Equal(srcStamp) {
+		t.Fatalf("source identity changed: mode %o mtime %v", fi.Mode().Perm(), fi.ModTime())
+	}
+	if fileSHA(t, src) != srcBefore {
+		t.Fatal("source changed")
+	}
+	if _, err := os.Lstat(tmp); err == nil {
+		t.Fatal("the planted link is still there")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
 		t.Fatalf("temp files left: %v", l)
 	}
 }
