@@ -165,8 +165,9 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 }
 
 // quarantined reports whether scan moved a BLOCK file away. The scanner
-// records QUARANTINED on the result; when quarantine is on and the path is
-// gone after the scan the move happened even if the finding was lost.
+// records QUARANTINED on the result it returns; the Lstat fallback is kept
+// as a second line of defence so that a file which is gone after the scan
+// is never handed to the cleaner, whatever the findings say.
 func (in *Ingester) quarantined(fr *report.FileResult, path string) bool {
 	if fr.Has(scan.CodeQuarantined) {
 		return true

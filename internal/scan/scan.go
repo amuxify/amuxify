@@ -102,9 +102,13 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
-func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
+//
+// The result is named so that the deferred quarantine step, which runs after
+// the verdict is final, records its QUARANTINED finding and the duration in
+// the value the caller receives.
+func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 	start := time.Now()
-	r := Result{File: report.FileResult{Path: path, Info: map[string]string{}}}
+	r = Result{File: report.FileResult{Path: path, Info: map[string]string{}}}
 	defer func() {
 		r.File.Duration = time.Since(start)
 		if r.File.Verdict == report.Block && s.Quarantine != "" {
@@ -556,7 +560,10 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		rel = filepath.Base(fr.Path)
 	}
 	dest := filepath.Join(s.Quarantine, rel)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	// Create the mirrored directory chain without following symlinks so a
+	// planted link inside the quarantine tree cannot redirect the file
+	// elsewhere (guarantee 4).
+	if err := fsutil.MkdirAllUnder(s.Quarantine, filepath.Dir(dest)); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
