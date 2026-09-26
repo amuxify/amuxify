@@ -239,7 +239,7 @@ Paths, messages and details are written exactly as amuxify saw them, with the
 escaping JSON requires. Quotes, backslashes and control characters, including
 a NUL byte, an escape sequence or a Unicode bidi control in a file name, are
 escaped and never break the document. The characters `<`, `>` and `&` are
-written as `<`, `>` and `&`, which every JSON parser decodes to
+written as `\u003c`, `\u003e` and `\u0026`, which every JSON parser decodes to
 the plain character; the example above shows this in a `ROUTE` message. A file
 name that is not valid UTF-8 has each invalid byte replaced with U+FFFD, so
 the document is always valid UTF-8. Such a path cannot be recovered byte for
