@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/testutil"
 )
 
@@ -176,5 +178,53 @@ func TestUnreadableDirectoryFailsTheRun(t *testing.T) {
 				checkNZBGetOutput(t, out, errb, false)
 			}
 		})
+	}
+}
+
+// The quarantine directory usually lives on another filesystem than the
+// download tree (the bare --quarantine form puts it under the state
+// directory). A hook run with a BLOCK file still moves it there: the file is
+// copied and verified, the source removed, and a file already sitting at the
+// quarantine slot is never replaced (review C3, C12, C37).
+func TestHookQuarantineAcrossFilesystems(t *testing.T) {
+	testutil.Stubs(t)
+	orig := fsutil.Place
+	fsutil.Place = func(src, dest string) error {
+		return &os.LinkError{Op: "rename", Old: src, New: dest, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() { fsutil.Place = orig })
+	body := "[InternetShortcut]\nURL=http://x\n"
+	src := write(t, filepath.Join(t.TempDir(), "lib", "x.url"), body)
+	state := t.TempDir()
+	dest := filepath.Join(state, "quarantine", "x.url")
+	hookEnv(t, jobEnv("sonarr", src)...)
+	code, out, errb := run(t, "--state-dir", state, "hook", "sonarr", "--quarantine")
+	if code != 1 || !strings.Contains(out, "moved to "+dest) {
+		t.Fatalf("exit %d\n%s%s", code, out, errb)
+	}
+	if b, err := os.ReadFile(dest); err != nil || string(b) != body {
+		t.Fatalf("quarantined copy: %q %v", b, err)
+	}
+	if _, err := os.Lstat(src); err == nil {
+		t.Fatal("source still in the download tree")
+	}
+	// The copy path creates the file itself with mode 0600; a rename would
+	// have kept the source's mode, so this proves the cross-device path ran.
+	if fi, err := os.Lstat(dest); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("quarantined copy mode %v, want 0600 from the cross-device copy", fi.Mode().Perm())
+	}
+	// A second job delivering the same name: the slot is taken, so the move
+	// is refused, the first copy is kept and the new file stays in place.
+	src = write(t, src, "[InternetShortcut]\nURL=http://second\n")
+	hookEnv(t, jobEnv("sonarr", src)...)
+	code, out, errb = run(t, "--state-dir", state, "hook", "sonarr", "--quarantine")
+	if code != 1 || !strings.Contains(out, "quarantine failed") {
+		t.Fatalf("exit %d\n%s%s", code, out, errb)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != body {
+		t.Fatalf("first quarantined file overwritten: %q", b)
+	}
+	if _, err := os.Lstat(src); err != nil {
+		t.Fatal("second file removed although it was not quarantined")
 	}
 }

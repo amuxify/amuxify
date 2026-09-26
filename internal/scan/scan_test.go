@@ -10,10 +10,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
@@ -1221,5 +1223,52 @@ func TestWalkReportsUnreadableDirectory(t *testing.T) {
 	res, err = s.ScanPath(context.Background(), lockedRoot)
 	if err == nil || len(res) != 0 {
 		t.Fatalf("unreadable root: %d results, err %v", len(res), err)
+	}
+}
+
+// Quarantine works when the quarantine directory sits on another
+// filesystem: the file is copied, verified and removed from the tree, and a
+// file already at the destination is still never replaced (review C3).
+func TestQuarantineAcrossFilesystems(t *testing.T) {
+	noTools(t)
+	orig := fsutil.Place
+	fsutil.Place = func(src, dest string) error {
+		return &os.LinkError{Op: "rename", Old: src, New: dest, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() { fsutil.Place = orig })
+	root := t.TempDir()
+	q := filepath.Join(t.TempDir(), "quarantine")
+	src := write(t, filepath.Join(root, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	res, err := s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(q, "sub", "x.url")
+	requireQuarantineFinding(t, res[0].File, report.Block, "moved to "+dest)
+	if b, err := os.ReadFile(dest); err != nil || !strings.Contains(string(b), "http://x") {
+		t.Fatalf("copy at %s: %v", dest, err)
+	}
+	if _, err := os.Lstat(src); err == nil {
+		t.Fatal("source still in the tree")
+	}
+	// The copy path creates the file itself with mode 0600; a rename would
+	// have kept the source's 0644, so this proves the cross-device path ran.
+	if fi, err := os.Lstat(dest); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("quarantined copy mode %v, want 0600 from the cross-device copy", fi.Mode().Perm())
+	}
+	// Second file with the same mirrored name: refused, both intact.
+	write(t, src, "[InternetShortcut]\nURL=http://second\n", 0o644)
+	res, err = s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireQuarantineFinding(t, res[0].File, report.Warn, "quarantine failed")
+	if b, _ := os.ReadFile(dest); !strings.Contains(string(b), "http://x") {
+		t.Fatalf("first quarantined file overwritten: %q", b)
+	}
+	if _, err := os.Lstat(src); err != nil {
+		t.Fatal("source removed although the quarantine slot was taken")
 	}
 }
