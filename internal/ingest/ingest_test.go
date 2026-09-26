@@ -499,7 +499,7 @@ func TestDecideRoutes(t *testing.T) {
 	}
 }
 
-// Guarantee 4 (docs/safety.md): BLOCK is never overridden, not even by --force.
+// Guarantee 9 (docs/safety.md): BLOCK is never overridden, not even by --force.
 func TestBlockRefusedEvenWithForce(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()

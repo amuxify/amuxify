@@ -567,7 +567,7 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	}
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
-	// elsewhere (guarantee 4).
+	// elsewhere (guarantee 3).
 	if err := fsutil.MkdirAllUnder(s.Quarantine, filepath.Dir(dest)); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return

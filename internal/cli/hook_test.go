@@ -184,7 +184,7 @@ func TestHookUsage(t *testing.T) {
 	}
 }
 
-// Guarantee 8 under the hook: the process refuses to modify files as root
+// Guarantee 10 under the hook: the process refuses to modify files as root
 // under every adapter, in that adapter's usage convention, and the Sonarr
 // and Radarr connection test fails so the misconfiguration is visible in
 // their test dialog. --dry-run needs no writer and is allowed.
