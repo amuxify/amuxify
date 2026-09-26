@@ -363,7 +363,11 @@ func TestBlockIsNeverLowered(t *testing.T) {
 	}
 }
 
-// Guarantee 2: temp files and Finder droppings are never scanned.
+// Guarantee 2: amuxify's own temp files, named ".amuxify-<name>.tmp" by
+// fsutil.TempName, and Finder droppings are never scanned. The skip is
+// exactly that shape: a hostile file that borrows the prefix but not the
+// suffix, such as ".amuxify-evil.exe", is listed and blocked like any other
+// sidecar.
 func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -378,6 +382,10 @@ func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	write(t, filepath.Join(dir, "amuxify-x.tmp"), "x", 0o644)
 	write(t, filepath.Join(dir, "DS_Store"), "x", 0o644)
 	write(t, filepath.Join(dir, ".amuxify"), "x", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-"), "x", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-evil.exe"), "MZ\x90\x00", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-payload.tmp.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	write(t, filepath.Join(dir, "sub", ".amuxify-evil.sh"), "#!/bin/sh\n", 0o755)
 	s := newScanner(t, mustProfile(t, "homelab"), nil)
 	res, err := s.ScanPath(context.Background(), dir)
 	if err != nil {
@@ -387,9 +395,13 @@ func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	for _, r := range res {
 		rel, _ := filepath.Rel(dir, r.File.Path)
 		got = append(got, filepath.ToSlash(rel))
+		switch rel {
+		case ".amuxify-evil.exe", ".amuxify-payload.tmp.url", filepath.Join("sub", ".amuxify-evil.sh"):
+			expect(t, r.File, report.Block, CodeSidecarBlocked)
+		}
 	}
 	sort.Strings(got)
-	want := []string{".amuxify", "DS_Store", "amuxify-x.tmp", "ok.nfo", "sub/real.nfo"}
+	want := []string{".amuxify", ".amuxify-", ".amuxify-evil.exe", ".amuxify-payload.tmp.url", "DS_Store", "amuxify-x.tmp", "ok.nfo", "sub/.amuxify-evil.sh", "sub/real.nfo"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("scanned %v, want %v", got, want)
 	}
@@ -1040,7 +1052,7 @@ func TestCorpusVerdicts(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
+		if d.IsDir() || d.Name() == ".DS_Store" || isTempName(d.Name()) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
