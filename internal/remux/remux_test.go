@@ -1406,3 +1406,111 @@ func TestOutputPlacementErrorIsRemuxFail(t *testing.T) {
 		t.Fatal("source changed")
 	}
 }
+
+// ffmpegWrapper installs a shell script as AMUXIFY_FFMPEG that runs the
+// snippet before the real ffmpeg whenever ffmpeg is asked to decode (-f
+// null) an input whose name carries the .amuxify- temp prefix, which is
+// the verification pass over the rebuilt output. Every other call passes
+// straight through. The Runner strips the environment, so paths a snippet
+// needs must be baked into it with shq. Tests use it to change the source
+// after the last time the remuxer reads it and before it places the output.
+func ffmpegWrapper(t *testing.T, r *exec.Runner, onTempDecode string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the wrapper is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	real, err := r.Path(exec.FFmpeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "ffmpeg")
+	body := "#!/bin/sh\ntmp=0\nnull=0\nprev=\nfor a in \"$@\"; do\n" +
+		"  case \"$prev:$a\" in -i:*/.amuxify-*) tmp=1;; -f:null) null=1;; esac\n" +
+		"  prev=$a\ndone\n" +
+		"if [ \"$tmp\" = 1 ] && [ \"$null\" = 1 ]; then\n:\n" + onTempDecode + "\nfi\n" +
+		"exec " + shq(real) + " \"$@\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_FFMPEG", script)
+}
+
+// Guarantee 1 and 3 for the in-place window after the last read of the
+// source: the stream hashes are taken from the source, then only the temp
+// file is decoded and synced. A regular file renamed onto the source path in
+// that window is not what was rebuilt and verified, so it must be neither
+// renamed over (an .mkv source) nor deleted (any other source) once the
+// output is placed. The wrapper performs the swap during the decode pass
+// over the temp file. The swapped-in file must keep its bytes, nothing may
+// be placed, and no temp file may remain.
+func TestSourceSwappedForFileRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		swap    string
+		force   bool
+	}{
+		{"mkv source replaced in place", "clean.mkv", "multi.mkv", false},
+		{"mp4 source placed under a new name", "purchased.mp4", "sample.mov", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := testutil.Copy(t, tc.fixture)
+			dir := filepath.Dir(src)
+			swap := testutil.Copy(t, tc.swap)
+			swapSum := fileSHA(t, swap)
+			if swapSum == fileSHA(t, src) {
+				t.Fatal("test setup: the swap must differ from the source")
+			}
+			dest := filepath.Join(dir, strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))+".mkv")
+			ffmpegWrapper(t, r, "[ -e "+shq(swap)+" ] && mv -f "+shq(swap)+" "+shq(src))
+			rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+			rm.InPlace = true
+			rm.Force = tc.force
+			res, err := rm.RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%d results", len(res))
+			}
+			fr := res[0]
+			if len(tr.writes()) == 0 {
+				t.Fatalf("mkvmerge never ran: %v", codes(fr))
+			}
+			if _, err := os.Lstat(swap); err == nil {
+				t.Fatal("the wrapper never swapped the source; the placement was not exercised")
+			}
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "was replaced") && strings.Contains(f.Message, "source was left untouched") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not say what happened: %v", fr.Findings)
+			}
+			if fileSHA(t, src) != swapSum {
+				t.Fatal("the swapped-in file was replaced or removed")
+			}
+			if dest != src {
+				if _, err := os.Lstat(dest); err == nil {
+					t.Fatalf("%s was placed although the source changed", dest)
+				}
+			}
+			if l := leftovers(t, dir); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 1 {
+				t.Fatalf("directory holds %d entries, want only the swapped-in file", len(entries))
+			}
+		})
+	}
+}
