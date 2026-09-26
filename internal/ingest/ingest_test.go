@@ -23,6 +23,7 @@ import (
 	"github.com/amuxify/amuxify/internal/scan"
 	"github.com/amuxify/amuxify/internal/testutil"
 	"github.com/amuxify/amuxify/internal/verify"
+	"github.com/pkg/xattr"
 )
 
 // ebml is a minimal Matroska magic so files look like media to sniff.
@@ -1873,5 +1874,68 @@ func TestIngestAudioTagsAdviceNamesNoFlag(t *testing.T) {
 	fr = in2.IngestFile(context.Background(), src, filepath.Dir(src), filepath.Dir(src), filepath.Dir(src))
 	if f, ok := finding(fr, clean.CodeSkipped); !ok || strings.Contains(f.Message, "--strip-audio-tags") {
 		t.Errorf("IngestFile SKIPPED %q", f.Message)
+	}
+}
+
+// Review C11 and guarantee 3: a symlinked sidecar is reported once, as
+// SYMLINK by the scanner, is never followed and never cleaned through the
+// link. Before the fix the cleaner added a second SYMLINK finding.
+func TestSymlinkedSidecarReportedOnce(t *testing.T) {
+	noTools(t)
+	victim := write(t, filepath.Join(t.TempDir(), "victim.srt"), "1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link.srt")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// An attribute in the namespace the cleaner strips: it must survive,
+	// which proves the cleaner never reached the victim through the link.
+	attr := "user.amuxifytest"
+	if runtime.GOOS == "darwin" {
+		attr = "com.apple.amuxifytest"
+	}
+	if err := xattr.LSet(victim, attr, []byte("x")); err != nil {
+		t.Logf("no xattr on the victim: %v", err)
+		attr = ""
+	}
+	in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+	in.RemoveBlockedSidecars = true
+	in.apply(t)
+	res, err := in.IngestPath(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("results %+v", res)
+	}
+	fr := res[0]
+	n := 0
+	for _, f := range fr.Findings {
+		if f.Code == scan.CodeSymlink {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("SYMLINK reported %d times: %v", n, codes(fr))
+	}
+	if fr.Verdict != report.Warn || fr.Has(clean.CodeXattr) || fr.Has(clean.CodeNothing) || fr.Has(clean.CodeSidecarRemove) {
+		t.Errorf("%s %v", fr.Verdict, codes(fr))
+	}
+	if rt, text := route(t, fr); rt != RouteSkip || text != "sidecar; symlink skipped" {
+		t.Errorf("route %s %q", rt, text)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the link was removed or replaced")
+	}
+	if b, _ := os.ReadFile(victim); !strings.Contains(string(b), "hi") {
+		t.Error("the victim changed")
+	}
+	if attr != "" {
+		if _, err := xattr.LGet(victim, attr); err != nil {
+			t.Errorf("the victim's xattr was stripped through the link: %v", err)
+		}
+	}
+	if got := tr.all(); len(got) != 0 {
+		t.Errorf("tools ran: %v", got)
 	}
 }

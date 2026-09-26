@@ -135,10 +135,16 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 			if in.RemoveBlockedSidecars && fr.Has(scan.CodeSidecarBlocked) && !in.quarantined(&fr, path) {
 				merge(&fr, in.Cleaner.CleanScanned(ctx, sc))
 			}
+		case fr.Has(scan.CodeSymlink):
+			// The scanner already reported the link and never followed it;
+			// the cleaner would only repeat SYMLINK (review C11).
+			reasons = []string{"sidecar", "symlink skipped"}
 		case fr.Verdict < report.Fail:
 			merge(&fr, in.Cleaner.CleanScanned(ctx, sc))
 		}
-		reasons = []string{"sidecar"}
+		if reasons == nil {
+			reasons = []string{"sidecar"}
+		}
 	} else {
 		switch {
 		case fr.Has(scan.CodeSymlink):
