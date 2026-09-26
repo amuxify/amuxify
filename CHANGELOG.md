@@ -2,6 +2,42 @@
 
 All notable changes to amuxify will be documented in this file.
 
+## 0.3.0
+
+### Added
+
+- `amuxify ingest`: scan, then rebuild into a verified MKV or clean in place, one
+  pass per file, always in place, with `--force`, `--hardlinks`, `--verify`,
+  `--quarantine`, `--remove-blocked-sidecars` and `--original-language`. A
+  hard-linked file is never edited in place. New finding `ROUTE`.
+- `amuxify hook sabnzbd | nzbget | sonarr | radarr`: adapters that read the
+  caller's environment, run ingest and exit the caller's way (0/1 or 93/94/95),
+  with `--fail-on warn|fail|block`, `--category` and `--json-out`. The Sonarr and
+  Radarr Test button runs a tool check. Wrapper scripts live under
+  `contrib/hooks/` and in the Docker image.
+- `--quarantine` without a value uses `<state-dir>/quarantine` for `ingest` and
+  the hook adapters; `scan --quarantine <dir>` is unchanged.
+- Kodi NFO awareness: allowed `.nfo` sidecars are classified (`NFO_KODI`,
+  `NFO_TEXT`); links outside scraper and artwork fields are `LINK_IN_SIDECAR`
+  (WARN or FAIL per `metadata.links`). NFO files are never modified.
+- Report schema `amuxify.report/1` with a `schema` field and an optional `hook`
+  object; golden and reflection tests freeze it; `docs/report.md` states the
+  compatibility policy.
+- A named test for every guarantee in docs/safety.md, and integration tests over
+  the fixture corpus that skip when tools are missing and fail in CI.
+
+### Changed
+
+- JSON: `started` and `finished` are UTC with whole seconds; `files`, `findings`
+  and `errors` are `[]` rather than absent or `null`; `profile` is always present.
+- `docs/report.md` code table corrected to match the code (`HARDLINKED` is PASS in
+  scan, `NO_VIDEO` and `NO_AUDIO` are FAIL, `QUARANTINED` is BLOCK on success,
+  `XATTR` warns on failure, `DOUBLE_EXT` fires on a blocked penultimate extension).
+
+### Fixed
+
+- The `--timeout` help text listed the wrong probe default.
+
 ## 0.2.0
 
 Rewrite in Go. One binary, four built-in profiles, every common container as
