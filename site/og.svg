@@ -1,13 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="630" viewBox="0 0 1200 630">
   <!-- Source for og.png. Render: rsvg-convert -w 1200 -h 630 og.svg -o og.png -->
   <defs>
-    <radialGradient id="glow" cx="0.28" cy="0.5" r="0.6">
-      <stop offset="0" stop-color="#12233f"/>
-      <stop offset="1" stop-color="#05070c"/>
+    <radialGradient id="fade" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.55" stop-color="#fff"/>
+      <stop offset="1" stop-color="#000"/>
     </radialGradient>
+    <mask id="logomask">
+      <rect x="40" y="75" width="480" height="480" fill="url(#fade)"/>
+    </mask>
   </defs>
-  <rect width="1200" height="630" fill="url(#glow)"/>
-  <image xlink:href="amuxify-logo.png" x="40" y="75" width="480" height="480"/>
+  <rect width="1200" height="630" fill="#000"/>
+  <image xlink:href="amuxify-logo.png" x="40" y="75" width="480" height="480" mask="url(#logomask)"/>
   <g font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" fill="#e6edf3">
     <text x="540" y="258" font-size="96" font-weight="700" letter-spacing="-3">amuxify</text>
     <text x="544" y="318" font-size="34" fill="#9fb3c8">The ingest gate for self-hosted media.</text>
