@@ -43,7 +43,7 @@ homebrew_casks:
       owner: amuxify
       name: homebrew-tap
       branch: main
-      token: '{{ envOrDefault "HOMEBREW_TAP_TOKEN" "" }}'
+      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
     directory: Casks
     homepage: https://amuxify.com
     description: The ingest gate for self-hosted media
@@ -59,4 +59,4 @@ homebrew_casks:
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/amuxify"]
           end
     # auto: skip for pre-release tags (v1.0.0-rc1); true: token not configured.
-    skip_upload: '{{ if envOrDefault "HOMEBREW_TAP_TOKEN" "" }}auto{{ else }}true{{ end }}'
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
