@@ -13,3 +13,7 @@ python3 -m http.server -d site 8000   # http://localhost:8000
 
 The documentation is not copied here; the page links to `docs/` rendered on
 GitHub. No analytics.
+
+`og.png` is the link-preview image (1200×630). Its source is `og.svg`;
+regenerate with `rsvg-convert -w 1200 -h 630 site/og.svg -o site/og.png`
+(librsvg, packaged everywhere) after editing the SVG.

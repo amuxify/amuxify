@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- Source for og.png. Render: rsvg-convert -w 1200 -h 630 og.svg -o og.png -->
+  <defs>
+    <radialGradient id="glow" cx="0.28" cy="0.5" r="0.6">
+      <stop offset="0" stop-color="#12233f"/>
+      <stop offset="1" stop-color="#05070c"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <image xlink:href="amuxify-logo.png" x="40" y="75" width="480" height="480"/>
+  <g font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" fill="#e6edf3">
+    <text x="540" y="258" font-size="96" font-weight="700" letter-spacing="-3">amuxify</text>
+    <text x="544" y="318" font-size="34" fill="#9fb3c8">The ingest gate for self-hosted media.</text>
+    <text x="544" y="382" font-size="34" font-weight="600" fill="#6cb2eb">Verify. Sanitize. Normalize. Prove.</text>
+    <text x="544" y="456" font-size="24" fill="#9fb3c8">Clean MKV for Plex and Jellyfin. Exit codes for</text>
+    <text x="544" y="490" font-size="24" fill="#9fb3c8">SABnzbd, NZBGet, Sonarr and Radarr.</text>
+    <text x="544" y="562" font-size="22" font-weight="600" fill="#6cb2eb">amuxify.com</text>
+  </g>
+</svg>
