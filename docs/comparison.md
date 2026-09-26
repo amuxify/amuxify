@@ -3,9 +3,13 @@
 If you already run something that strips tracks or re-encodes video, you may
 wonder where amuxify fits. This page puts amuxify next to the tools that come up
 most often in the same conversations, so you can see what each one is for and
-where they overlap. The short version: amuxify is a gate. It checks a file once
-when it arrives, cleans it, and proves that nothing was lost. Most of the other
-tools are pipelines that keep changing files over the life of a library.
+where they overlap.
+
+The main difference is when the tool runs and what it promises. amuxify runs
+once, at the moment a file arrives, and either refuses the file or cleans it
+and proves that nothing was lost. Most of the other tools keep working on a
+library over time, for example re-encoding files to save space, and none of
+them check their own output the way amuxify does.
 
 The columns group tools by purpose rather than listing every project by name.
 The tools in one column behave alike for the rows that matter here.
