@@ -1939,3 +1939,91 @@ func TestSymlinkedSidecarReportedOnce(t *testing.T) {
 		t.Errorf("tools ran: %v", got)
 	}
 }
+
+// Review C33: a dry run predicts the OUTPUT_EXISTS collision the live run
+// hits when two files of one run rebuild to the same destination, with the
+// same finding text, so the verdict counts and the exit code match.
+func TestDryRunPredictsDestinationCollision(t *testing.T) {
+	r := needTools(t)
+	prepare := func(t *testing.T) string {
+		dir := t.TempDir()
+		for _, name := range []string{"sample.mov", "sample.webm"} {
+			src := testutil.Copy(t, name)
+			if err := os.Rename(src, filepath.Join(dir, "ep"+filepath.Ext(name))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	run := func(t *testing.T, dir string, dry bool) []report.FileResult {
+		t.Helper()
+		in, _ := newIngester(t, r, mustProfile(t, "homelab"))
+		in.Remuxer.DryRun, in.Cleaner.DryRun = dry, dry
+		res, err := in.IngestPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results %d", len(res))
+		}
+		return res
+	}
+	counts := func(res []report.FileResult) map[report.Severity]int {
+		m := map[report.Severity]int{}
+		for _, fr := range res {
+			m[fr.Verdict]++
+		}
+		return m
+	}
+	dryDir := prepare(t)
+	before := snapshot(t, dryDir)
+	dry := run(t, dryDir, true)
+	sameSnapshot(t, before, snapshot(t, dryDir))
+	dest := filepath.Join(dryDir, "ep.mkv")
+	mov, webm := byBase(dry)["ep.mov"], byBase(dry)["ep.webm"]
+	if !mov.Has(remux.CodeDryRun) || mov.Output != dest || mov.Has(remux.CodeOutputExists) {
+		t.Errorf("ep.mov dry: %v %q", codes(mov), mov.Output)
+	}
+	f, ok := finding(webm, remux.CodeOutputExists)
+	if !ok || f.Severity != report.Fail || f.Message != dest+" already exists" {
+		t.Errorf("ep.webm dry: %v %q", codes(webm), f.Message)
+	}
+	if webm.Verdict != report.Fail || webm.Has(remux.CodeDryRun) || webm.Output != "" {
+		t.Errorf("ep.webm dry: %s %v %q", webm.Verdict, codes(webm), webm.Output)
+	}
+	total := 0
+	for _, fr := range dry {
+		for _, f := range fr.Findings {
+			if f.Code == remux.CodeOutputExists {
+				total++
+			}
+		}
+	}
+	if total != 1 {
+		t.Errorf("OUTPUT_EXISTS reported %d times, want 1", total)
+	}
+	// The planned set is per run: a second dry run of the same tree gives
+	// the same answer, not a collision for the first file too.
+	again := byBase(run(t, dryDir, true))
+	againMov, againWebm := again["ep.mov"], again["ep.webm"]
+	if !againMov.Has(remux.CodeDryRun) || !againWebm.Has(remux.CodeOutputExists) {
+		t.Errorf("second dry run differs: %v / %v", codes(againMov), codes(againWebm))
+	}
+
+	liveDir := prepare(t)
+	live := run(t, liveDir, false)
+	liveWebm := byBase(live)["ep.webm"]
+	liveDest := filepath.Join(liveDir, "ep.mkv")
+	if f, ok := finding(liveWebm, remux.CodeOutputExists); !ok || f.Message != liveDest+" already exists" {
+		t.Fatalf("live ep.webm: %v", codes(liveWebm))
+	}
+	if strings.Join(codes(liveWebm), ",") != strings.Join(codes(webm), ",") {
+		t.Errorf("collision findings differ: dry %v, live %v", codes(webm), codes(liveWebm))
+	}
+	if dc, lc := counts(dry), counts(live); fmt.Sprint(dc) != fmt.Sprint(lc) {
+		t.Errorf("verdict counts differ: dry %v, live %v", dc, lc)
+	}
+	if _, err := os.Lstat(liveDest); err != nil {
+		t.Errorf("live run did not place %s: %v", liveDest, err)
+	}
+}
