@@ -43,7 +43,9 @@ homebrew_casks:
       owner: amuxify
       name: homebrew-tap
       branch: main
-      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
+      # goreleaser requires this field to be exactly one {{ .Env.NAME }}.
+      # It is only read when skip_upload is not "true" (see below).
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Casks
     homepage: https://amuxify.com
     description: The ingest gate for self-hosted media
@@ -59,4 +61,5 @@ homebrew_casks:
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/amuxify"]
           end
     # auto: skip for pre-release tags (v1.0.0-rc1); true: token not configured.
-    skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
+    # Evaluated before the token, so an unset secret never fails the release.
+    skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
