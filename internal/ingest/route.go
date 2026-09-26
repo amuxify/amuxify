@@ -65,7 +65,10 @@ func Decide(fr *report.FileResult, sc scan.Result, d *policy.Decision, hardlinks
 			}
 		}
 	}
-	if sc.File.Verdict >= report.Fail && force {
+	// A forced FAIL video file is rebuilt. An audio or subtitle container
+	// cannot be rebuilt (remux handles video containers only), so it takes
+	// the clean route below and keeps its FAIL verdict (review C9).
+	if sc.File.Verdict >= report.Fail && force && !isAudioOrSubs {
 		return RouteRemux, []string{"scan verdict FAIL; rebuilt because --force was given"}
 	}
 	if n := nlinkOf(fr); n > 1 {
@@ -84,6 +87,9 @@ func Decide(fr *report.FileResult, sc scan.Result, d *policy.Decision, hardlinks
 	}
 	if isAudioOrSubs {
 		addAll(fr, d.Findings)
+		if sc.File.Verdict >= report.Fail && force {
+			return RouteClean, []string{"scan verdict FAIL; cleaned because --force was given"}
+		}
 		return RouteClean, []string{"audio or subtitle container; metadata only"}
 	}
 	if fsutil.Ext(fr.Path) != "mkv" || sc.Info == nil || !sc.Info.IsMatroska() {
