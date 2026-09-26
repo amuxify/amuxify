@@ -63,6 +63,18 @@ All notable changes to amuxify will be documented in this file.
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under
   `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
+- Verification fixes. An in-place rebuild checks, right before it replaces
+  or removes the source, that the file at that path is still the one it
+  rebuilt and verified, and refuses with `REMUX_FAIL` when the file was
+  swapped while mkvmerge ran; the temp file is created by amuxify itself
+  and checked after mkvmerge returns and again before placement, so a
+  symlink planted at the temp name is never followed. A dry run of `remux`
+  predicts the `OUTPUT_EXISTS` collision two files of one run produce when
+  they rebuild to the same destination, as an `ingest` dry run already did,
+  and the prediction treats `Ep.mkv` and `ep.mkv` as one entry on a
+  case-insensitive filesystem. A placement failure in output mode that is
+  not an existing destination is reported as `REMUX_FAIL` with the reason
+  instead of `OUTPUT_EXISTS`.
 
 ## 0.2.0
 
