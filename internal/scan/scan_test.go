@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -808,7 +809,6 @@ type corpusExpect struct {
 // still asserted; when it does not hold the subtest skips with the reason.
 var knownGaps = map[string]string{
 	"exe_attach.mkv": "reports POLYGLOT instead of ATTACH_EXEC because the ELF attachment's bytes sit in the last 1 MiB and polyglot() returns before checkMkv; internal/scan/scan.go must let a Matroska file with attachments reach the attachment sniff (or the spec table must accept POLYGLOT)",
-	"subs.mks":       "reports FAIL DECODE_FAIL because verify.decode maps 0:v? and 0:a? and ffmpeg refuses an output with no streams; internal/verify/verify.go (or scan.decodeCheck) must skip the decode pass for subtitle-only containers",
 }
 
 // A conforming file under a directory whose name holds non-ASCII, bidi and
@@ -843,6 +843,55 @@ func TestNonASCIIDirectoryScansClean(t *testing.T) {
 		expect(t, res[0].File, report.Pass)
 		if res[0].Info == nil {
 			t.Fatalf("%q: no probe result: %v", dirName, codes(res[0].File))
+		}
+	}
+}
+
+// A container without video or audio has nothing for ffmpeg to decode, so
+// the decode pass is skipped instead of failing a healthy subtitle file.
+// The choice follows the probed streams: an audio file is still decoded
+// whatever its extension says.
+func TestSubtitleOnlySkipsDecode(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
+	var mu sync.Mutex
+	var lines []string
+	r.Trace = func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, s)
+	}
+	decoded := func(path string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, l := range lines {
+			if strings.Contains(l, "ffmpeg") && strings.Contains(l, "-f null") && strings.Contains(l, path) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, tier := range []string{"quick", "full"} {
+		s := newScanner(t, mustProfile(t, "homelab"), r)
+		s.VerifyTier = tier
+		subs := testutil.Copy(t, "subs.mks")
+		fr := scanOne(t, s, subs)
+		expect(t, fr, report.Pass)
+		if fr.Has(CodeDecodeFail) {
+			t.Errorf("tier %s: subs.mks failed the decode pass: %v", tier, codes(fr))
+		}
+		if decoded(subs) {
+			t.Errorf("tier %s: ffmpeg decode ran on a subtitle-only container", tier)
+		}
+		audio := filepath.Join(t.TempDir(), "audio.mks")
+		if err := os.Rename(testutil.Copy(t, "audio.mka"), audio); err != nil {
+			t.Fatal(err)
+		}
+		fr = scanOne(t, s, audio)
+		if fr.Has(CodeDecodeFail) {
+			t.Errorf("tier %s: audio.mks: %v", tier, codes(fr))
+		}
+		if !decoded(audio) {
+			t.Errorf("tier %s: ffmpeg decode did not run on an audio file named .mks", tier)
 		}
 	}
 }

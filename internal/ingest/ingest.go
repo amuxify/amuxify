@@ -12,6 +12,7 @@ import (
 	"github.com/amuxify/amuxify/internal/clean"
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/remux"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/scan"
@@ -147,11 +148,9 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 				fr.Info = map[string]string{}
 			}
 		case RouteClean:
-			if scan.MediaExts[fsutil.Ext(path)] != "subtitle" {
-				if err := in.decode(ctx, path); err != nil {
-					fr.Addf(scan.CodeDecodeFail, report.Fail, "%v", err)
-					break
-				}
+			if err := in.decode(ctx, path, sc.Info); err != nil {
+				fr.Addf(scan.CodeDecodeFail, report.Fail, "%v", err)
+				break
 			}
 			merge(&fr, in.Cleaner.CleanScanned(ctx, sc))
 		}
@@ -181,15 +180,12 @@ func (in *Ingester) quarantined(fr *report.FileResult, path string) bool {
 
 // decode runs the read-only decode check for the clean route. The scanner
 // ran with tier none, so this is the only decode of the file before
-// mkvpropedit edits its headers.
-func (in *Ingester) decode(ctx context.Context, path string) error {
+// mkvpropedit edits its headers. A container without video or audio, such
+// as a subtitle-only .mks, has nothing to decode and passes; the decision
+// rests on the probed streams, not on the file extension.
+func (in *Ingester) decode(ctx context.Context, path string, info *probe.MediaInfo) error {
 	if in.Verifier == nil {
 		return errors.New("no verifier configured")
 	}
-	switch in.tier() {
-	case "full":
-		return in.Verifier.DecodeFull(ctx, path)
-	default:
-		return in.Verifier.DecodeHeadTail(ctx, path)
-	}
+	return in.Verifier.Decode(ctx, path, info, in.tier() == "full")
 }
