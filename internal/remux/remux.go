@@ -60,6 +60,17 @@ type Remuxer struct {
 	Timeout    time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
+
+	// planned holds, per directory, the names earlier files of a dry run
+	// would write, so that a later file mapping to one of them is reported
+	// with the OUTPUT_EXISTS the live run would produce, such as sample.mp4
+	// and sample.avi both becoming sample.mkv. One Remuxer is one run, and
+	// RemuxPath does not reset it because the command calls RemuxPath once
+	// per path named on the command line. caseFold caches, per directory,
+	// whether its filesystem folds case, which decides whether Ep.mkv and
+	// ep.mkv are one name there.
+	planned  map[string][]string
+	caseFold map[string]bool
 }
 
 func (r *Remuxer) hardlinks() string {
@@ -210,6 +221,12 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
+	// A dry run never writes, so the disk cannot tell it that an earlier
+	// file of this run has already taken dest; the run's own plan does.
+	if r.DryRun && r.plannedCollision(dest) {
+		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
+		return fr
+	}
 
 	d := r.Profile.Decide(sc.Info, policy.Options{OriginalLanguage: r.Original})
 	for _, f := range d.Findings {
@@ -220,6 +237,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	}
 	r.describe(&fr, d)
 	if r.DryRun {
+		r.plan(dest)
 		fr.Addf(CodeDryRun, report.Pass, "would write %s", dest)
 		fr.Output = dest
 		return fr
@@ -505,6 +523,96 @@ func removeOwn(path string, own os.FileInfo) error {
 		return fmt.Errorf("%s is not the file this run placed", path)
 	}
 	return os.Remove(path)
+}
+
+// plan records dest as a destination this dry run would write.
+func (r *Remuxer) plan(dest string) {
+	if r.planned == nil {
+		r.planned = map[string][]string{}
+	}
+	dir := filepath.Dir(dest)
+	r.planned[dir] = append(r.planned[dir], filepath.Base(dest))
+}
+
+// plannedCollision reports whether an earlier file of this dry run already
+// plans to write dest. Names are compared exactly, and without regard to
+// case as well when the destination directory's filesystem folds case,
+// because there Ep.mkv and ep.mkv are one entry and the live run fails the
+// second file with OUTPUT_EXISTS.
+func (r *Remuxer) plannedCollision(dest string) bool {
+	dir, base := filepath.Dir(dest), filepath.Base(dest)
+	names := r.planned[dir]
+	if len(names) == 0 {
+		return false
+	}
+	fold := r.foldsCase(dir)
+	for _, n := range names {
+		if n == base || (fold && strings.EqualFold(n, base)) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldsCase reports whether the filesystem holding dir treats two spellings
+// of a name that differ only in case as one entry, as APFS does by default
+// and Windows filesystems do, and caches the answer per directory for the
+// run. Nothing is written to find out, since a dry run changes nothing:
+// starting at dir, or at its nearest existing ancestor when dir does not
+// exist yet (an output tree is not created by a dry run, and a directory
+// is created on the filesystem of its parent), the entry's own name is
+// looked up under a case-flipped spelling and compared with the entry
+// itself. A name without an ASCII letter cannot be flipped, so the walk
+// continues upward; when it reaches the root without an answer the
+// filesystem is taken to be case-sensitive, which compares names exactly.
+func (r *Remuxer) foldsCase(dir string) bool {
+	if v, ok := r.caseFold[dir]; ok {
+		return v
+	}
+	if r.caseFold == nil {
+		r.caseFold = map[string]bool{}
+	}
+	v := foldsCase(dir)
+	r.caseFold[dir] = v
+	return v
+}
+
+func foldsCase(dir string) bool {
+	cur := filepath.Clean(dir)
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		if fi, err := os.Lstat(cur); err == nil {
+			if flipped := flipCase(filepath.Base(cur)); flipped != "" {
+				other, err := os.Lstat(filepath.Join(parent, flipped))
+				return err == nil && os.SameFile(fi, other)
+			}
+		}
+		cur = parent
+	}
+}
+
+// flipCase swaps the case of every ASCII letter in name and returns the
+// empty string when name holds none.
+func flipCase(name string) string {
+	b := []byte(name)
+	found := false
+	for i, c := range b {
+		switch {
+		case 'a' <= c && c <= 'z':
+			b[i] = c - 'a' + 'A'
+			found = true
+		case 'A' <= c && c <= 'Z':
+			b[i] = c - 'A' + 'a'
+			found = true
+		}
+	}
+	if !found {
+		return ""
+	}
+	return string(b)
 }
 
 // hasEntry reports whether dir holds an entry spelled exactly name. On a
