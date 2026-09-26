@@ -208,7 +208,7 @@ func TestBlockRefusedEvenWithForce(t *testing.T) {
 			rm.Force = force
 			rm.InPlace = inPlace
 			rm.VerifyTier = "quick"
-			fr := rm.remuxScanned(context.Background(), mediaResult(src, report.Block), dir, outRoot)
+			fr := rm.RemuxScanned(context.Background(), mediaResult(src, report.Block), dir, outRoot)
 			if fr.Verdict != report.Block || !fr.Has(CodeRefused) {
 				t.Errorf("force=%v inPlace=%v: %s %v", force, inPlace, fr.Verdict, codes(fr))
 			}
@@ -232,7 +232,7 @@ func TestBlockRefusedEvenWithForce(t *testing.T) {
 	rm.Force = true
 	sc := mediaResult(src, report.Block)
 	sc.Info = nil
-	if fr := rm.remuxScanned(context.Background(), sc, dir, outRoot); fr.Verdict != report.Block {
+	if fr := rm.RemuxScanned(context.Background(), sc, dir, outRoot); fr.Verdict != report.Block {
 		t.Fatalf("verdict lowered to %s", fr.Verdict)
 	}
 }
@@ -246,7 +246,7 @@ func TestFailRefusedWithoutForce(t *testing.T) {
 	}
 	outRoot := filepath.Join(t.TempDir(), "out")
 	rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
-	fr := rm.remuxScanned(context.Background(), mediaResult(src, report.Fail), dir, outRoot)
+	fr := rm.RemuxScanned(context.Background(), mediaResult(src, report.Fail), dir, outRoot)
 	if fr.Verdict != report.Fail || !fr.Has(CodeRefused) {
 		t.Fatalf("%s %v", fr.Verdict, codes(fr))
 	}
@@ -257,7 +257,7 @@ func TestFailRefusedWithoutForce(t *testing.T) {
 	// before any tool.
 	rm.Force = true
 	rm.DryRun = true
-	fr = rm.remuxScanned(context.Background(), mediaResult(src, report.Fail), dir, outRoot)
+	fr = rm.RemuxScanned(context.Background(), mediaResult(src, report.Fail), dir, outRoot)
 	if fr.Has(CodeRefused) || !fr.Has(CodeDryRun) {
 		t.Fatalf("forced: %v", codes(fr))
 	}
@@ -290,7 +290,7 @@ func TestOutputExistsBeforeAnyTool(t *testing.T) {
 	}
 	check := func(t *testing.T, rm *Remuxer, tr *trace, sc scan.Result, root string) {
 		t.Helper()
-		fr := rm.remuxScanned(context.Background(), sc, dir, root)
+		fr := rm.RemuxScanned(context.Background(), sc, dir, root)
 		if fr.Verdict != report.Fail || !fr.Has(CodeOutputExists) {
 			t.Errorf("%s %v", fr.Verdict, codes(fr))
 		}
