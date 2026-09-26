@@ -1611,6 +1611,256 @@ func TestPlantedTempSymlinkRefused(t *testing.T) {
 	}
 }
 
+// Guarantee 1 and 3 for the window tempUnchanged cannot cover: the temp
+// name is checked, and then the placement primitive uses that name again.
+// A symlink swapped onto the name in between is followed by link(2) on
+// macOS, which would leave a hard link to the victim at the destination, and
+// is moved as a link by the rename fallback. The seam performs the swap in
+// exactly that window, after the last check and before the placement. In
+// output mode and for a non-.mkv source in place the foreign entry must be
+// discarded, nothing may be reported as placed, the source and the victim
+// must keep their bytes and their single link, and no temp file may remain.
+// For an .mkv source the rename over the source cannot be checked first, so
+// the run must notice afterwards, say that the source is gone, and leave the
+// entry alone rather than follow or remove it; the victim keeps its bytes
+// and its single link there as well.
+func TestTempSwappedBeforePlacementRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		inPlace bool
+		force   bool
+		rename  bool // the .mkv source path, where tmp is renamed over the source
+	}{
+		{"output tree", "clean.mkv", false, false, false},
+		{"in place under a new name", "purchased.mp4", true, true, false},
+		{"in place over the source", "clean.mkv", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := testutil.Copy(t, tc.fixture)
+			dir := filepath.Dir(src)
+			srcBefore := fileSHA(t, src)
+			victim := testutil.Copy(t, "clean.mkv")
+			victimBefore := fileSHA(t, victim)
+			outRoot := filepath.Join(t.TempDir(), "out")
+			dest := filepath.Join(outRoot, "clean.mkv")
+			if tc.inPlace {
+				dest = filepath.Join(dir, strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))+".mkv")
+			}
+			swapped := false
+			t.Cleanup(func() { beforePlace = nil })
+			beforePlace = func(tmp, _ string) {
+				if err := os.Remove(tmp); err != nil {
+					t.Fatalf("swap: %v", err)
+				}
+				if err := os.Symlink(victim, tmp); err != nil {
+					t.Fatalf("swap: %v", err)
+				}
+				swapped = true
+			}
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm.InPlace = tc.inPlace
+			rm.Force = tc.force
+			if !tc.inPlace {
+				rm.OutputRoot = outRoot
+			}
+			res, err := rm.RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%d results", len(res))
+			}
+			fr := res[0]
+			if len(tr.writes()) == 0 {
+				t.Fatalf("mkvmerge never ran: %v", codes(fr))
+			}
+			if !swapped {
+				t.Fatalf("the seam never ran; the placement was not exercised: %v", codes(fr))
+			}
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			want := []string{"swapped before placement", "was discarded"}
+			if tc.rename {
+				want = []string{"not the file this run built", "is gone"}
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, want[0]) && strings.Contains(f.Message, want[1]) {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not say what happened: %v", fr.Findings)
+			}
+			if fi, err := os.Lstat(victim); err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+				t.Fatalf("victim is no longer a plain regular file with one name: %v", err)
+			}
+			if fileSHA(t, victim) != victimBefore {
+				t.Fatal("victim rewritten")
+			}
+			if tc.rename {
+				// The source was renamed over before the swap could be
+				// seen; the entry that took its place is the planted link
+				// and it must have been left exactly as it was found.
+				fi, err := os.Lstat(src)
+				if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("the planted link at %s was removed or replaced: %v", src, err)
+				}
+				if target, err := os.Readlink(src); err != nil || target != victim {
+					t.Fatalf("the entry at %s is not the planted link: %q %v", src, target, err)
+				}
+			} else {
+				if fileSHA(t, src) != srcBefore {
+					t.Fatal("source changed")
+				}
+				if fi, err := os.Lstat(src); err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+					t.Fatalf("source is no longer a plain regular file: %v", err)
+				}
+				if _, err := os.Lstat(dest); err == nil {
+					t.Fatalf("%s still holds the swapped entry", dest)
+				}
+			}
+			if l := leftovers(t, dir, outRoot); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+		})
+	}
+}
+
+// placedOwn is the check behind the test above. It is driven here with
+// every entry an attacker could leave at the destination: the run's own
+// file passes; a symlink is removed without being followed; a hard link to
+// a victim is removed and the victim keeps its bytes and its single name; a
+// foreign regular file with no other name is left in place and reported as
+// such; a directory is left alone.
+func TestPlacedOwn(t *testing.T) {
+	dir := t.TempDir()
+	own := filepath.Join(dir, "own")
+	if err := os.WriteFile(own, []byte("own"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := os.Lstat(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("victim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := placedOwn(own, created); err != nil {
+		t.Fatalf("own file refused: %v", err)
+	}
+	if _, err := os.Lstat(own); err != nil {
+		t.Fatalf("own file removed: %v", err)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	err = placedOwn(link, created)
+	if err == nil || !strings.Contains(err.Error(), "swapped before placement") || !strings.Contains(err.Error(), "was discarded") {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := os.Lstat(link); err == nil {
+		t.Fatal("symlink left at the destination")
+	}
+
+	hard := filepath.Join(dir, "hard")
+	if err := os.Link(victim, hard); err != nil {
+		t.Fatal(err)
+	}
+	err = placedOwn(hard, created)
+	if err == nil || !strings.Contains(err.Error(), "was discarded") {
+		t.Fatalf("hard link: %v", err)
+	}
+	if _, err := os.Lstat(hard); err == nil {
+		t.Fatal("hard link left at the destination")
+	}
+	if fi, err := os.Lstat(victim); err != nil || fsutil.Nlink(fi) != 1 {
+		t.Fatalf("victim lost its file or kept an extra name: %v", err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "victim" {
+		t.Fatalf("victim rewritten: %q", b)
+	}
+
+	foreign := filepath.Join(dir, "foreign")
+	if err := os.WriteFile(foreign, []byte("foreign"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = placedOwn(foreign, created)
+	if err == nil || !strings.Contains(err.Error(), "left in place") {
+		t.Fatalf("foreign file: %v", err)
+	}
+	if b, err := os.ReadFile(foreign); err != nil || string(b) != "foreign" {
+		t.Fatalf("the only name of a foreign file was removed: %q %v", b, err)
+	}
+
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := placedOwn(sub, created); err == nil {
+		t.Fatal("directory accepted as the placed output")
+	}
+	if _, err := os.Lstat(sub); err != nil {
+		t.Fatalf("directory removed: %v", err)
+	}
+
+	err = placedOwn(filepath.Join(dir, "missing"), created)
+	if err == nil || !strings.Contains(err.Error(), "could not be examined") {
+		t.Fatalf("missing: %v", err)
+	}
+}
+
+// replacedOwn never removes anything, whatever sits at the path, because
+// the source it would have protected is already gone.
+func TestReplacedOwnLeavesTheEntry(t *testing.T) {
+	dir := t.TempDir()
+	own := filepath.Join(dir, "own")
+	if err := os.WriteFile(own, []byte("own"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := os.Lstat(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacedOwn(own, created); err != nil {
+		t.Fatalf("own file refused: %v", err)
+	}
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("victim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, plant := range map[string]func(p string) error{
+		"symlink":   func(p string) error { return os.Symlink(victim, p) },
+		"hard link": func(p string) error { return os.Link(victim, p) },
+		"file":      func(p string) error { return os.WriteFile(p, []byte("foreign"), 0o644) },
+	} {
+		p := filepath.Join(dir, strings.ReplaceAll(name, " ", "_"))
+		if err := plant(p); err != nil {
+			t.Fatal(err)
+		}
+		err := replacedOwn(p, created)
+		if err == nil || !strings.Contains(err.Error(), "not the file this run built") || !strings.Contains(err.Error(), "is gone") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s: the entry was removed: %v", name, err)
+		}
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "victim" {
+		t.Fatalf("victim rewritten: %q", b)
+	}
+	if err := replacedOwn(filepath.Join(dir, "missing"), created); err == nil || !strings.Contains(err.Error(), "is gone") {
+		t.Fatalf("missing: %v", err)
+	}
+}
+
 // finding returns the first finding of fr with the given code.
 func finding(fr report.FileResult, code string) (report.Finding, bool) {
 	for _, f := range fr.Findings {

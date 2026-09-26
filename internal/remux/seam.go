@@ -15,3 +15,9 @@ var streamHash = func(ctx context.Context, v *verify.Verifier, path string, inde
 var decodedHash = func(ctx context.Context, v *verify.Verifier, path string, s probe.Stream) (string, error) {
 	return v.DecodedHash(ctx, path, s)
 }
+
+// beforePlace, when set, runs right before a verified temp file is placed,
+// after the last check of the temp name and before the placement primitive
+// uses that name again. Tests in this package set it to swap the temp name
+// in that window; it is nil in production.
+var beforePlace func(tmp, dest string)

@@ -271,7 +271,9 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	// is handed to mkvmerge, so a symlink planted at the name in the
 	// meantime can only get there by replacing this run's own entry, which
 	// tempUnchanged notices after mkvmerge returns and again before the
-	// output is placed. mkvmerge writing through a planted link would
+	// output is placed; placedOwn and replacedOwn then examine the placed
+	// entry, because the placement primitive uses the name once more after
+	// that last check. mkvmerge writing through a planted link would
 	// otherwise be verified through that link and the link itself placed.
 	// cleanup removes whatever sits at the name; os.Remove never follows a
 	// link, so a planted one is removed and its target is left alone.
@@ -345,6 +347,9 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// Only a file that appeared at dest is OUTPUT_EXISTS; any other
 		// placement failure, such as a directory that became unwritable,
 		// is a failed remux and says so.
+		if beforePlace != nil {
+			beforePlace(tmp, dest)
+		}
 		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
 			cleanup()
 			if errors.Is(err, fsutil.ErrExists) {
@@ -352,6 +357,14 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			} else {
 				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
 			}
+			return fr
+		}
+		// tempUnchanged looked at the name and PlaceNoClobber then used
+		// it again, so the entry now at dest is checked against the file
+		// this run created before it is reported as placed.
+		if err := placedOwn(dest, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
 		}
 		fr.Output = dest
@@ -374,9 +387,26 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// name. When only the extension case differs the entry is renamed
 		// to the .mkv spelling last; it is the same entry, so that rename
 		// cannot replace any other file.
+		//
+		// The rename over the source cannot be checked before it happens
+		// without renameat2 or renamex_np, which amuxify does not use, so
+		// a window stays open between the tempUnchanged check above and
+		// the rename: it needs write access to the source's directory, and
+		// a symlink swapped onto the temp name in it is renamed over the
+		// source as a link. The entry is examined right after the rename;
+		// when it is not the file this run built the source is already
+		// gone, so the entry is reported and left alone, never followed
+		// and never removed.
+		if beforePlace != nil {
+			beforePlace(tmp, fr.Path)
+		}
 		if err := fsutil.ReplaceInPlace(tmp, fr.Path); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "replace: %v", err)
+			return fr
+		}
+		if err := replacedOwn(fr.Path, created); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
 		}
 		if sameEntry {
@@ -403,6 +433,9 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "identity: %v", err)
 			return fr
 		}
+		if beforePlace != nil {
+			beforePlace(tmp, dest)
+		}
 		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
 			cleanup()
 			if errors.Is(err, fsutil.ErrExists) {
@@ -410,6 +443,14 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			} else {
 				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
 			}
+			return fr
+		}
+		// The entry at dest must be the file this run created before the
+		// source is removed on its account; a foreign entry is discarded
+		// and the source stays.
+		if err := placedOwn(dest, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched", err)
 			return fr
 		}
 		// The source is checked one last time now that the output sits at
@@ -509,6 +550,51 @@ func tempUnchanged(tmp string, created os.FileInfo) error {
 		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
 	}
 	return nil
+}
+
+// placedOwn reports an error when the entry PlaceNoClobber left at dest is
+// not the regular file described by created. tempUnchanged checks the temp
+// name before placement, but PlaceNoClobber then uses the name again, and
+// os.Link follows a symlink on some systems (macOS among them), so a
+// symlink swapped onto the temp name between the check and the link would
+// place a hard link to the link's target at dest; on the rename fallback
+// the symlink itself would land there. The foreign entry is removed only
+// when removing it cannot delete the last name of any file: a symlink, or
+// a regular file that still has another name, which is what a hard link to
+// a symlink's target is. A regular file whose only name is dest is left in
+// place, because on a filesystem whose inode numbers change across a rename
+// this run's own output would look foreign after the rename fallback, and
+// removing it would delete the only copy of the output. The error says
+// which happened.
+func placedOwn(dest string, created os.FileInfo) error {
+	now, err := os.Lstat(dest)
+	if err != nil {
+		return fmt.Errorf("the output placed at %s could not be examined: %v", dest, err)
+	}
+	if now.Mode().IsRegular() && os.SameFile(created, now) {
+		return nil
+	}
+	if now.Mode()&os.ModeSymlink != 0 || (now.Mode().IsRegular() && fsutil.Nlink(now) >= 2) {
+		_ = os.Remove(dest)
+		return fmt.Errorf("the output was swapped before placement; the entry placed at %s was discarded", dest)
+	}
+	return fmt.Errorf("the entry placed at %s is not the file this run built; it was left in place", dest)
+}
+
+// replacedOwn reports an error when the entry ReplaceInPlace left at path
+// is not the regular file described by created. Unlike placedOwn it never
+// removes anything: the rename has already replaced the source, so whatever
+// sits at path is the only entry left under that name, and a symlink there
+// is reported rather than followed or deleted.
+func replacedOwn(path string, created os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("the entry placed at %s could not be examined: %v; the source it replaced is gone", path, err)
+	}
+	if now.Mode().IsRegular() && os.SameFile(created, now) {
+		return nil
+	}
+	return fmt.Errorf("the entry placed at %s is not the file this run built; the source it replaced is gone and the entry was left in place", path)
 }
 
 // removeOwn removes path only when it still is the regular file described
