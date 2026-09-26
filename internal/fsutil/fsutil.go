@@ -104,8 +104,11 @@ func Ext(path string) string {
 	return strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
 }
 
+// Geteuid is os.Geteuid, replaceable in tests that exercise the root refusal.
+var Geteuid = os.Geteuid
+
 // IsRoot reports whether the process runs as uid 0.
-func IsRoot() bool { return os.Geteuid() == 0 }
+func IsRoot() bool { return Geteuid() == 0 }
 
 // Abs returns a cleaned absolute path or an error.
 func Abs(p string) (string, error) {
