@@ -24,8 +24,12 @@ jobs:
       - run: make test-required
       - run: make build
       - run: ./bin/amuxify doctor
-      # enabled by WP1
-      - run: ./bin/amuxify ingest --dry-run testdata/out
+      # enabled by WP1: the corpus holds BLOCK fixtures, so the dry run
+      # must exit 4 and nothing else
+      - run: |
+          status=0
+          ./bin/amuxify ingest --dry-run testdata/out || status=$?
+          test "$status" -eq 4
       # enabled by WP2
       # - run: sonarr_eventtype=Test ./bin/amuxify hook sonarr
   docker:
