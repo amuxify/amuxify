@@ -36,8 +36,9 @@ type Scanner struct {
 	ClamAV bool
 	// Quarantine, when set, moves BLOCK files under this directory.
 	Quarantine string
-	// ScanLinks controls text-subtitle extraction; defaults from profile.
-	Trace func(string)
+	// Progress, when set, receives each result as soon as the file is done.
+	Progress func(Result)
+	Trace    func(string)
 }
 
 // MediaExts are extensions treated as media to be probed.
@@ -80,6 +81,9 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	}
 	if !fi.IsDir() {
 		r := s.ScanFile(ctx, abs, filepath.Dir(abs))
+		if s.Progress != nil {
+			s.Progress(r)
+		}
 		return []Result{r}, nil
 	}
 	var paths []string
@@ -105,7 +109,11 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		out = append(out, s.ScanFile(ctx, p, abs))
+		r := s.ScanFile(ctx, p, abs)
+		if s.Progress != nil {
+			s.Progress(r)
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }

@@ -53,6 +53,8 @@ type Cleaner struct {
 	StripAudioTags        bool
 	Hardlinks             string
 	Timeout               time.Duration
+	// Progress, when set, receives each result as soon as the file is done.
+	Progress func(report.FileResult)
 }
 
 func (c *Cleaner) hardlinks() string {
@@ -97,7 +99,11 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		out = append(out, c.CleanFile(ctx, p))
+		fr := c.CleanFile(ctx, p)
+		if c.Progress != nil {
+			c.Progress(fr)
+		}
+		out = append(out, fr)
 	}
 	return out, nil
 }

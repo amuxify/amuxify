@@ -163,27 +163,38 @@ func (s *Summary) WriteJSON(w io.Writer) error {
 // indented, then a count line and the run verdict.
 func (s *Summary) WriteHuman(w io.Writer, verbose bool) {
 	for _, f := range s.Files {
-		fmt.Fprintf(w, "%-5s %s\n", f.Verdict, f.Path)
-		for _, fd := range f.Findings {
-			if fd.Severity == Pass && !verbose {
-				continue
-			}
-			fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, fd.Message)
-			if verbose && fd.Detail != "" {
-				for _, line := range strings.Split(fd.Detail, "\n") {
-					fmt.Fprintf(w, "            %s\n", line)
-				}
-			}
+		f.WriteHuman(w, verbose)
+	}
+	s.WriteHumanTail(w)
+}
+
+// WriteHuman prints one file's verdict line and its findings. Used both for
+// the final report and for streaming a result as soon as the file is done.
+func (f *FileResult) WriteHuman(w io.Writer, verbose bool) {
+	fmt.Fprintf(w, "%-5s %s\n", f.Verdict, f.Path)
+	for _, fd := range f.Findings {
+		if fd.Severity == Pass && !verbose {
+			continue
 		}
-		if f.Output != "" {
-			fmt.Fprintf(w, "      -> %s\n", f.Output)
-		}
-		if verbose {
-			for _, a := range f.Actions {
-				fmt.Fprintf(w, "      * %s\n", a)
+		fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, fd.Message)
+		if verbose && fd.Detail != "" {
+			for _, line := range strings.Split(fd.Detail, "\n") {
+				fmt.Fprintf(w, "            %s\n", line)
 			}
 		}
 	}
+	if f.Output != "" {
+		fmt.Fprintf(w, "      -> %s\n", f.Output)
+	}
+	if verbose {
+		for _, a := range f.Actions {
+			fmt.Fprintf(w, "      * %s\n", a)
+		}
+	}
+}
+
+// WriteHumanTail prints run-level errors and the count line.
+func (s *Summary) WriteHumanTail(w io.Writer) {
 	for _, e := range s.Errors {
 		fmt.Fprintf(w, "ERROR %s\n", e)
 	}
