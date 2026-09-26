@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-# Compatibility shim: amux-scan-all is now "amuxify scan" with --profile archive.
-echo "amux-scan-all: deprecated, use: amuxify --profile archive scan \"$@\"" >&2
-exec amuxify --profile archive scan "$@"

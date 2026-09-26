@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 # Installs the latest amuxify release binary for this OS and CPU.
 # Verifies the SHA-256 checksum published with the release before installing.
-#   curl -fsSL https://raw.githubusercontent.com/nxame/amuxify/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
 #   PREFIX=$HOME/.local sh install.sh
 #   VERSION=0.2.0 sh install.sh
 set -eu
-REPO="nxame/amuxify"
+REPO="amuxify/amuxify"
 PREFIX="${PREFIX:-/usr/local}"
 BIN="$PREFIX/bin"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"

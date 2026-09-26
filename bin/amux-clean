@@ -1,5 +1,0 @@
-#!/usr/bin/env sh
-# Compatibility shim: amux-clean is now "amuxify clean" with --profile archive.
-# This shim is kept for one release; see MIGRATION.md.
-echo "amux-clean: deprecated, use: amuxify --profile archive clean \"$@\"" >&2
-exec amuxify --profile archive clean "$@"

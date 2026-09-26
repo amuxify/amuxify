@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/nxame/amuxify/internal/cli"
+	"github.com/amuxify/amuxify/internal/cli"
 )
 
 func main() {

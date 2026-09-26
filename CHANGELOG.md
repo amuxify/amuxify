@@ -5,8 +5,8 @@ All notable changes to amuxify will be documented in this file.
 ## 0.2.0
 
 Rewrite in Go. One binary, four built-in profiles, every common container as
-input, mkvmerge as the only MKV writer. See MIGRATION.md for the full list of
-behaviour changes.
+input, mkvmerge as the only MKV writer. The repository moved to
+`github.com/amuxify/amuxify` (module path `github.com/amuxify/amuxify`).
 
 ### Added
 
@@ -30,9 +30,8 @@ behaviour changes.
   symlink skipping, root refusal, owner/mode/mtime preservation in place.
 - Stable exit codes 0/1/2/3/4/130 and a JSON report.
 - `doctor` with version floors (MKVToolNix 50, ffmpeg 4.4).
-- Static release binaries for Linux and macOS, Docker image, Homebrew tap,
-  checksum-verified `install.sh`.
-- Differential test against the frozen 0.1.x scripts.
+- Static release binaries for Linux and macOS, Docker image at
+  `ghcr.io/amuxify/amuxify`, checksum-verified `install.sh`.
 
 ### Changed
 
@@ -41,13 +40,10 @@ behaviour changes.
 - Untagged-language tracks never prompt; `languages.und` decides.
 - Extended-attribute removal is limited to `user.*` and `com.apple.*`.
 
-### Deprecated
-
-- `amux-scan`, `amux-scan-all`, `amux-remux`, `amux-clean` are shims that call
-  `amuxify --profile archive ...`; removed in 0.4.
-
 ### Removed
 
+- The `amux-scan`, `amux-scan-all`, `amux-remux` and `amux-clean` commands.
+  The command mapping is in the README; the scripts remain in the `v0.1.1` tag.
 - ffmpeg as MKV writer; `--strict-permissions`, `--allow-data-tag`, `--deep`
   flags (now profile keys and `--verify full`); the exiftool hard dependency;
   `ulimit`/`gtimeout` requirements.

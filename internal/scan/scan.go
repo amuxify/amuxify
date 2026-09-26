@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nxame/amuxify/internal/exec"
-	"github.com/nxame/amuxify/internal/fsutil"
-	"github.com/nxame/amuxify/internal/mp4"
-	"github.com/nxame/amuxify/internal/policy"
-	"github.com/nxame/amuxify/internal/probe"
-	"github.com/nxame/amuxify/internal/report"
-	"github.com/nxame/amuxify/internal/sniff"
-	"github.com/nxame/amuxify/internal/verify"
+	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
+	"github.com/amuxify/amuxify/internal/mp4"
+	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/probe"
+	"github.com/amuxify/amuxify/internal/report"
+	"github.com/amuxify/amuxify/internal/sniff"
+	"github.com/amuxify/amuxify/internal/verify"
 )
 
 // Scanner holds the tools and policy for a run.

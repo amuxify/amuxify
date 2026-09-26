@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nxame/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/exec"
 )
 
 // Stream is one elementary stream.

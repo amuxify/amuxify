@@ -16,16 +16,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nxame/amuxify/internal/clean"
-	"github.com/nxame/amuxify/internal/doctor"
-	"github.com/nxame/amuxify/internal/exec"
-	"github.com/nxame/amuxify/internal/fsutil"
-	"github.com/nxame/amuxify/internal/policy"
-	"github.com/nxame/amuxify/internal/probe"
-	"github.com/nxame/amuxify/internal/remux"
-	"github.com/nxame/amuxify/internal/report"
-	"github.com/nxame/amuxify/internal/scan"
-	"github.com/nxame/amuxify/internal/verify"
+	"github.com/amuxify/amuxify/internal/clean"
+	"github.com/amuxify/amuxify/internal/doctor"
+	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
+	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/probe"
+	"github.com/amuxify/amuxify/internal/remux"
+	"github.com/amuxify/amuxify/internal/report"
+	"github.com/amuxify/amuxify/internal/scan"
+	"github.com/amuxify/amuxify/internal/verify"
 )
 
 // Version is set by the linker (-X ...cli.Version=x.y.z) or falls back.

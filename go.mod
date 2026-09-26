@@ -1,4 +1,4 @@
-module github.com/nxame/amuxify
+module github.com/amuxify/amuxify
 
 go 1.26.0
 

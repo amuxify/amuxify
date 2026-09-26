@@ -17,7 +17,7 @@ builds:
       - { goos: windows, goarch: arm64 }
     flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/nxame/amuxify/internal/cli.Version={{.Version}}
+      - -s -w -X github.com/amuxify/amuxify/internal/cli.Version={{.Version}}
 archives:
   - id: default
     formats: [tar.gz]
@@ -25,7 +25,7 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
-    files: [LICENSE, README.md, CHANGELOG.md, MIGRATION.md, docs/*]
+    files: [LICENSE, README.md, CHANGELOG.md, docs/*]
 checksum:
   name_template: checksums.txt
   algorithm: sha256
@@ -35,16 +35,3 @@ changelog:
 release:
   draft: true
   prerelease: auto
-brews:
-  - repository:
-      owner: nxame
-      name: homebrew-tap
-    directory: Formula
-    homepage: https://amuxify.com
-    description: The ingest gate for self-hosted media
-    license: BSD-3-Clause
-    dependencies:
-      - name: ffmpeg
-      - name: mkvtoolnix
-    test: |
-      system "#{bin}/amuxify", "version"

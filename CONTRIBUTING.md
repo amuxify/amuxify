@@ -10,7 +10,6 @@ codes, finding codes or the JSON report; those are public interfaces.
 brew install ffmpeg mkvtoolnix     # or your distro's packages
 make build && ./bin/amuxify doctor
 make test                          # vet + unit tests, no media tools needed
-make difftest                      # differential test against legacy/, needs the tools
 ```
 
 Go 1.26 or newer, `gofmt` clean (`make fmt`). No new dependencies without an

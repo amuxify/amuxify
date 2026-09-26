@@ -24,11 +24,6 @@ jobs:
       - run: make test
       - run: make build
       - run: ./bin/amuxify doctor
-      # The frozen 0.1.x Bash scripts under legacy/ assume macOS tooling, so
-      # the differential test only runs there.
-      - name: Differential test against legacy scripts
-        if: runner.os == 'macOS'
-        run: make difftest
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -72,17 +72,14 @@ rejected so a typo cannot silently widen a policy.
 ## Install
 
 Binaries for Linux (amd64, arm64, armv7) and macOS (arm64, amd64) are on the
-[releases page](https://github.com/nxame/amuxify/releases) with SHA-256 sums.
+[releases page](https://github.com/amuxify/amuxify/releases) with SHA-256 sums.
 
 ```sh
 # script: downloads, verifies the checksum, installs to /usr/local/bin
-curl -fsSL https://raw.githubusercontent.com/nxame/amuxify/main/install.sh | sh
-
-# Homebrew
-brew install nxame/tap/amuxify
+curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
 
 # Docker (run as the uid that owns the library, never root)
-docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/nxame/amuxify scan /data
+docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/amuxify/amuxify scan /data
 
 # from source
 make build && ./bin/amuxify doctor
@@ -117,15 +114,25 @@ exit code. Examples in [docs/hooks.md](docs/hooks.md).
 
 ## Upgrading from 0.1.x
 
-The Bash scripts are frozen under `legacy/`. `amux-scan`, `amux-scan-all`,
-`amux-remux` and `amux-clean` are shims that call `amuxify --profile archive`
-for one release. Behaviour changes are listed in [MIGRATION.md](MIGRATION.md).
+0.2.0 replaces the Bash scripts with one binary and a different default
+policy. The 0.1.x rules live on as `--profile archive`:
+
+| 0.1.x | 0.2.0 |
+|---|---|
+| `amux-scan <dir>`, `amux-scan-all <dir>` | `amuxify --profile archive scan <dir>` |
+| `amux-scan-all --deep` | `amuxify scan --verify full` |
+| `amux-remux <dir>` | `amuxify --profile archive remux <dir>` |
+| `amux-clean <dir>` | `amuxify --profile archive clean <dir>` |
+| `AMUXIFY_UND_POLICY=drop\|english` | `languages.und = "drop"` or `"assume:eng"` in the profile |
+
+Set `AMUXIFY_PROFILE=archive` to keep the old behaviour everywhere. Exit codes
+changed to the table above. The scripts themselves are in the `v0.1.1` tag.
 
 ## Documentation
 
 - [docs/install.md](docs/install.md), [docs/profiles.md](docs/profiles.md), [docs/safety.md](docs/safety.md)
 - [docs/hooks.md](docs/hooks.md), [docs/report.md](docs/report.md), [docs/comparison.md](docs/comparison.md)
-- [docs/design.md](docs/design.md), [MIGRATION.md](MIGRATION.md), [CHANGELOG.md](CHANGELOG.md)
+- [docs/design.md](docs/design.md), [CHANGELOG.md](CHANGELOG.md)
 - [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
