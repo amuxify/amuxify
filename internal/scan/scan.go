@@ -83,9 +83,13 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	if !fi.IsDir() {
 		scanRoot = filepath.Dir(abs)
 	}
+	if err := CheckQuarantineRoot(abs, s.Quarantine); err != nil {
+		return nil, err
+	}
 	// Walk lists every readable entry and names the unreadable ones in
 	// walkErr; those are reported at run level after the readable files.
-	paths, walkErr := Walk(abs)
+	// A quarantine directory inside the tree is not entered.
+	paths, walkErr := Walk(abs, QuarantineExcludes(abs, s.Quarantine)...)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -551,9 +555,89 @@ func (s *Scanner) polyglot(path string, size int64) string {
 	return ""
 }
 
+// quarantineForms returns the cleaned absolute path of the quarantine
+// directory and, when it exists, its symlink-resolved path, so a quarantine
+// named through a symlink or through ".." compares equal to the directory
+// the walk meets. It is empty when no quarantine is set.
+func quarantineForms(quarantine string) []string {
+	if quarantine == "" {
+		return nil
+	}
+	abs, err := fsutil.Abs(quarantine)
+	if err != nil {
+		return []string{filepath.Clean(quarantine)}
+	}
+	forms := []string{abs}
+	if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+		forms = append(forms, real)
+	}
+	return forms
+}
+
+// QuarantineExcludes returns the directories a walk from root must not
+// enter for the given quarantine directory: the directory's own forms and,
+// when its resolved path lies under the resolved root, that place spelled
+// under root as the walk will meet it, so a quarantine directory named
+// through a symlink to the tree is still recognised. It is nil when
+// quarantine is empty.
+func QuarantineExcludes(root, quarantine string) []string {
+	forms := quarantineForms(quarantine)
+	if len(forms) == 0 {
+		return nil
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return forms
+	}
+	for _, q := range forms {
+		rel, err := filepath.Rel(realRoot, q)
+		if err != nil || rel == "." || escapes(rel) {
+			continue
+		}
+		forms = append(forms, filepath.Join(root, rel))
+	}
+	return forms
+}
+
+// escapes reports whether a relative path leaves the directory it is
+// relative to: it is "..", starts with "../", or is absolute.
+func escapes(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
+}
+
+// CheckQuarantineRoot returns an error when root is the quarantine
+// directory or lies inside it, in which case quarantined files would be
+// scanned again and moved one level deeper on every run. Both paths are
+// compared in their cleaned absolute form and, where they exist, in their
+// symlink-resolved form, so a trailing slash, a ".." component, a relative
+// path or a symlink to the quarantine directory does not slip past. It
+// returns nil when quarantine is empty.
+func CheckQuarantineRoot(root, quarantine string) error {
+	qs := quarantineForms(quarantine)
+	if len(qs) == 0 {
+		return nil
+	}
+	rs := quarantineForms(root)
+	for _, r := range rs {
+		for _, q := range qs {
+			rel, err := filepath.Rel(q, r)
+			if err != nil {
+				continue
+			}
+			if rel == "." {
+				return fmt.Errorf("%s is the quarantine directory; the quarantine directory must lie outside the tree it serves", root)
+			}
+			if !escapes(rel) {
+				return fmt.Errorf("%s lies inside the quarantine directory %s; the quarantine directory must lie outside the tree it serves", root, quarantine)
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	rel, err := filepath.Rel(root, fr.Path)
-	if err != nil || rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if err != nil || rel == "" || rel == "." || escapes(rel) {
 		// A caller that hands the file itself as the root, or a root the
 		// file does not sit under, still gets the file placed under the
 		// quarantine directory by its base name; the destination is never

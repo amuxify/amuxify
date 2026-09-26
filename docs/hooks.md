@@ -245,7 +245,11 @@ read as its value: `hook sonarr`, `hook radarr` and `hook nzbget` take no
 positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's eight
 parameters, so the stray word is a usage error, and the message says to write
 `--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
-cleared under `--dry-run`.
+cleared under `--dry-run`. The quarantine directory must lie outside the
+paths being processed: a path that is the quarantine directory or lies inside
+it is refused as a usage error before anything runs, and a quarantine
+directory that sits inside the tree is skipped by the walk, so a file that
+was quarantined by an earlier run is never scanned or moved again.
 
 `--remove-blocked-sidecars` deletes sidecar files whose extension is on the
 profile's block list (`SIDECAR_BLOCKED`). Without it they are reported and left
@@ -289,7 +293,8 @@ amuxify ingest /srv/media/incoming
 ```
 
 `--quarantine` moves BLOCK files into a mirrored tree under the given directory
-so they stop being picked up, without deleting anything. `ingest` then rebuilds
+so they stop being picked up, without deleting anything. The directory may sit
+inside the incoming tree, as above; the walk skips it. `ingest` then rebuilds
 or cleans what is left, in place, and exits with the worst verdict of the run.
 
 ## Docker

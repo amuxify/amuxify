@@ -1404,3 +1404,157 @@ func TestSkipOrFailHonoursRequireTools(t *testing.T) {
 	// without failing this test; the predicate it branches on is asserted
 	// above.
 }
+
+// quarantineSpellings are the ways a quarantine directory that sits at
+// <root>/quarantine can be written: plain, with a trailing separator, through
+// a ".." component, relative to the working directory, and through a symlink
+// to the tree. Each must name the same directory to the walk and the check.
+func quarantineSpellings(t *testing.T, root string) map[string]func(t *testing.T) string {
+	t.Helper()
+	return map[string]func(t *testing.T) string{
+		"plain":          func(*testing.T) string { return filepath.Join(root, "quarantine") },
+		"trailing slash": func(*testing.T) string { return filepath.Join(root, "quarantine") + string(filepath.Separator) },
+		"dot dot":        func(*testing.T) string { return filepath.Join(root, "sub", "..", "quarantine") },
+		"relative": func(t *testing.T) string {
+			t.Chdir(root)
+			return "quarantine"
+		},
+		"through a symlink": func(t *testing.T) string {
+			link := filepath.Join(t.TempDir(), "link")
+			if err := os.Symlink(root, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return filepath.Join(link, "quarantine")
+		},
+	}
+}
+
+// A quarantine directory inside the scanned tree is never walked: the BLOCK
+// file is moved once, a second run neither lists nor moves it, and every
+// other file is still listed. This holds for every spelling of the
+// directory, so a run cannot push quarantined files one level deeper each
+// time (quarantine/quarantine/...).
+func TestQuarantineInsideTreeIsNotRescanned(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	for name, spell := range quarantineSpellings(t, root) {
+		t.Run(name, func(t *testing.T) {
+			tree := filepath.Join(root, name)
+			write(t, filepath.Join(tree, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			write(t, filepath.Join(tree, "sub", "keep.nfo"), "nfo\n", 0o644)
+			write(t, filepath.Join(tree, "ok.nfo"), "nfo\n", 0o644)
+			q := strings.Replace(spell(t), "quarantine", filepath.Join(name, "quarantine"), 1)
+			s := newScanner(t, mustProfile(t, "homelab"), nil)
+			s.Quarantine = q
+			dest := filepath.Join(tree, "quarantine", "sub", "x.url")
+			listed := func(res []Result) []string {
+				var out []string
+				for _, r := range res {
+					rel, _ := filepath.Rel(tree, r.File.Path)
+					out = append(out, filepath.ToSlash(rel))
+				}
+				sort.Strings(out)
+				return out
+			}
+			res, err := s.ScanPath(context.Background(), tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := listed(res); strings.Join(got, ",") != "ok.nfo,sub/keep.nfo,sub/x.url" {
+				t.Fatalf("first run listed %v", got)
+			}
+			fi, err := os.Lstat(dest)
+			if err != nil {
+				t.Fatalf("not quarantined at %s: %v", dest, err)
+			}
+			res, err = s.ScanPath(context.Background(), tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := listed(res); strings.Join(got, ",") != "ok.nfo,sub/keep.nfo" {
+				t.Fatalf("second run listed %v; the quarantine directory was walked", got)
+			}
+			now, err := os.Lstat(dest)
+			if err != nil || !os.SameFile(fi, now) {
+				t.Errorf("the quarantined file was touched: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(tree, "quarantine", "quarantine")); err == nil {
+				t.Error("a nested quarantine directory was created")
+			}
+		})
+	}
+}
+
+// A scan whose root is the quarantine directory, or lies inside it, is
+// refused before any file is looked at, whatever way either path is
+// written, and nothing inside the quarantine directory moves.
+func TestScanRootInsideQuarantineIsRefused(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	for name, spell := range quarantineSpellings(t, root) {
+		t.Run(name, func(t *testing.T) {
+			q := spell(t)
+			qAbs := filepath.Join(root, "quarantine")
+			held := write(t, filepath.Join(qAbs, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			s := newScanner(t, mustProfile(t, "homelab"), nil)
+			s.Quarantine = q
+			var progress int
+			s.Progress = func(Result) { progress++ }
+			for _, tc := range []struct{ root, want string }{
+				{qAbs, "is the quarantine directory"},
+				{qAbs + string(filepath.Separator), "is the quarantine directory"},
+				{filepath.Join(qAbs, "sub", "..", "sub"), "lies inside the quarantine directory"},
+				{filepath.Join(qAbs, "sub"), "lies inside the quarantine directory"},
+				{held, "lies inside the quarantine directory"},
+				{q, "is the quarantine directory"},
+			} {
+				res, err := s.ScanPath(context.Background(), tc.root)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("root %s: got %v, want %q", tc.root, err, tc.want)
+				}
+				if len(res) != 0 || progress != 0 {
+					t.Errorf("root %s: %d results, %d progress calls", tc.root, len(res), progress)
+				}
+			}
+			if _, err := os.Lstat(held); err != nil {
+				t.Errorf("a file inside the quarantine directory moved: %v", err)
+			}
+			// The tree beside the quarantine directory is still scanned in
+			// full, and a sibling directory whose name merely starts with
+			// the quarantine directory's name is not excluded.
+			write(t, filepath.Join(root, "quarantine2", "y.nfo"), "nfo\n", 0o644)
+			write(t, filepath.Join(root, "z.nfo"), "nfo\n", 0o644)
+			res, err := s.ScanPath(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range res {
+				rel, _ := filepath.Rel(root, r.File.Path)
+				got = append(got, filepath.ToSlash(rel))
+			}
+			sort.Strings(got)
+			if strings.Join(got, ",") != "quarantine2/y.nfo,z.nfo" {
+				t.Errorf("listed %v", got)
+			}
+			if err := os.RemoveAll(filepath.Join(root, "quarantine2")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(root, "z.nfo")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// Without a quarantine directory nothing is refused or excluded.
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	if err := CheckQuarantineRoot(root, ""); err != nil {
+		t.Error(err)
+	}
+	if got := QuarantineExcludes(root, ""); got != nil {
+		t.Errorf("excludes %v for no quarantine", got)
+	}
+	res, err := s.ScanPath(context.Background(), filepath.Join(root, "quarantine"))
+	if err != nil || len(res) != 1 {
+		t.Errorf("plain scan of the former quarantine directory: %d results, %v", len(res), err)
+	}
+}
