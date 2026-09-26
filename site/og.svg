@@ -19,4 +19,13 @@
     <text x="544" y="490" font-size="24" fill="#9fb3c8">SABnzbd, NZBGet, Sonarr and Radarr.</text>
     <text x="544" y="562" font-size="22" font-weight="600" fill="#6cb2eb">amuxify.com</text>
   </g>
+  <!-- open source badge, top right -->
+  <g transform="translate(846 44)">
+    <rect x="0" y="0" width="314" height="52" rx="26" fill="#0b1420" stroke="#2f6f9f" stroke-width="2"/>
+    <!-- keyhole glyph -->
+    <circle cx="30" cy="26" r="13" fill="none" stroke="#6cb2eb" stroke-width="4"/>
+    <circle cx="30" cy="22" r="3.5" fill="#6cb2eb"/>
+    <path d="M27.5 24 L25 33 L35 33 L32.5 24 Z" fill="#6cb2eb"/>
+    <text x="56" y="34" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="22" font-weight="600" fill="#e6edf3">Open source <tspan fill="#6cb2eb">·</tspan> BSD-3-Clause</text>
+  </g>
 </svg>
