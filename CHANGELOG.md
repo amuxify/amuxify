@@ -27,7 +27,7 @@ All notable changes to amuxify will be documented in this file.
   the fixture corpus that skip when tools are missing and fail in CI.
 - Hardening: every directory in a quarantine or output path is checked for
   symlinks before a file is placed under it; the tools run with a UTF-8 locale
-  so that their output is read the same everywhere; decode verification checks
+  and English messages so that their output is read the same everywhere; decode verification checks
   the streams ffprobe reported rather than a fixed set; cleaning an MP4 twice
   leaves it unchanged; a tool named by a `tools.*` override must be executable
   or `doctor` reports it; a cancelled or timed-out run reports the cancellation

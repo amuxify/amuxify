@@ -261,8 +261,12 @@ func cleanEnv() []string {
 	keep := []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "USERPROFILE"}
 	// The locale is pinned so tool output parses the same everywhere; see
 	// Locale for why it is a UTF-8 one and where it comes from.
+	// LC_ALL is left unset on purpose: LANG and LC_CTYPE carry the UTF-8
+	// locale, and LC_MESSAGES=C asks every tool for English messages, so
+	// the text the remuxer reads back (mkvmerge's "Warning:" lines) does
+	// not change with the user's language.
 	loc := Locale()
-	env := []string{"LC_ALL=" + loc, "LANG=" + loc}
+	env := []string{"LANG=" + loc, "LC_CTYPE=" + loc, "LC_MESSAGES=C"}
 	for _, k := range keep {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)
