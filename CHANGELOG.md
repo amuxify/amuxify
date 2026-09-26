@@ -63,19 +63,36 @@ All notable changes to amuxify will be documented in this file.
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under
   `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
-  A quarantine move on the same filesystem now refuses a source that is not
-  a regular file and checks that the entry it placed is the very file it
-  started with, so a symlink swapped in during the move can never leave a
-  hard link to its target in the quarantine tree; an entry that fails that
-  check is removed only when it is not the last name of a file. A
+- Verification fixes. An in-place rebuild checks, right before it replaces or
+  removes the source, that the file at that path is still the one it rebuilt
+  and verified, and refuses with `REMUX_FAIL` when the file was swapped while
+  mkvmerge ran; the temp file is created by amuxify itself and checked after
+  mkvmerge returns and again before placement, so a symlink planted at the
+  temp name is never followed. The entry placed at the destination is checked
+  to be the file the run built, and the ownership, mode and time copy onto an
+  in-place output, in `remux` and in the MP4 rewrite of `clean`, goes through
+  the open descriptor of that file rather than through its name, so a symlink
+  swapped onto the temp name after the last check cannot have its target's
+  mode or time rewritten; a failed replacement in the MP4 rewrite is now
+  reported as `CLEAN_FAIL` instead of being lost. A dry run of `remux`
+  predicts the `OUTPUT_EXISTS` collision two files of one run produce when
+  they rebuild to the same destination, as an `ingest` dry run already did,
+  and the prediction treats `Ep.mkv` and `ep.mkv` as one entry on a
+  case-insensitive filesystem. A placement failure in output mode that is not
+  an existing destination is reported as `REMUX_FAIL` with the reason instead
+  of `OUTPUT_EXISTS`. A quarantine move on the same filesystem now refuses a
+  source that is not a regular file and checks that the entry it placed is the
+  very file it started with, so a symlink swapped in during the move can never
+  leave a hard link to its target in the quarantine tree; an entry that fails
+  that check is removed only when it is not the last name of a file. A
   quarantine directory that sits inside the scanned tree is skipped by the
   walk, and a path that is the quarantine directory or lies inside it is
-  refused as a usage error before anything runs, so a file is quarantined
-  once rather than moved a level deeper on every run; both checks compare
+  refused as a usage error before anything runs, so a file is quarantined once
+  rather than moved a level deeper on every run; both checks compare
   directories by identity, so another spelling or letter case of the same
   directory does not defeat them. The human report sanitiser and the
-  `BIDI_NAME` check now cover every Unicode format character, including
-  U+061C and the tag characters, rather than a fixed list of code points.
+  `BIDI_NAME` check now cover every Unicode format character, including U+061C
+  and the tag characters, rather than a fixed list of code points.
 
 ## 0.2.0
 
