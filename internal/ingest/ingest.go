@@ -216,6 +216,9 @@ func (in *Ingester) planDestination(sc scan.Result, fr report.FileResult) report
 		return fr
 	}
 	out := sc.File
+	// fr was built from sc.File by appending, so the two may share one
+	// backing array; give out its own copy before adding to it.
+	out.Findings = append([]report.Finding(nil), sc.File.Findings...)
 	if out.Info == nil {
 		out.Info = map[string]string{}
 	}
