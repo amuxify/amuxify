@@ -117,7 +117,7 @@ amuxify drives external tools: **MKVToolNix 50+** (mkvmerge, mkvpropedit) and
 5. Every kept stream's SHA-256 matches source and output, or the output is deleted.
 6. In-place mode preserves owner, group, mode and mtime.
 7. Extended attribute removal touches only `user.*` (Linux) and `com.apple.*` (macOS).
-8. `--verify none` is refused together with `--in-place`.
+8. `--verify none` is refused together with `--in-place`, and `ingest` and every hook adapter refuse verify tier `none` whether it comes from the flag or from the profile.
 9. `BLOCK` cannot be overridden by any flag.
 10. Refuses to modify files as root unless `--allow-root`.
 
@@ -131,7 +131,7 @@ profile (`keep`, `drop`, or `assume:<lang>`). `amuxify hook sabnzbd`, `nzbget`,
 download and exit the way that caller expects. Wrapper scripts, the `--fail-on`
 option and Docker notes are in [docs/hooks.md](docs/hooks.md).
 
-### Upgrading from 0.2.0
+## Upgrading from 0.2.0
 
 The JSON report gains `schema` (`amuxify.report/1`) and, for hook runs, `hook`;
 `started` and `finished` are UTC with whole seconds; `files`, `findings` and
