@@ -9,6 +9,7 @@ and "in the library", with a verdict your download client can act on.
 
 ```
 curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
+brew install --cask amuxify/tap/amuxify
 docker run --rm -u 1000:1000 -v /srv/media:/data ghcr.io/amuxify/amuxify scan /data
 ```
 
