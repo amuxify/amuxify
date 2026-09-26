@@ -1203,7 +1203,12 @@ func TestIngestCorpus(t *testing.T) {
 		}
 	}
 	check("audio.mka", report.Pass, RouteClean)
-	check("subs.mks", report.Pass, RouteClean)
+	// A subtitle-only container has nothing to decode; it is cleaned like
+	// any other file and never fails the decode pass.
+	fr = check("subs.mks", report.Pass, RouteClean)
+	if fr.Has(scan.CodeDecodeFail) || !(fr.Has(clean.CodeNothing) || fr.Has(clean.CodeMetadata)) {
+		t.Errorf("subs.mks: want NOTHING_TO_CLEAN or METADATA without DECODE_FAIL: %v", codes(fr))
+	}
 	if fr := got["audio.mka"]; fr.Has(policy.CodeNoVideo) {
 		t.Errorf("audio.mka carries NO_VIDEO: %v", codes(fr))
 	}
@@ -1578,6 +1583,53 @@ func TestIngestCorpusVariants(t *testing.T) {
 		}
 		if sum == "" {
 			t.Fatal("unreadable source")
+		}
+	})
+	t.Run("decode pass follows the probed streams, not the extension", func(t *testing.T) {
+		// A subtitle-only Matroska file under an audio extension has
+		// nothing to decode and must not fail the decode pass; an audio
+		// file under the subtitle extension still gets decoded before
+		// mkvpropedit touches it, so a mislabeled extension cannot dodge
+		// the check.
+		dir := t.TempDir()
+		subsAsAudio := filepath.Join(dir, "subs.mka")
+		audioAsSubs := filepath.Join(dir, "audio.mks")
+		if err := os.Rename(testutil.Copy(t, "subs.mks"), subsAsAudio); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "audio.mka"), audioAsSubs); err != nil {
+			t.Fatal(err)
+		}
+		in, tr := newIngester(t, r, mustProfile(t, "homelab"))
+		res, err := in.IngestPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := byBase(res)
+		// The scanner refuses subs.mka for lacking audio (NO_AUDIO) before
+		// the clean route is reached; whatever the route, the decode pass
+		// is never the reason and never runs.
+		if fr := got["subs.mka"]; fr.Has(scan.CodeDecodeFail) {
+			t.Errorf("subs.mka: %s %v", fr.Verdict, codes(fr))
+		}
+		if fr := got["audio.mks"]; fr.Has(scan.CodeDecodeFail) || fr.Verdict > report.Warn {
+			t.Errorf("audio.mks: %s %v", fr.Verdict, codes(fr))
+		}
+		decoded := map[string]bool{}
+		for _, line := range tr.all() {
+			if strings.Contains(line, "ffmpeg") && strings.Contains(line, "-f null") {
+				for _, p := range []string{subsAsAudio, audioAsSubs} {
+					if strings.Contains(line, p) {
+						decoded[p] = true
+					}
+				}
+			}
+		}
+		if decoded[subsAsAudio] {
+			t.Error("ffmpeg decode ran on a subtitle-only container")
+		}
+		if !decoded[audioAsSubs] {
+			t.Error("ffmpeg decode did not run on an audio file named .mks")
 		}
 	})
 	t.Run("original language with shell metacharacters", func(t *testing.T) {

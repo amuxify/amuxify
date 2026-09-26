@@ -214,7 +214,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 	if fr.Verdict >= report.Fail {
 		return r
 	}
-	s.decodeCheck(ctx, fr, path)
+	s.decodeCheck(ctx, fr, path, info)
 	return r
 }
 
@@ -470,17 +470,15 @@ func (s *Scanner) checkProvenanceInfo(fr *report.FileResult, info *probe.MediaIn
 	}
 }
 
-func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path string) {
-	var err error
-	switch s.tier() {
-	case "none":
+// decodeCheck runs the tiered decode pass. It is skipped for a container
+// with no video or audio stream, such as a subtitle-only .mks, because
+// ffmpeg cannot decode anything there and would fail a healthy file.
+func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path string, info *probe.MediaInfo) {
+	tier := s.tier()
+	if tier == "none" {
 		return
-	case "full":
-		err = s.Verifier.DecodeFull(ctx, path)
-	default:
-		err = s.Verifier.DecodeHeadTail(ctx, path)
 	}
-	if err != nil {
+	if err := s.Verifier.Decode(ctx, path, info, tier == "full"); err != nil {
 		fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
 	}
 }

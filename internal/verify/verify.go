@@ -43,6 +43,36 @@ func (v *Verifier) DecodeFull(ctx context.Context, path string) error {
 	return v.decode(ctx, path)
 }
 
+// Decodable reports whether a probed file holds a stream the decode checks
+// map, that is any video or audio stream. A subtitle-only or data-only
+// container has nothing for ffmpeg to decode: it would refuse an output
+// with no streams and the check would fail for a healthy file.
+func Decodable(info *probe.MediaInfo) bool {
+	if info == nil {
+		return false
+	}
+	for _, st := range info.Streams {
+		if st.Type == "video" || st.Type == "audio" {
+			return true
+		}
+	}
+	return false
+}
+
+// Decode runs DecodeFull, or DecodeHeadTail when full is false, on a probed
+// file and returns nil without running ffmpeg when the file has no
+// decodable stream. Callers that know the probe result use this so a
+// subtitle-only container is not failed for lacking video and audio.
+func (v *Verifier) Decode(ctx context.Context, path string, info *probe.MediaInfo, full bool) error {
+	if !Decodable(info) {
+		return nil
+	}
+	if full {
+		return v.DecodeFull(ctx, path)
+	}
+	return v.DecodeHeadTail(ctx, path)
+}
+
 func (v *Verifier) decode(ctx context.Context, path string, pre ...string) error {
 	args := []string{"-v", "error", "-xerror"}
 	args = append(args, pre...)

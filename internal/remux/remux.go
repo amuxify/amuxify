@@ -497,15 +497,10 @@ func (r *Remuxer) verifyOutput(ctx context.Context, fr *report.FileResult, src *
 		}
 		fr.Addf(CodeHashOK, report.Pass, "%d stream(s) verified identical to source", n)
 	}
-	switch r.tier() {
-	case "none":
-	case "full":
-		if err := r.Verifier.DecodeFull(ctx, tmp); err != nil {
-			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
-			return false
-		}
-	default:
-		if err := r.Verifier.DecodeHeadTail(ctx, tmp); err != nil {
+	// The output carries the source's video and audio streams, so the
+	// source probe decides whether there is anything to decode.
+	if tier := r.tier(); tier != "none" {
+		if err := r.Verifier.Decode(ctx, tmp, src, tier == "full"); err != nil {
 			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
 			return false
 		}
