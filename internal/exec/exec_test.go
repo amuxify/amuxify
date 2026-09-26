@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -51,6 +52,29 @@ func TestMain(m *testing.M) {
 	case "exit3":
 		fmt.Fprintln(os.Stderr, "helper failing on purpose")
 		os.Exit(3)
+	case "forkexit", "forkhang":
+		// Start a grandchild that inherits this process's stdout and
+		// stderr and sleeps, so the pipes stay open after this process is
+		// gone. forkexit then exits at once; forkhang sleeps as well so
+		// the Runner has to kill it on timeout while the grandchild still
+		// holds the pipes. Neither is reaped: that is the point.
+		self, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(98)
+		}
+		gc := osexec.Command(self, "-amuxify-helper", "sleep")
+		gc.Stdout = os.Stdout
+		gc.Stderr = os.Stderr
+		if err := gc.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(98)
+		}
+		fmt.Println("parent wrote this")
+		if mode == "forkhang" {
+			time.Sleep(5 * time.Second)
+		}
+		os.Exit(0)
 	}
 	fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
 	os.Exit(99)
@@ -125,8 +149,17 @@ func TestRunAppliesGuardToFFmpegFamily(t *testing.T) {
 	}
 }
 
+// noLocale clears the locale variables so the fallback locale is chosen.
+func noLocale(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		t.Setenv(k, "")
+	}
+}
+
 // Guarantee 4: dynamic-loader injection variables never reach a tool.
 func TestCleanEnvDropsLDPreload(t *testing.T) {
+	noLocale(t)
 	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
 	t.Setenv("DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib")
 	t.Setenv("LD_LIBRARY_PATH", "/tmp")
@@ -165,6 +198,7 @@ func TestCleanEnvDropsLDPreload(t *testing.T) {
 
 // The clean environment is what the child actually receives.
 func TestRunUsesCleanEnv(t *testing.T) {
+	noLocale(t)
 	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
 	t.Setenv("DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib")
 	t.Setenv("AMUXIFY_SECRET_CANARY", "leaked")
@@ -522,3 +556,188 @@ func TestOverrideNameIsUpperCasedToolName(t *testing.T) {
 		}
 	}
 }
+
+// The locale handed to the tools is the caller's own UTF-8 locale when one
+// is set, because that one exists on the host, and C.UTF-8 otherwise. A
+// value that is not shaped like a locale name is never forwarded, however
+// it mentions UTF-8, so nothing but the two locale variables can come out
+// of the caller's locale settings.
+func TestLocaleSelection(t *testing.T) {
+	cases := []struct {
+		name   string
+		lcAll  string
+		lcType string
+		lang   string
+		want   string
+	}{
+		{"nothing set", "", "", "", "C.UTF-8"},
+		{"only LANG", "", "", "en_US.UTF-8", "en_US.UTF-8"},
+		{"only LANG utf8 spelling", "", "", "en_US.utf8", "en_US.utf8"},
+		{"only LANG upper case", "", "", "DE_DE.UTF8", "DE_DE.UTF8"},
+		{"LC_ALL wins over LANG", "de_DE.UTF-8", "", "fr_FR.UTF-8", "de_DE.UTF-8"},
+		{"LC_CTYPE wins over LANG", "", "ja_JP.UTF-8", "fr_FR.UTF-8", "ja_JP.UTF-8"},
+		{"LC_ALL not UTF-8 falls through to LANG", "C", "", "en_GB.UTF-8", "en_GB.UTF-8"},
+		{"all set but none UTF-8", "C", "POSIX", "en_US.ISO-8859-1", "C.UTF-8"},
+		{"LANG C", "", "", "C", "C.UTF-8"},
+		{"modifier", "", "", "sr_RS.UTF-8@latin", "sr_RS.UTF-8@latin"},
+		{"shell metacharacters", "", "", "en_US.UTF-8; touch /tmp/pwned", "C.UTF-8"},
+		{"command substitution", "", "", "$(id).UTF-8", "C.UTF-8"},
+		{"newline injecting a variable", "", "", "en_US.UTF-8\nLD_PRELOAD=/tmp/evil.so", "C.UTF-8"},
+		{"equals sign", "", "", "UTF-8=LD_PRELOAD", "C.UTF-8"},
+		{"leading space", "", "", " en_US.UTF-8", "C.UTF-8"},
+		{"quotes", "", "", "'en_US.UTF-8'", "C.UTF-8"},
+		{"slash", "", "", "../UTF-8", "C.UTF-8"},
+		{"over long", "", "", strings.Repeat("a", 60) + ".UTF-8", "C.UTF-8"},
+		{"hostile LC_ALL falls through to LANG", "en_US.UTF-8`id`", "", "en_US.UTF-8", "en_US.UTF-8"},
+		{"non-ascii", "", "", "en_US.UTF-8\u00e9", "C.UTF-8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LC_ALL", tc.lcAll)
+			t.Setenv("LC_CTYPE", tc.lcType)
+			t.Setenv("LANG", tc.lang)
+			t.Setenv("PATH", "/usr/bin")
+			if got := Locale(); got != tc.want {
+				t.Fatalf("Locale() = %q, want %q", got, tc.want)
+			}
+			env := cleanEnv()
+			var lcAll, lang int
+			for _, kv := range env {
+				k, v, _ := strings.Cut(kv, "=")
+				switch k {
+				case "LC_ALL":
+					lcAll++
+				case "LANG":
+					lang++
+				case "LC_CTYPE":
+					t.Errorf("LC_CTYPE forwarded: %q", kv)
+				}
+				if k == "LC_ALL" || k == "LANG" {
+					if v != tc.want {
+						t.Errorf("%s=%q, want %q", k, v, tc.want)
+					}
+				}
+				if strings.ContainsAny(kv, "\n;`$' ") || strings.Contains(kv, "LD_PRELOAD") || strings.Contains(kv, "touch") {
+					t.Errorf("hostile bytes reached the tool environment: %q", kv)
+				}
+			}
+			if lcAll != 1 || lang != 1 {
+				t.Errorf("LC_ALL appears %d times and LANG %d times: %v", lcAll, lang, env)
+			}
+			allowed := map[string]bool{"LC_ALL": true, "LANG": true, "PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SystemRoot": true, "USERPROFILE": true}
+			for _, kv := range env {
+				if k, _, _ := strings.Cut(kv, "="); !allowed[k] {
+					t.Errorf("unexpected variable in the tool environment: %q", kv)
+				}
+			}
+		})
+	}
+}
+
+// A child sees the caller's UTF-8 locale, and a hostile LANG cannot
+// smuggle a second variable into the child.
+func TestRunForwardsCallerUTF8Locale(t *testing.T) {
+	prefix := helperTool(t, "envtool", "env")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "en_US.UTF-8")
+	r := &Runner{}
+	res, err := r.RunWithTimeout(context.Background(), 10*time.Second, "envtool", prefix...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Stdout)
+	if !strings.Contains(out, "LC_ALL=en_US.UTF-8\n") || !strings.Contains(out, "LANG=en_US.UTF-8\n") {
+		t.Errorf("child environment lacks the caller's locale:\n%s", out)
+	}
+	t.Setenv("LANG", "en_US.UTF-8\nLD_PRELOAD=/tmp/evil.so")
+	res, err = r.RunWithTimeout(context.Background(), 10*time.Second, "envtool", prefix...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = string(res.Stdout)
+	if strings.Contains(out, "LD_PRELOAD") || !strings.Contains(out, "LC_ALL=C.UTF-8\n") {
+		t.Errorf("hostile LANG reached the child:\n%s", out)
+	}
+}
+
+// A child that hands its stdout to a grandchild and then exits, or is
+// killed on timeout while the grandchild lives on, must not hold the run
+// open for as long as the grandchild keeps the pipe. WaitDelay bounds the
+// wait; the run returns within the delay and never reports success for
+// output it could not be sure was complete.
+func TestWaitDelayReleasesPipeHeldByGrandchild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("inherited pipe semantics differ on Windows")
+	}
+	for _, mode := range []string{"forkexit", "forkhang"} {
+		t.Run(mode, func(t *testing.T) {
+			prefix := helperTool(t, "forker", mode)
+			r := &Runner{WaitDelay: 500 * time.Millisecond}
+			start := time.Now()
+			res, err := r.RunWithTimeout(context.Background(), time.Second, "forker", prefix...)
+			took := time.Since(start)
+			if took > 3*time.Second {
+				t.Fatalf("run held for %s by the grandchild's pipe", took)
+			}
+			if err == nil {
+				t.Fatalf("run reported success although its pipes had to be forced shut: %+v", res)
+			}
+			if mode == "forkhang" && !res.TimedOut {
+				t.Errorf("timeout not reported: %v", err)
+			}
+			if !strings.Contains(string(res.Stdout), "parent wrote this") {
+				t.Errorf("output written before the pipe was released is missing: %q", res.Stdout)
+			}
+		})
+	}
+}
+
+// Without a WaitDelay the same grandchild would hold the run for its whole
+// life; the default is a few seconds so a stuck run cannot last forever.
+func TestWaitDelayDefault(t *testing.T) {
+	r := &Runner{}
+	if d := r.waitDelay(); d != DefaultWaitDelay || d <= 0 || d > 30*time.Second {
+		t.Fatalf("default wait delay %s", d)
+	}
+	r.WaitDelay = time.Second
+	if r.waitDelay() != time.Second {
+		t.Fatal("explicit wait delay ignored")
+	}
+}
+
+type countingWriter struct{ b []byte }
+
+func (c *countingWriter) Write(p []byte) (int, error) { c.b = append(c.b, p...); return len(p), nil }
+
+// RunStreaming hands stdout to the writer and leaves Result.Stdout empty,
+// still collects stderr and the exit code, refuses a nil writer, and
+// surfaces a failing writer as an error rather than a truncated success.
+func TestRunStreaming(t *testing.T) {
+	prefix := helperTool(t, "streamer", "echo")
+	r := &Runner{}
+	var w countingWriter
+	res, err := r.RunStreaming(context.Background(), 10*time.Second, "streamer", &w, append(prefix, "one", "two")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(w.b) != "one\ntwo\n" || res.Stdout != nil || res.ExitCode != 0 {
+		t.Fatalf("writer got %q, Result.Stdout %q, exit %d", w.b, res.Stdout, res.ExitCode)
+	}
+	if _, err := r.RunStreaming(context.Background(), 10*time.Second, "streamer", nil, prefix...); err == nil {
+		t.Fatal("nil writer accepted")
+	}
+	prefix = helperTool(t, "failer", "exit3")
+	res, err = r.RunStreaming(context.Background(), 10*time.Second, "failer", &w, prefix...)
+	if err != nil || res.ExitCode != 3 || !strings.Contains(string(res.Stderr), "failing on purpose") {
+		t.Fatalf("exit %d err %v stderr %q", res.ExitCode, err, res.Stderr)
+	}
+	prefix = helperTool(t, "streamer", "echo")
+	if _, err := r.RunStreaming(context.Background(), 10*time.Second, "streamer", failingWriter{}, append(prefix, "x")...); err == nil {
+		t.Fatal("write failure was not reported")
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }

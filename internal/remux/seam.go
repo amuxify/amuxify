@@ -15,7 +15,3 @@ var streamHash = func(ctx context.Context, v *verify.Verifier, path string, inde
 var decodedHash = func(ctx context.Context, v *verify.Verifier, path string, s probe.Stream) (string, error) {
 	return v.DecodedHash(ctx, path, s)
 }
-
-// seamWired reports whether sameStream calls streamHash and decodedHash.
-// The tests that replace the seams skip until the remuxer is wired to them.
-var seamWired = true
