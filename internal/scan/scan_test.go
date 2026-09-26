@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"context"
 	"io/fs"
 	"os"
@@ -804,13 +805,6 @@ type corpusExpect struct {
 	nfo bool
 }
 
-// knownGaps lists corpus files whose current result differs from the table
-// in a way that only code outside this work package can change. The row is
-// still asserted; when it does not hold the subtest skips with the reason.
-var knownGaps = map[string]string{
-	"exe_attach.mkv": "reports POLYGLOT instead of ATTACH_EXEC because the ELF attachment's bytes sit in the last 1 MiB and polyglot() returns before checkMkv; internal/scan/scan.go must let a Matroska file with attachments reach the attachment sniff (or the spec table must accept POLYGLOT)",
-}
-
 // A conforming file under a directory whose name holds non-ASCII, bidi and
 // zero-width characters scans PASS: the tools run under a UTF-8 locale, so
 // mkvmerge and ffprobe see the whole path. Only the file's own name is
@@ -896,6 +890,47 @@ func TestSubtitleOnlySkipsDecode(t *testing.T) {
 	}
 }
 
+// An executable attachment that lies outside the last 1 MiB is not seen by
+// the byte-level polyglot check; the attachment sniff must still catch it
+// and BLOCK the file with ATTACH_EXEC. The file is built here: a few MiB of
+// lossless video and audio muxed by mkvmerge with the ELF payload attached,
+// which mkvmerge writes before the clusters.
+func TestExeAttachmentOutsideTailIsBlocked(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
+	dir := t.TempDir()
+	video := filepath.Join(dir, "big.mkv")
+	res, err := r.RunWithTimeout(context.Background(), 2*time.Minute, exec.FFmpeg,
+		"-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-t", "6", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-c:a", "aac", "-shortest", video)
+	if err != nil || res.ExitCode != 0 {
+		t.Skipf("cannot build the padded video with ffmpeg: %v %s", err, res.Stderr)
+	}
+	payload := write(t, filepath.Join(dir, "payload.bin"), "\x7fELF\x02\x01\x01\x00payload", 0o644)
+	out := filepath.Join(dir, "big_exe.mkv")
+	res, err = r.RunWithTimeout(context.Background(), 2*time.Minute, exec.MKVMerge, "-q", "-o", out, "--attach-file", payload, video)
+	if err != nil || res.ExitCode >= 2 {
+		t.Fatalf("mkvmerge: %v %s", err, res.Stderr)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := bytes.Index(b, []byte("\x7fELF"))
+	if at < 0 {
+		t.Fatal("ELF payload not found in the muxed file")
+	}
+	if len(b) < 2<<20 || at >= len(b)-(1<<20) {
+		t.Fatalf("premise not met: file is %d bytes and the payload sits at %d, inside the last 1 MiB", len(b), at)
+	}
+	s := newScanner(t, mustProfile(t, "homelab"), r)
+	fr := scanOne(t, s, out)
+	expect(t, fr, report.Block, CodeAttachExec)
+	if fr.Has(CodePolyglot) {
+		t.Errorf("POLYGLOT reported for a payload outside the last 1 MiB: %v", codes(fr))
+	}
+}
+
 func TestCorpusVerdicts(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
 	root := testutil.Fixtures(t)
@@ -906,43 +941,49 @@ func TestCorpusVerdicts(t *testing.T) {
 		"nested/deep/clean.mkv": {verdict: report.Pass, codes: []string{CodeProvenanceInfo}},
 		"conforming.mkv":        {verdict: report.Pass},
 		"multi.mkv":             {verdict: report.Warn, codes: []string{CodeLinkInTag, CodeLinkInSubs}},
-		"exe_attach.mkv":        {verdict: report.Block, codes: []string{CodeAttachExec}},
-		"fake_font.mkv":         {verdict: report.Block, codes: []string{CodeAttachExec}},
-		"purchased.mp4":         {verdict: report.Warn, codes: []string{CodePurchaseAtom, CodeLinkInTag}},
-		"truncated.mp4":         {verdict: report.Fail, anyOf: []string{CodeTruncated, CodeUnparseable}},
-		"polyglot.mkv":          {verdict: report.Block, codes: []string{CodePolyglot}},
-		"mislabeled.mp4":        {verdict: report.Fail, codes: []string{CodeExtMismatch}},
-		"text.mkv":              {verdict: report.Fail, anyOf: []string{CodeExtMismatch, CodeUnparseable}},
-		"empty.mkv":             {verdict: report.Block, codes: []string{CodeEmpty}},
-		"sample.nfo":            {verdict: report.Pass, codes: []string{CodeSidecarOK}},
-		"sample.url":            {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
-		"run.sh":                {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
-		"exec_perm.mkv":         {verdict: report.Warn, codes: []string{CodeExecPerm}},
-		"movie‮vkm.mkv":         {verdict: report.Block, codes: []string{CodeBidiName}},
-		"hard_a.mkv":            {verdict: report.Pass, codes: []string{CodeHardlinked}},
-		"hard_b.mkv":            {verdict: report.Pass, codes: []string{CodeHardlinked}},
-		"link.mkv":              {verdict: report.Warn, codes: []string{CodeSymlink}},
-		"double.mkv.exe":        {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
-		"audio.mka":             {verdict: report.Pass},
-		"subs.mks":              {verdict: report.Pass},
-		"sample.mp3":            {verdict: report.Pass},
-		"sample.mov":            {verdict: report.Pass},
-		"sample.m4v":            {verdict: report.Pass},
-		"sample.avi":            {verdict: report.Pass},
-		"sample.ts":             {verdict: report.Pass},
-		"sample.webm":           {verdict: report.Pass},
-		"sample.mpg":            {verdict: report.Pass},
-		"links.txt":             {verdict: report.Pass, codes: []string{CodeSidecarOK}},
-		"kodi/movie.nfo":        {nfo: true},
-		"kodi/tvshow.nfo":       {nfo: true},
-		"kodi/episode.nfo":      {nfo: true},
-		"kodi/url.nfo":          {nfo: true},
-		"kodi/mixed.nfo":        {nfo: true},
-		"kodi/badplot.nfo":      {nfo: true},
-		"kodi/broken.nfo":       {nfo: true},
-		"scene/plain.nfo":       {nfo: true},
-		"scene/links.nfo":       {nfo: true},
-		"scene/imdb.nfo":        {nfo: true},
+		// exe_attach.mkv is small, so its ELF attachment sits inside the
+		// last 1 MiB and the byte-level polyglot check fires first and
+		// returns before the attachment sniff; a larger file reports
+		// ATTACH_EXEC instead (TestExeAttachmentOutsideTailIsBlocked).
+		// Either code is a BLOCK for the same reason, and which one
+		// appears depends only on the fixture's size.
+		"exe_attach.mkv":   {verdict: report.Block, anyOf: []string{CodeAttachExec, CodePolyglot}},
+		"fake_font.mkv":    {verdict: report.Block, codes: []string{CodeAttachExec}},
+		"purchased.mp4":    {verdict: report.Warn, codes: []string{CodePurchaseAtom, CodeLinkInTag}},
+		"truncated.mp4":    {verdict: report.Fail, anyOf: []string{CodeTruncated, CodeUnparseable}},
+		"polyglot.mkv":     {verdict: report.Block, codes: []string{CodePolyglot}},
+		"mislabeled.mp4":   {verdict: report.Fail, codes: []string{CodeExtMismatch}},
+		"text.mkv":         {verdict: report.Fail, anyOf: []string{CodeExtMismatch, CodeUnparseable}},
+		"empty.mkv":        {verdict: report.Block, codes: []string{CodeEmpty}},
+		"sample.nfo":       {verdict: report.Pass, codes: []string{CodeSidecarOK}},
+		"sample.url":       {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
+		"run.sh":           {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
+		"exec_perm.mkv":    {verdict: report.Warn, codes: []string{CodeExecPerm}},
+		"movie‮vkm.mkv":    {verdict: report.Block, codes: []string{CodeBidiName}},
+		"hard_a.mkv":       {verdict: report.Pass, codes: []string{CodeHardlinked}},
+		"hard_b.mkv":       {verdict: report.Pass, codes: []string{CodeHardlinked}},
+		"link.mkv":         {verdict: report.Warn, codes: []string{CodeSymlink}},
+		"double.mkv.exe":   {verdict: report.Block, codes: []string{CodeSidecarBlocked}},
+		"audio.mka":        {verdict: report.Pass},
+		"subs.mks":         {verdict: report.Pass},
+		"sample.mp3":       {verdict: report.Pass},
+		"sample.mov":       {verdict: report.Pass},
+		"sample.m4v":       {verdict: report.Pass},
+		"sample.avi":       {verdict: report.Pass},
+		"sample.ts":        {verdict: report.Pass},
+		"sample.webm":      {verdict: report.Pass},
+		"sample.mpg":       {verdict: report.Pass},
+		"links.txt":        {verdict: report.Pass, codes: []string{CodeSidecarOK}},
+		"kodi/movie.nfo":   {nfo: true},
+		"kodi/tvshow.nfo":  {nfo: true},
+		"kodi/episode.nfo": {nfo: true},
+		"kodi/url.nfo":     {nfo: true},
+		"kodi/mixed.nfo":   {nfo: true},
+		"kodi/badplot.nfo": {nfo: true},
+		"kodi/broken.nfo":  {nfo: true},
+		"scene/plain.nfo":  {nfo: true},
+		"scene/links.nfo":  {nfo: true},
+		"scene/imdb.nfo":   {nfo: true},
 	}
 
 	// The table is exhaustive: every file in the corpus has a row and every
@@ -1024,9 +1065,6 @@ func TestCorpusVerdicts(t *testing.T) {
 			}
 			if len(problems) == 0 {
 				return
-			}
-			if reason, gap := knownGaps[rel]; gap {
-				t.Skipf("known gap outside WP0: %s (got %v)", reason, codes(fr))
 			}
 			t.Fatalf("%s (%v)", strings.Join(problems, "; "), codes(fr))
 		})
