@@ -585,6 +585,7 @@ func TestVerifyNoneRefusedFromFlagAndProfile(t *testing.T) {
 			fired := 0
 			in.Progress = func(report.FileResult) { fired++ }
 			before := snapshot(t, dir)
+			srcSum := fileSHA(t, src)
 			res, err := in.IngestPath(context.Background(), dir)
 			if err == nil || err.Error() != "ingest writes in place and requires verification; verify tier none is refused" {
 				t.Fatalf("err = %v", err)
@@ -602,7 +603,7 @@ func TestVerifyNoneRefusedFromFlagAndProfile(t *testing.T) {
 			if _, err := os.Lstat(in.Scanner.Quarantine); err == nil {
 				t.Error("quarantine directory created before the refusal")
 			}
-			if fileSHA(t, src) != fileSHA(t, src) {
+			if fileSHA(t, src) != srcSum {
 				t.Error("source changed")
 			}
 		})
@@ -1599,11 +1600,18 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if rt, _ := route(t, res[0]); rt != RouteClean || res[0].Verdict > report.Warn {
 			t.Errorf("%s %s %v", rt, res[0].Verdict, codes(res[0]))
 		}
-		if fileSHA(t, dst) == "" || len(snapshot(t, dir)) != len(before) {
+		if len(snapshot(t, dir)) != len(before) {
 			t.Fatalf("tree changed shape: %v", snapshot(t, dir))
 		}
-		if sum == "" {
-			t.Fatal("unreadable source")
+		// conforming.mkv already matches the profile, so the clean route
+		// reports NOTHING_TO_CLEAN and the bytes must be exactly as before;
+		// a METADATA edit is the only thing allowed to change them.
+		after := fileSHA(t, dst)
+		switch {
+		case res[0].Has(clean.CodeMetadata) && after == sum:
+			t.Error("METADATA reported but the file did not change")
+		case !res[0].Has(clean.CodeMetadata) && after != sum:
+			t.Errorf("file changed without a METADATA finding: %v", codes(res[0]))
 		}
 	})
 	t.Run("decode pass follows the probed streams, not the extension", func(t *testing.T) {
