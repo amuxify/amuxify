@@ -118,3 +118,71 @@ func Abs(p string) (string, error) {
 	}
 	return filepath.Clean(a), nil
 }
+
+// MkdirAllUnder creates dir, which must be root itself or lie below root,
+// one component at a time without following symlinks. Every component that
+// already exists between root and dir must be a real directory: a symlink or
+// a regular file in that position returns an error and nothing is created,
+// so a planted symlink can never redirect output or quarantine placement
+// outside the tree the user named. root itself is taken as the user's choice:
+// it may be a symlink, and when it does not exist yet it is created with
+// os.MkdirAll; only the components below it are checked. The returned error
+// for a dir outside root, or for a bad component, wraps no sentinel and is
+// meant to be reported verbatim.
+func MkdirAllUnder(root, dir string) error {
+	root = filepath.Clean(root)
+	dir = filepath.Clean(dir)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return fmt.Errorf("mkdir %s: not under %s: %v", dir, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("mkdir %s: outside %s", dir, root)
+	}
+	fi, err := os.Stat(root)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	case err != nil:
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	case !fi.IsDir():
+		return fmt.Errorf("mkdir %s: %s is not a directory", dir, root)
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		switch {
+		case err == nil && fi.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("mkdir %s: %s is a symlink; refusing to follow it", dir, cur)
+		case err == nil && !fi.IsDir():
+			return fmt.Errorf("mkdir %s: %s exists and is not a directory", dir, cur)
+		case err == nil:
+			continue
+		case errors.Is(err, os.ErrNotExist):
+			if err := os.Mkdir(cur, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("mkdir %s: %w", dir, err)
+			}
+			// Re-check what now sits there: a racing symlink plant between
+			// the Lstat and the Mkdir must still be refused.
+			fi, err := os.Lstat(cur)
+			if err != nil {
+				return fmt.Errorf("mkdir %s: %w", dir, err)
+			}
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+				return fmt.Errorf("mkdir %s: %s is not a directory", dir, cur)
+			}
+		default:
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	return nil
+}

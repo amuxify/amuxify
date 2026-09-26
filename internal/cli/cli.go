@@ -85,7 +85,12 @@ func defaultStateDir() string {
 	return filepath.Join(home, ".local", "state", "amuxify")
 }
 
-const usageText = `amuxify %s - the ingest gate for self-hosted media
+// usageText is assembled once from usageHead, the global flag block and
+// usageTail. The flag block is generated from the same definitions bind
+// installs, so the help page and the flag help strings cannot drift apart.
+var usageText = usageHead + globalFlagHelp() + usageTail
+
+const usageHead = `amuxify %s - the ingest gate for self-hosted media
 
 Usage:
   amuxify [global flags] <command> [command flags] <path>...
@@ -101,16 +106,39 @@ Commands:
   version   print the version
 
 Global flags (before or after the command):
-  --profile <name|path>   homelab (default) | archive | anime | strict | file.toml
-                          (AMUXIFY_PROFILE sets the default)
-  --json                  machine-readable report on stdout
-  --dry-run               report what would happen, change nothing
-  --verbose, --quiet, --timeout <dur>, --state-dir <dir>, --allow-root, --trace
+`
+
+const usageTail = `
+The built-in profiles are homelab (the default), archive, anime and strict;
+AMUXIFY_PROFILE sets the default profile.
 
 Exit status: 0 PASS, 1 WARN, 2 usage error, 3 FAIL, 4 BLOCK, 130 interrupted.
 doctor exits 0 when usable (warnings shown), 2 when required tools are missing.
 Tool paths can be overridden with AMUXIFY_FFMPEG, AMUXIFY_MKVMERGE, and so on.
 `
+
+// globalFlagHelp renders one line per global flag from the definitions in
+// bind: the flag name, a placeholder for its value when it takes one, and
+// its help string. Percent signs are doubled because usageText is a format
+// string.
+func globalFlagHelp() string {
+	fs := flag.NewFlagSet("amuxify", flag.ContinueOnError)
+	(&Global{}).bind(fs)
+	placeholders := map[string]string{"profile": "name|path", "state-dir": "dir", "timeout": "duration"}
+	var b strings.Builder
+	fs.VisitAll(func(f *flag.Flag) {
+		name, usage := flag.UnquoteUsage(f)
+		if p, ok := placeholders[f.Name]; ok {
+			name = p
+		}
+		col := "--" + f.Name
+		if name != "" {
+			col += " <" + name + ">"
+		}
+		fmt.Fprintf(&b, "  %-24s%s\n", col, strings.ReplaceAll(usage, "%", "%%"))
+	})
+	return b.String()
+}
 
 // Main runs the program and returns the exit code.
 func Main(args []string, stdout, stderr io.Writer) int {

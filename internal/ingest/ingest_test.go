@@ -776,12 +776,17 @@ func TestRefusedMediaUntouched(t *testing.T) {
 		if r, _ := route(t, fr); r != RouteSkip {
 			t.Errorf("force=%v u.mkv route %s", force, r)
 		}
+		// Guarantee 3: the symlink is skipped with a WARN, not refused, and
+		// --force does not change that.
 		fr = got["link.mkv"]
-		if !fr.Has(scan.CodeSymlink) || !fr.Has(remux.CodeRefused) {
+		if fr.Verdict != report.Warn || !fr.Has(scan.CodeSymlink) || fr.Has(remux.CodeRefused) {
 			t.Errorf("force=%v link.mkv: %s %v", force, fr.Verdict, codes(fr))
 		}
-		if r, _ := route(t, fr); r != RouteSkip {
-			t.Errorf("force=%v link.mkv route %s", force, r)
+		if r, text := route(t, fr); r != RouteSkip || text != "symlink skipped" {
+			t.Errorf("force=%v link.mkv route %s %q", force, r, text)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("force=%v link.mkv is no longer a symlink: %v", force, err)
 		}
 		sameSnapshot(t, before, snapshot(t, dir))
 		if fileSHA(t, victim) != victimSum {
@@ -1203,7 +1208,12 @@ func TestIngestCorpus(t *testing.T) {
 		}
 	}
 	check("audio.mka", report.Pass, RouteClean)
-	check("subs.mks", report.Pass, RouteClean)
+	// A subtitle-only container has nothing to decode; it is cleaned like
+	// any other file and never fails the decode pass.
+	fr = check("subs.mks", report.Pass, RouteClean)
+	if fr.Has(scan.CodeDecodeFail) || !(fr.Has(clean.CodeNothing) || fr.Has(clean.CodeMetadata)) {
+		t.Errorf("subs.mks: want NOTHING_TO_CLEAN or METADATA without DECODE_FAIL: %v", codes(fr))
+	}
 	if fr := got["audio.mka"]; fr.Has(policy.CodeNoVideo) {
 		t.Errorf("audio.mka carries NO_VIDEO: %v", codes(fr))
 	}
@@ -1222,7 +1232,14 @@ func TestIngestCorpus(t *testing.T) {
 	if fileSHA(t, filepath.Join(corpus, "sample.mkv")) != placed {
 		t.Error("sample.mkv was overwritten by a later container")
 	}
-	check("link.mkv", report.Fail, RouteSkip, scan.CodeSymlink, remux.CodeRefused)
+	// Guarantee 3: a symlink is skipped with WARN SYMLINK and no REFUSED.
+	fr = check("link.mkv", report.Warn, RouteSkip, scan.CodeSymlink)
+	if fr.Has(remux.CodeRefused) {
+		t.Errorf("link.mkv carries REFUSED: %v", codes(fr))
+	}
+	if _, text := route(t, fr); text != "symlink skipped" {
+		t.Errorf("link.mkv route text %q", text)
+	}
 	if fi, err := os.Lstat(filepath.Join(corpus, "link.mkv")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Error("link.mkv is no longer a symlink")
 	}
@@ -1565,17 +1582,66 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if len(res) != 1 || res[0].Path != dst {
 			t.Fatalf("results %+v", res)
 		}
-		if res[0].Has(scan.CodeMkvError) && res[0].Has(remux.CodeRefused) {
-			// The scan refused the file and nothing was written; that is the
-			// safe outcome, but the file should have been cleaned.
-			sameSnapshot(t, before, snapshot(t, dir))
-			if fileSHA(t, dst) != sum {
-				t.Fatal("refused file changed")
-			}
-			t.Skip("mkvmerge cannot open a path with non-ASCII characters under the C locale that cleanEnv in internal/exec/exec.go sets (LC_ALL=C, LANG=C); it truncates the path at the first non-ASCII byte and reports an open error, so every file under such a directory is refused; internal/exec/exec.go must pass a UTF-8 locale (for example C.UTF-8 or the caller's LANG when it is UTF-8)")
+		// The tools run under a UTF-8 locale, so the path reaches mkvmerge
+		// whole and the file is cleaned like any other conforming file.
+		if res[0].Has(scan.CodeMkvError) || res[0].Has(remux.CodeRefused) {
+			t.Fatalf("file under a non-ASCII directory was refused: %v", codes(res[0]))
 		}
 		if rt, _ := route(t, res[0]); rt != RouteClean || res[0].Verdict > report.Warn {
 			t.Errorf("%s %s %v", rt, res[0].Verdict, codes(res[0]))
+		}
+		if fileSHA(t, dst) == "" || len(snapshot(t, dir)) != len(before) {
+			t.Fatalf("tree changed shape: %v", snapshot(t, dir))
+		}
+		if sum == "" {
+			t.Fatal("unreadable source")
+		}
+	})
+	t.Run("decode pass follows the probed streams, not the extension", func(t *testing.T) {
+		// A subtitle-only Matroska file under an audio extension has
+		// nothing to decode and must not fail the decode pass; an audio
+		// file under the subtitle extension still gets decoded before
+		// mkvpropedit touches it, so a mislabeled extension cannot dodge
+		// the check.
+		dir := t.TempDir()
+		subsAsAudio := filepath.Join(dir, "subs.mka")
+		audioAsSubs := filepath.Join(dir, "audio.mks")
+		if err := os.Rename(testutil.Copy(t, "subs.mks"), subsAsAudio); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "audio.mka"), audioAsSubs); err != nil {
+			t.Fatal(err)
+		}
+		in, tr := newIngester(t, r, mustProfile(t, "homelab"))
+		res, err := in.IngestPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := byBase(res)
+		// The scanner refuses subs.mka for lacking audio (NO_AUDIO) before
+		// the clean route is reached; whatever the route, the decode pass
+		// is never the reason and never runs.
+		if fr := got["subs.mka"]; fr.Has(scan.CodeDecodeFail) {
+			t.Errorf("subs.mka: %s %v", fr.Verdict, codes(fr))
+		}
+		if fr := got["audio.mks"]; fr.Has(scan.CodeDecodeFail) || fr.Verdict > report.Warn {
+			t.Errorf("audio.mks: %s %v", fr.Verdict, codes(fr))
+		}
+		decoded := map[string]bool{}
+		for _, line := range tr.all() {
+			if strings.Contains(line, "ffmpeg") && strings.Contains(line, "-f null") {
+				for _, p := range []string{subsAsAudio, audioAsSubs} {
+					if strings.Contains(line, p) {
+						decoded[p] = true
+					}
+				}
+			}
+		}
+		if decoded[subsAsAudio] {
+			t.Error("ffmpeg decode ran on a subtitle-only container")
+		}
+		if !decoded[audioAsSubs] {
+			t.Error("ffmpeg decode did not run on an audio file named .mks")
 		}
 	})
 	t.Run("original language with shell metacharacters", func(t *testing.T) {
