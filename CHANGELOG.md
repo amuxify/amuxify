@@ -2,6 +2,21 @@
 
 All notable changes to amuxify will be documented in this file.
 
+## 0.1.1
+
+Safety release. No media-policy changes.
+
+### Fixed
+
+- `amux-remux`: untagged-track prompts no longer hang forever when stdin is not a terminal. Without a terminal the decision comes from `AMUXIFY_UND_POLICY` (`drop` by default, or `english`). Closed stdin during a prompt exits 130 instead of spinning.
+- `amux-remux`: `mkvmerge -J` exit status 1 (warnings) no longer fails output verification; only status 2 or empty output does.
+- `amux-clean`: explicit exit status (1 when any file failed, 0 otherwise) and INT/TERM handling.
+- All commands: arguments after `--` are honoured.
+
+### Documentation
+
+- README documents exit codes and unattended runs.
+
 ## 0.1.0
 
 Initial release.

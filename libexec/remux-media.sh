@@ -47,6 +47,24 @@ TARGET=""
 SESSION_UND_SUB_POLICY=""   # english | drop | empty
 SESSION_UND_AUDIO_POLICY="" # english | drop | empty
 
+# Unattended runs (cron, hooks, pipes) cannot answer prompts. Untagged tracks
+# are dropped in that case and reported, so the run never blocks on stdin.
+UND_NONINTERACTIVE_POLICY="${AMUXIFY_UND_POLICY:-drop}"  # drop | english
+
+stdin_is_tty() {
+  [[ -t 0 ]]
+}
+
+noninteractive_und_decision() {
+  local kind="$1"
+  local file="$2"
+  local idx="$3"
+
+  echo "NOTE: untagged $kind stream #$idx in $(basename "$file"): no terminal, applying policy '$UND_NONINTERACTIVE_POLICY' (set AMUXIFY_UND_POLICY=english|drop)."
+
+  [[ "$UND_NONINTERACTIVE_POLICY" == "english" ]]
+}
+
 TOTAL=0
 PROCESSED=0
 SUCCEEDED=0
@@ -109,7 +127,8 @@ Media policy:
   - Keep English audio streams unchanged.
   - Keep English subtitle streams in their original codec.
   - Drop non-English audio and subtitles.
-  - Untagged audio/subtitles require a decision.
+  - Untagged audio/subtitles require a decision. Without a terminal the
+    decision comes from AMUXIFY_UND_POLICY (drop, the default, or english).
   - Drop attachments and data streams.
   - Drop chapters, tags and track titles.
   - Remove the old Segment UID.
@@ -191,6 +210,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ $# -gt 0 ]]; then
+  if [[ -n "$TARGET" || $# -gt 1 ]]; then
+    echo "Only one input target is supported per run." >&2
+    die_usage
+  fi
+
+  TARGET="$1"
+fi
 
 [[ -n "$TARGET" ]] || die_usage
 
@@ -395,6 +423,11 @@ prompt_und_subtitle() {
     return 1
   fi
 
+  if ! stdin_is_tty; then
+    noninteractive_und_decision "subtitle" "$file" "$idx"
+    return
+  fi
+
   echo
   echo "Untagged subtitle found"
   echo "  File:     $(basename "$file")"
@@ -414,7 +447,11 @@ prompt_und_subtitle() {
 
   while true; do
     printf '[y] English this one  [a] English all untagged subtitles this run  [n] drop this one  [d] drop all untagged subtitles this run  [q] quit: '
-    IFS= read -r answer
+    if ! IFS= read -r answer; then
+      echo
+      echo "FAILED: input closed while waiting for a decision."
+      exit 130
+    fi
 
     case "$(lowercase "$answer")" in
       y)
@@ -458,6 +495,11 @@ prompt_und_audio() {
     return 1
   fi
 
+  if ! stdin_is_tty; then
+    noninteractive_und_decision "audio" "$file" "$idx"
+    return
+  fi
+
   echo
   echo "Untagged audio found"
   echo "  File:        $(basename "$file")"
@@ -470,7 +512,11 @@ prompt_und_audio() {
 
   while true; do
     printf '[y] English this one  [a] English all untagged audio this run  [n] drop this one  [d] drop all untagged audio this run  [q] quit: '
-    IFS= read -r answer
+    if ! IFS= read -r answer; then
+      echo
+      echo "FAILED: input closed while waiting for a decision."
+      exit 130
+    fi
 
     case "$(lowercase "$answer")" in
       y)
@@ -560,6 +606,7 @@ process_file() {
   local src_hash
   local dst_hash
   local verify_json
+  local verify_status=0
   local mux_app
   local write_app
 
@@ -906,8 +953,12 @@ process_file() {
     return 1
   fi
 
-  if ! verify_json="$(mkvmerge -J "$CURRENT_TMP_OUTPUT" 2>/dev/null)"; then
-    echo "FAILED: mkvmerge cannot identify remuxed output."
+  # mkvmerge exits 1 for warnings and 2 for errors; only 2 (or empty JSON) is a failure.
+  verify_json="$(mkvmerge -J "$CURRENT_TMP_OUTPUT" 2>/dev/null)" || verify_status=$?
+  verify_status="${verify_status:-0}"
+
+  if [[ "$verify_status" -ge 2 || -z "$verify_json" ]]; then
+    echo "FAILED: mkvmerge cannot identify remuxed output (exit $verify_status)."
 
     FAILED=$((FAILED + 1))
     cleanup_current
