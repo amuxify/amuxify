@@ -53,29 +53,109 @@ func PlaceNoClobber(tmp, dest string) error {
 	return os.Rename(tmp, dest)
 }
 
-// CopyIdentity gives path the mode, ownership and modification time of the
-// file at from, so an output written beside its source can carry the
-// source's identity before it is placed. Ownership is best effort: chown
-// fails for a non-root user changing the owner, which is fine.
-func CopyIdentity(from, path string) error {
-	fi, err := os.Stat(from)
+// CreateTemp removes a leftover entry at tmp, creates tmp empty and
+// exclusively, and returns the identity of the file it made, so that a name
+// about to be handed to an external tool belongs to the caller before the
+// tool starts and can be recognised again afterwards with os.SameFile. A
+// leftover that cannot be removed is an error, as is anything that appears
+// at the name between the removal and the creation. The file gets the mode
+// the tool would give a file it created itself, 0666 under the umask.
+func CreateTemp(tmp string) (os.FileInfo, error) {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	return fi, nil
+}
+
+// CopyIdentityTo gives the open file f the mode, ownership and modification
+// time of the file at src. Every write goes through the descriptor (fchmod,
+// fchown and futimes), never through a name, so a symbolic link swapped onto
+// the file's former name after f was opened cannot redirect any of them to
+// another file. Ownership is best effort: chown fails for a non-root user
+// changing the owner, which is fine. Only src is read by name, and it is the
+// file whose identity the caller wants copied.
+func CopyIdentityTo(f *os.File, src string) error {
+	fi, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(path, fi.Mode().Perm()); err != nil {
+	if err := f.Chmod(fi.Mode().Perm()); err != nil {
 		return err
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		_ = os.Chown(path, int(st.Uid), int(st.Gid))
+		_ = f.Chown(int(st.Uid), int(st.Gid))
 	}
-	_ = os.Chtimes(path, time.Now(), fi.ModTime())
+	_ = futimes(f, time.Now(), fi.ModTime())
 	return nil
 }
 
-// ReplaceInPlace renames tmp over dest, preserving dest's ownership, mode and
-// modification time. Used only by --in-place after verification passed.
+// OpenOwn opens path for writing without following a symbolic link and
+// returns the file only when what was opened is a regular file with a single
+// name that, when created is not nil, is the file created describes. It is
+// the check a caller performs on a temp file it made itself before it writes
+// metadata to it or places it, so that a symbolic link, a hard link or a
+// different file swapped onto the name is refused rather than followed. The
+// caller closes the file.
+func OpenOwn(path string, created os.FileInfo) (*os.File, error) {
+	f, err := openNoFollow(path)
+	if err != nil {
+		if refusedSymlink(err) {
+			return nil, fmt.Errorf("%s is now a symlink; refusing to follow it", path)
+		}
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || (created != nil && !os.SameFile(created, fi)) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is not the file this run created", path)
+	}
+	if n := Nlink(fi); n != 1 {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s has %d hard links; expected 1", path, n)
+	}
+	return f, nil
+}
+
+// ReplaceInPlace renames tmp over dest, giving the new file dest's
+// ownership, mode and modification time first. The identity is copied
+// through a descriptor of tmp obtained with OpenOwn, so a symbolic link
+// swapped onto the temp name is refused and never has its target's metadata
+// rewritten; the rename itself replaces whatever sits at dest without
+// following it. Callers that recorded the temp file's identity when they
+// created it use ReplaceInPlaceOwn, which also requires that identity.
 func ReplaceInPlace(tmp, dest string) error {
-	if err := CopyIdentity(dest, tmp); err != nil {
+	return ReplaceInPlaceOwn(tmp, dest, nil)
+}
+
+// ReplaceInPlaceOwn is ReplaceInPlace for a caller that created tmp itself
+// and kept the os.FileInfo from that creation: the file opened at tmp must
+// be that file, or nothing is written and nothing is renamed.
+func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
+	f, err := OpenOwn(tmp, created)
+	if err != nil {
+		return err
+	}
+	if err := CopyIdentityTo(f, dest); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, dest)
