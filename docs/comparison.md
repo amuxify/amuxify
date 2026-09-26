@@ -16,6 +16,7 @@ tags without verifying) sit beside it, not against it.
 | MP4 purchase atoms | yes | no | no | no | no |
 | Never overwrite, temp+rename, symlink refusal | yes | varies | partial | partial | n/a |
 | Runs as a hook with stable exit codes | yes | some | no | no | some |
+| Native adapters for SABnzbd, NZBGet, Sonarr, Radarr | yes | no | no | no | no |
 | Transcoding | never | no | yes (optional) | yes | no |
 | GUI | no | no | no | yes | no |
 
