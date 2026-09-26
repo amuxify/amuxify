@@ -116,6 +116,11 @@ func merge(fr *report.FileResult, r report.FileResult) {
 // quarantine mirrors; inputRoot and outRoot come from Remuxer.Roots.
 func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, outRoot string) (fr report.FileResult) {
 	start := time.Now()
+	if in.Cleaner != nil {
+		// The cleaner's advice must not name --strip-audio-tags, which
+		// only the clean command has (review C10).
+		in.Cleaner.Command = "ingest"
+	}
 	sc := in.Scanner.ScanFile(ctx, path, scanRoot)
 	fr = sc.File
 	if fr.Info == nil {

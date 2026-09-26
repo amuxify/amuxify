@@ -49,8 +49,12 @@ type Cleaner struct {
 	DryRun                bool
 	RemoveBlockedSidecars bool
 	StripAudioTags        bool
-	Hardlinks             string
-	Timeout               time.Duration
+	// Command names the command the cleaner runs under, so advice about
+	// flags only names flags that command has. Empty means clean, which
+	// has --strip-audio-tags; ingest sets "ingest" and has no such flag.
+	Command   string
+	Hardlinks string
+	Timeout   time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
 }
@@ -201,7 +205,7 @@ func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, e
 		if c.StripAudioTags {
 			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container))
 		} else {
-			fr.Addf(CodeSkipped, report.Pass, "audio tags left alone (use --strip-audio-tags)")
+			fr.Addf(CodeSkipped, report.Pass, "%s", c.audioTagsAdvice())
 		}
 	default:
 		fr.Addf(CodeSkipped, report.Warn, "no cleaner for container %s", info.Container)
@@ -421,6 +425,16 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		return
 	}
 	fr.Addf(CodeMetadata, report.Pass, "rewritten without %s", strings.Join(what, ", "))
+}
+
+// audioTagsAdvice is the SKIPPED text for an audio file whose tags are left
+// alone. It names --strip-audio-tags only for the clean command, which has
+// that flag; ingest and the hook that runs it do not (review C10).
+func (c *Cleaner) audioTagsAdvice() string {
+	if c.Command == "ingest" {
+		return "audio tags left alone; ingest does not strip audio tags"
+	}
+	return "audio tags left alone (use --strip-audio-tags)"
 }
 
 // xattrPrefixes are the only namespaces amuxify removes. Security labels,

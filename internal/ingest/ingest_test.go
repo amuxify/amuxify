@@ -1846,3 +1846,32 @@ func TestForcedFailAudioIsCleanedNotRemuxed(t *testing.T) {
 		})
 	}
 }
+
+// Review C10: ingest has no --strip-audio-tags flag, so the SKIPPED advice
+// for an audio file must not name it.
+func TestIngestAudioTagsAdviceNamesNoFlag(t *testing.T) {
+	r := needTools(t)
+	src := testutil.Copy(t, "sample.mp3")
+	in, _ := newIngester(t, r, mustProfile(t, "homelab"))
+	res, err := in.IngestPath(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res[0]
+	f, ok := finding(fr, clean.CodeSkipped)
+	if !ok || f.Message != "audio tags left alone; ingest does not strip audio tags" {
+		t.Errorf("SKIPPED %q (%v)", f.Message, codes(fr))
+	}
+	for _, f := range fr.Findings {
+		if strings.Contains(f.Message, "--strip-audio-tags") {
+			t.Errorf("advice names a flag ingest does not have: %s", f.Message)
+		}
+	}
+	// IngestFile sets the wording too, so a caller that skips IngestPath
+	// gets the same text.
+	in2, _ := newIngester(t, r, mustProfile(t, "homelab"))
+	fr = in2.IngestFile(context.Background(), src, filepath.Dir(src), filepath.Dir(src), filepath.Dir(src))
+	if f, ok := finding(fr, clean.CodeSkipped); !ok || strings.Contains(f.Message, "--strip-audio-tags") {
+		t.Errorf("IngestFile SKIPPED %q", f.Message)
+	}
+}
