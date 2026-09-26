@@ -1,0 +1,9 @@
+WARN  /srv/incoming/movie.mkv
+      WARN  LINK_IN_TAG        1 link(s) in metadata: tag COMMENT: http://x.example
+      -> /srv/incoming__remuxed/movie.mkv
+PASS  /srv/incoming/movie.nfo
+BLOCK /srv/incoming/readme.exe
+      BLOCK SIDECAR_BLOCKED    blocked sidecar type .exe
+ERROR /srv/incoming/gone.mkv: lstat /srv/incoming/gone.mkv: no such file or directory
+
+BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1
