@@ -249,7 +249,11 @@ cleared under `--dry-run`. The quarantine directory must lie outside the
 paths being processed: a path that is the quarantine directory or lies inside
 it is refused as a usage error before anything runs, and a quarantine
 directory that sits inside the tree is skipped by the walk, so a file that
-was quarantined by an earlier run is never scanned or moved again.
+was quarantined by an earlier run is never scanned or moved again. Both
+checks recognise the directory by what it is, not by how it is written, so a
+trailing slash, a `..` component, a relative path, a symlink or, on a
+case-insensitive filesystem, a different letter case names the same
+directory.
 
 `--remove-blocked-sidecars` deletes sidecar files whose extension is on the
 profile's block list (`SIDECAR_BLOCKED`). Without it they are reported and left

@@ -20,7 +20,11 @@ import (
 // Each path in exclude names a directory that is not entered; the scanner
 // passes its quarantine directory so a quarantine that sits inside the tree
 // is not walked and its files are not quarantined again one level deeper.
-// The comparison is on the cleaned absolute path of each directory met.
+// An excluded directory that exists is recognised by identity (os.SameFile
+// on its device and inode), so the spelling the walk meets may differ from
+// the one given through a symlink, a ".." component, a relative path or
+// different letter case on a case-insensitive filesystem; one that does not
+// exist yet is matched by its cleaned absolute path.
 //
 // A directory that cannot be read, or an entry that vanishes or errors while
 // the tree is listed, does not stop the walk either: every readable entry is
@@ -37,8 +41,15 @@ func Walk(abs string, exclude ...string) ([]string, error) {
 		return []string{abs}, nil
 	}
 	skip := map[string]bool{}
+	var skipInfo []os.FileInfo
 	for _, e := range exclude {
+		if a, err := filepath.Abs(e); err == nil {
+			e = a
+		}
 		skip[filepath.Clean(e)] = true
+		if fi, err := os.Stat(e); err == nil && fi.IsDir() {
+			skipInfo = append(skipInfo, fi)
+		}
 	}
 	var paths []string
 	var unreadable []string
@@ -50,6 +61,15 @@ func Walk(abs string, exclude ...string) ([]string, error) {
 		if d.IsDir() {
 			if skip[filepath.Clean(p)] {
 				return filepath.SkipDir
+			}
+			if len(skipInfo) > 0 {
+				if fi, err := d.Info(); err == nil {
+					for _, x := range skipInfo {
+						if os.SameFile(fi, x) {
+							return filepath.SkipDir
+						}
+					}
+				}
 			}
 			return nil
 		}

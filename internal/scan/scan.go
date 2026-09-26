@@ -90,7 +90,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	// Walk lists every readable entry and names the unreadable ones in
 	// walkErr; those are reported at run level after the readable files.
 	// A quarantine directory inside the tree is not entered.
-	paths, walkErr := Walk(abs, QuarantineExcludes(abs, s.Quarantine)...)
+	paths, walkErr := Walk(abs, QuarantineExcludes(s.Quarantine)...)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -556,48 +556,31 @@ func (s *Scanner) polyglot(path string, size int64) string {
 	return ""
 }
 
-// quarantineForms returns the cleaned absolute path of the quarantine
-// directory and, when it exists, its symlink-resolved path, so a quarantine
-// named through a symlink or through ".." compares equal to the directory
-// the walk meets. It is empty when no quarantine is set.
-func quarantineForms(quarantine string) []string {
+// quarantineAbs returns the cleaned absolute path of the quarantine
+// directory, or "" when no quarantine is set.
+func quarantineAbs(quarantine string) string {
 	if quarantine == "" {
-		return nil
+		return ""
 	}
 	abs, err := fsutil.Abs(quarantine)
 	if err != nil {
-		return []string{filepath.Clean(quarantine)}
+		return filepath.Clean(quarantine)
 	}
-	forms := []string{abs}
-	if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
-		forms = append(forms, real)
-	}
-	return forms
+	return abs
 }
 
-// QuarantineExcludes returns the directories a walk from root must not
-// enter for the given quarantine directory: the directory's own forms and,
-// when its resolved path lies under the resolved root, that place spelled
-// under root as the walk will meet it, so a quarantine directory named
-// through a symlink to the tree is still recognised. It is nil when
+// QuarantineExcludes returns the directories a walk must not enter for the
+// given quarantine directory: its cleaned absolute path, which Walk matches
+// by identity when the directory exists, so a quarantine named through a
+// symlink, a ".." component, a relative path or a different letter case on
+// a case-insensitive filesystem is still recognised. It is nil when
 // quarantine is empty.
-func QuarantineExcludes(root, quarantine string) []string {
-	forms := quarantineForms(quarantine)
-	if len(forms) == 0 {
+func QuarantineExcludes(quarantine string) []string {
+	q := quarantineAbs(quarantine)
+	if q == "" {
 		return nil
 	}
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return forms
-	}
-	for _, q := range forms {
-		rel, err := filepath.Rel(realRoot, q)
-		if err != nil || rel == "." || escapes(rel) {
-			continue
-		}
-		forms = append(forms, filepath.Join(root, rel))
-	}
-	return forms
+	return []string{q}
 }
 
 // escapes reports whether a relative path leaves the directory it is
@@ -608,28 +591,48 @@ func escapes(rel string) bool {
 
 // CheckQuarantineRoot returns an error when root is the quarantine
 // directory or lies inside it, in which case quarantined files would be
-// scanned again and moved one level deeper on every run. Both paths are
-// compared in their cleaned absolute form and, where they exist, in their
-// symlink-resolved form, so a trailing slash, a ".." component, a relative
-// path or a symlink to the quarantine directory does not slip past. It
-// returns nil when quarantine is empty.
+// scanned again and moved one level deeper on every run. The two paths are
+// first compared in their cleaned absolute form, which also covers a
+// quarantine directory that does not exist yet. When the directory exists
+// it is then compared by identity (os.SameFile) with root and with each of
+// root's ancestors, in the spelling given and in the symlink-resolved
+// spelling, so a trailing slash, a ".." component, a relative path, a
+// symlink or a different letter case on a case-insensitive filesystem
+// cannot slip past. It returns nil when quarantine is empty.
 func CheckQuarantineRoot(root, quarantine string) error {
-	qs := quarantineForms(quarantine)
-	if len(qs) == 0 {
+	q := quarantineAbs(quarantine)
+	if q == "" {
 		return nil
 	}
-	rs := quarantineForms(root)
-	for _, r := range rs {
-		for _, q := range qs {
-			rel, err := filepath.Rel(q, r)
-			if err != nil {
-				continue
+	isQ := fmt.Errorf("%s is the quarantine directory; the quarantine directory must lie outside the tree it serves", root)
+	inQ := fmt.Errorf("%s lies inside the quarantine directory %s; the quarantine directory must lie outside the tree it serves", root, quarantine)
+	r := quarantineAbs(root)
+	if rel, err := filepath.Rel(q, r); err == nil {
+		if rel == "." {
+			return isQ
+		}
+		if !escapes(rel) {
+			return inQ
+		}
+	}
+	qfi, err := os.Stat(q)
+	if err != nil || !qfi.IsDir() {
+		return nil
+	}
+	starts := []string{r}
+	if real, err := filepath.EvalSymlinks(r); err == nil && real != r {
+		starts = append(starts, real)
+	}
+	for _, start := range starts {
+		for p, depth := start, 0; ; p, depth = filepath.Dir(p), depth+1 {
+			if fi, err := os.Stat(p); err == nil && os.SameFile(fi, qfi) {
+				if depth == 0 {
+					return isQ
+				}
+				return inQ
 			}
-			if rel == "." {
-				return fmt.Errorf("%s is the quarantine directory; the quarantine directory must lie outside the tree it serves", root)
-			}
-			if !escapes(rel) {
-				return fmt.Errorf("%s lies inside the quarantine directory %s; the quarantine directory must lie outside the tree it serves", root, quarantine)
+			if filepath.Dir(p) == p {
+				break
 			}
 		}
 	}
