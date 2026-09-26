@@ -5,8 +5,12 @@
 package verify
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -126,32 +130,71 @@ func (v *Verifier) DecodedHash(ctx context.Context, path string, s probe.Stream)
 	default:
 		return "", fmt.Errorf("unsupported stream type %s", s.Type)
 	}
-	res, err := v.Runner.RunWithTimeout(ctx, v.to(), exec.FFmpeg, append(args, "-")...)
+	// The decoded stream is hashed as ffmpeg produces it. Raw samples of a
+	// feature film run to gigabytes, so they are never held in memory.
+	h := sha256.New()
+	var w io.Writer = h
+	var dw *digestWriter
+	if s.Type == "video" {
+		dw = &digestWriter{w: h}
+		w = dw
+	}
+	res, err := v.Runner.RunStreaming(ctx, v.to(), exec.FFmpeg, w, append(args, "-")...)
 	if err != nil {
 		return "", err
 	}
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("decode exit %d: %s", res.ExitCode, firstLine(res.Stderr))
 	}
-	if s.Type == "video" {
-		return sha256hex([]byte(digestColumn(res.Stdout))), nil
+	if dw != nil {
+		dw.flush()
 	}
-	return sha256hex(res.Stdout), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// digestColumn extracts the last comma-separated field of each framemd5
-// data line, joined by newlines.
-func digestColumn(out []byte) string {
-	var sb strings.Builder
-	for _, line := range strings.Split(string(out), "\n") {
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+// digestWriter forwards the last comma-separated field of each framemd5
+// data line, followed by a newline, to w. Comment lines starting with "#"
+// and empty lines are dropped. Lines may arrive split across writes; a
+// final line without a newline is forwarded by flush.
+type digestWriter struct {
+	w   io.Writer
+	buf []byte
+}
+
+func (d *digestWriter) Write(p []byte) (int, error) {
+	d.buf = append(d.buf, p...)
+	for {
+		i := bytes.IndexByte(d.buf, '\n')
+		if i < 0 {
+			return len(p), nil
 		}
-		i := strings.LastIndexByte(line, ',')
-		sb.WriteString(strings.TrimSpace(line[i+1:]))
-		sb.WriteByte('\n')
+		line := d.buf[:i]
+		d.buf = d.buf[i+1:]
+		if err := d.line(line); err != nil {
+			return 0, err
+		}
 	}
-	return sb.String()
+}
+
+func (d *digestWriter) line(line []byte) error {
+	if len(line) == 0 || line[0] == '#' {
+		return nil
+	}
+	i := bytes.LastIndexByte(line, ',')
+	field := bytes.TrimSpace(line[i+1:])
+	if _, err := d.w.Write(field); err != nil {
+		return err
+	}
+	_, err := d.w.Write([]byte{'\n'})
+	return err
+}
+
+// flush forwards a trailing line that had no newline.
+func (d *digestWriter) flush() {
+	if len(d.buf) > 0 {
+		_ = d.line(d.buf)
+		d.buf = nil
+	}
 }
 
 func maxInt(a, b int) int {
