@@ -776,12 +776,17 @@ func TestRefusedMediaUntouched(t *testing.T) {
 		if r, _ := route(t, fr); r != RouteSkip {
 			t.Errorf("force=%v u.mkv route %s", force, r)
 		}
+		// Guarantee 3: the symlink is skipped with a WARN, not refused, and
+		// --force does not change that.
 		fr = got["link.mkv"]
-		if !fr.Has(scan.CodeSymlink) || !fr.Has(remux.CodeRefused) {
+		if fr.Verdict != report.Warn || !fr.Has(scan.CodeSymlink) || fr.Has(remux.CodeRefused) {
 			t.Errorf("force=%v link.mkv: %s %v", force, fr.Verdict, codes(fr))
 		}
-		if r, _ := route(t, fr); r != RouteSkip {
-			t.Errorf("force=%v link.mkv route %s", force, r)
+		if r, text := route(t, fr); r != RouteSkip || text != "symlink skipped" {
+			t.Errorf("force=%v link.mkv route %s %q", force, r, text)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("force=%v link.mkv is no longer a symlink: %v", force, err)
 		}
 		sameSnapshot(t, before, snapshot(t, dir))
 		if fileSHA(t, victim) != victimSum {
@@ -1227,7 +1232,14 @@ func TestIngestCorpus(t *testing.T) {
 	if fileSHA(t, filepath.Join(corpus, "sample.mkv")) != placed {
 		t.Error("sample.mkv was overwritten by a later container")
 	}
-	check("link.mkv", report.Fail, RouteSkip, scan.CodeSymlink, remux.CodeRefused)
+	// Guarantee 3: a symlink is skipped with WARN SYMLINK and no REFUSED.
+	fr = check("link.mkv", report.Warn, RouteSkip, scan.CodeSymlink)
+	if fr.Has(remux.CodeRefused) {
+		t.Errorf("link.mkv carries REFUSED: %v", codes(fr))
+	}
+	if _, text := route(t, fr); text != "symlink skipped" {
+		t.Errorf("link.mkv route text %q", text)
+	}
 	if fi, err := os.Lstat(filepath.Join(corpus, "link.mkv")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Error("link.mkv is no longer a symlink")
 	}
