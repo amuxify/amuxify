@@ -496,7 +496,10 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 	if !now.Mode().IsRegular() {
 		return fmt.Errorf("%s is no longer a regular file (changed since the scan)", path)
 	}
-	if was == nil || !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
+	if was == nil {
+		return fmt.Errorf("%s could not be examined when the remux began; nothing was placed", path)
+	}
+	if !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
 		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
 	}
 	return nil
