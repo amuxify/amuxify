@@ -1611,46 +1611,78 @@ func TestPlantedTempSymlinkRefused(t *testing.T) {
 	}
 }
 
-// Guarantee 1 and 3 for the window tempUnchanged cannot cover: the temp
-// name is checked, and then the placement primitive uses that name again.
-// A symlink swapped onto the name in between is followed by link(2) on
-// macOS, which would leave a hard link to the victim at the destination, and
-// is moved as a link by the rename fallback. The seam performs the swap in
-// exactly that window, after the last check and before the placement. In
-// output mode and for a non-.mkv source in place the foreign entry must be
-// discarded, nothing may be reported as placed, the source and the victim
-// must keep their bytes and their single link, and no temp file may remain.
-// For an .mkv source the rename over the source cannot be checked first, so
-// the run must notice afterwards, say that the source is gone, and leave the
-// entry alone rather than follow or remove it; the victim keeps its bytes
-// and its single link there as well.
+// Guarantee 1 and 3 for the windows tempUnchanged cannot cover. The temp
+// name is checked, and then the name is used again: in place, once to open
+// the output and give it the source's mode, ownership and time, and once by
+// the placement primitive. A symlink swapped onto the name in the first
+// window would, with a path-based chmod and utimes, rewrite the mode and
+// the modification time of the file behind the link; in the second window it
+// is followed by link(2) on macOS, which would leave a hard link to the
+// victim at the destination, and is moved as a link by the rename fallback
+// or by the rename over an .mkv source. The seams perform the swap in
+// exactly those windows. In every row nothing may be reported as placed,
+// the victim must keep its bytes, its single link, its mode and its
+// modification time, and no temp file may remain. In the identity window
+// the swap is refused by the descriptor check, so the source is untouched
+// and the destination is absent in every branch. In the placement window
+// the output tree and the non-.mkv in-place branch discard the foreign
+// entry and keep the source; for an .mkv source the rename over the source
+// cannot be checked first, so the run must notice afterwards, say that the
+// source is gone, and leave the entry alone rather than follow or remove it.
 func TestTempSwappedBeforePlacementRefused(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits and symlinks differ on windows")
+	}
+	const (
+		identityWindow  = "before the identity copy"
+		placementWindow = "before placement"
+	)
 	for _, tc := range []struct {
 		name    string
 		fixture string
 		inPlace bool
 		force   bool
 		rename  bool // the .mkv source path, where tmp is renamed over the source
+		window  string
 	}{
-		{"output tree", "clean.mkv", false, false, false},
-		{"in place under a new name", "purchased.mp4", true, true, false},
-		{"in place over the source", "clean.mkv", true, false, true},
+		{"output tree", "clean.mkv", false, false, false, placementWindow},
+		{"in place under a new name", "purchased.mp4", true, true, false, identityWindow},
+		{"in place under a new name", "purchased.mp4", true, true, false, placementWindow},
+		{"in place over the source", "clean.mkv", true, false, true, identityWindow},
+		{"in place over the source", "clean.mkv", true, false, true, placementWindow},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name+" "+tc.window, func(t *testing.T) {
 			src := testutil.Copy(t, tc.fixture)
 			dir := filepath.Dir(src)
 			srcBefore := fileSHA(t, src)
+			// The source is world-writable with an old stamp and the
+			// victim is private with an older one, so a metadata copy
+			// that reached the victim through the planted link would
+			// show as a mode of 0666 or the source's stamp on it.
+			if err := os.Chmod(src, 0o666); err != nil {
+				t.Fatal(err)
+			}
+			srcStamp := time.Date(2010, 11, 12, 13, 14, 15, 0, time.UTC)
+			if err := os.Chtimes(src, srcStamp, srcStamp); err != nil {
+				t.Fatal(err)
+			}
 			victim := testutil.Copy(t, "clean.mkv")
 			victimBefore := fileSHA(t, victim)
+			if err := os.Chmod(victim, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			victimStamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+			if err := os.Chtimes(victim, victimStamp, victimStamp); err != nil {
+				t.Fatal(err)
+			}
 			outRoot := filepath.Join(t.TempDir(), "out")
 			dest := filepath.Join(outRoot, "clean.mkv")
 			if tc.inPlace {
 				dest = filepath.Join(dir, strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))+".mkv")
 			}
 			swapped := false
-			t.Cleanup(func() { beforePlace = nil })
-			beforePlace = func(tmp, _ string) {
+			swap := func(tmp, _ string) {
 				if err := os.Remove(tmp); err != nil {
 					t.Fatalf("swap: %v", err)
 				}
@@ -1658,6 +1690,15 @@ func TestTempSwappedBeforePlacementRefused(t *testing.T) {
 					t.Fatalf("swap: %v", err)
 				}
 				swapped = true
+			}
+			t.Cleanup(func() { beforeIdentity, beforePlace = nil, nil })
+			if tc.window == identityWindow {
+				beforeIdentity = swap
+				// The placement seam must never fire once the identity
+				// copy refused the swapped name.
+				beforePlace = func(tmp, _ string) { t.Errorf("placement reached after the swap at %s", tmp) }
+			} else {
+				beforePlace = swap
 			}
 			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
 			rm.InPlace = tc.inPlace
@@ -1677,13 +1718,16 @@ func TestTempSwappedBeforePlacementRefused(t *testing.T) {
 				t.Fatalf("mkvmerge never ran: %v", codes(fr))
 			}
 			if !swapped {
-				t.Fatalf("the seam never ran; the placement was not exercised: %v", codes(fr))
+				t.Fatalf("the seam never ran; the window was not exercised: %v", codes(fr))
 			}
 			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
 				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
 			}
 			want := []string{"swapped before placement", "was discarded"}
-			if tc.rename {
+			switch {
+			case tc.window == identityWindow:
+				want = []string{"symlink", "nothing was placed"}
+			case tc.rename:
 				want = []string{"not the file this run built", "is gone"}
 			}
 			said := false
@@ -1695,13 +1739,17 @@ func TestTempSwappedBeforePlacementRefused(t *testing.T) {
 			if !said {
 				t.Fatalf("the finding does not say what happened: %v", fr.Findings)
 			}
-			if fi, err := os.Lstat(victim); err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+			fi, err := os.Lstat(victim)
+			if err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
 				t.Fatalf("victim is no longer a plain regular file with one name: %v", err)
+			}
+			if fi.Mode().Perm() != 0o600 || !fi.ModTime().Equal(victimStamp) {
+				t.Fatalf("victim identity rewritten through the planted link: mode %o mtime %v", fi.Mode().Perm(), fi.ModTime())
 			}
 			if fileSHA(t, victim) != victimBefore {
 				t.Fatal("victim rewritten")
 			}
-			if tc.rename {
+			if tc.rename && tc.window == placementWindow {
 				// The source was renamed over before the swap could be
 				// seen; the entry that took its place is the planted link
 				// and it must have been left exactly as it was found.
@@ -1716,10 +1764,14 @@ func TestTempSwappedBeforePlacementRefused(t *testing.T) {
 				if fileSHA(t, src) != srcBefore {
 					t.Fatal("source changed")
 				}
-				if fi, err := os.Lstat(src); err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+				fi, err := os.Lstat(src)
+				if err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
 					t.Fatalf("source is no longer a plain regular file: %v", err)
 				}
-				if _, err := os.Lstat(dest); err == nil {
+				if fi.Mode().Perm() != 0o666 || !fi.ModTime().Equal(srcStamp) {
+					t.Fatalf("source identity changed: mode %o mtime %v", fi.Mode().Perm(), fi.ModTime())
+				}
+				if _, err := os.Lstat(dest); err == nil && dest != src {
 					t.Fatalf("%s still holds the swapped entry", dest)
 				}
 			}

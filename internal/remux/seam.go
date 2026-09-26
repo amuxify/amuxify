@@ -16,8 +16,16 @@ var decodedHash = func(ctx context.Context, v *verify.Verifier, path string, s p
 	return v.DecodedHash(ctx, path, s)
 }
 
+// beforeIdentity, when set, runs in the in-place branches after the last
+// check of the temp name and right before takeIdentity opens that name to
+// give the output its source's mode, ownership and time. Tests in this
+// package set it to swap the temp name in that window; it is nil in
+// production.
+var beforeIdentity func(tmp, dest string)
+
 // beforePlace, when set, runs right before a verified temp file is placed,
-// after the last check of the temp name and before the placement primitive
-// uses that name again. Tests in this package set it to swap the temp name
-// in that window; it is nil in production.
+// after the last check of the temp name and, in place, after the identity
+// copy has closed its descriptor, so that the placement primitive is the
+// next thing to use the name. Tests in this package set it to swap the temp
+// name in that window; it is nil in production.
 var beforePlace func(tmp, dest string)

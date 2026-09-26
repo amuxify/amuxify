@@ -271,9 +271,13 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	// is handed to mkvmerge, so a symlink planted at the name in the
 	// meantime can only get there by replacing this run's own entry, which
 	// tempUnchanged notices after mkvmerge returns and again before the
-	// output is placed; placedOwn and replacedOwn then examine the placed
-	// entry, because the placement primitive uses the name once more after
-	// that last check. mkvmerge writing through a planted link would
+	// output is placed. In place, the output then takes the source's mode,
+	// ownership and time through a descriptor that takeIdentity opens
+	// without following a link and checks against the same identity, so no
+	// metadata write ever goes through the temp name; placedOwn and
+	// replacedOwn examine the placed entry afterwards, because the
+	// placement primitive uses the name once more after that last check.
+	// mkvmerge writing through a planted link would
 	// otherwise be verified through that link and the link itself placed.
 	// cleanup removes whatever sits at the name; os.Remove never follows a
 	// link, so a planted one is removed and its target is left alone.
@@ -388,19 +392,32 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// to the .mkv spelling last; it is the same entry, so that rename
 		// cannot replace any other file.
 		//
+		// The output first takes the source's mode, ownership and time
+		// through a descriptor of the file this run created; a symlink
+		// swapped onto the temp name is refused there and its target is
+		// never touched.
+		//
 		// The rename over the source cannot be checked before it happens
 		// without renameat2 or renamex_np, which amuxify does not use, so
-		// a window stays open between the tempUnchanged check above and
-		// the rename: it needs write access to the source's directory, and
-		// a symlink swapped onto the temp name in it is renamed over the
-		// source as a link. The entry is examined right after the rename;
-		// when it is not the file this run built the source is already
-		// gone, so the entry is reported and left alone, never followed
-		// and never removed.
+		// a window stays open between that identity copy and the rename:
+		// it needs write access to the source's directory, and a symlink
+		// swapped onto the temp name in it is renamed over the source as a
+		// link. The entry is examined right after the rename; when it is
+		// not the file this run built the source is already gone, so the
+		// entry is reported and left alone, never followed and never
+		// removed.
+		if beforeIdentity != nil {
+			beforeIdentity(tmp, fr.Path)
+		}
+		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
+			return fr
+		}
 		if beforePlace != nil {
 			beforePlace(tmp, fr.Path)
 		}
-		if err := fsutil.ReplaceInPlace(tmp, fr.Path); err != nil {
+		if err := os.Rename(tmp, fr.Path); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "replace: %v", err)
 			return fr
@@ -427,10 +444,16 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// name with the no-clobber primitive, and only then is the source
 		// removed: a file that appeared at dest during the run is never
 		// replaced (guarantee 1), and a crash leaves the source or the
-		// placed output, never Matroska content under the old name.
-		if err := fsutil.CopyIdentity(fr.Path, tmp); err != nil {
+		// placed output, never Matroska content under the old name. The
+		// identity is copied through a descriptor of the file this run
+		// created, so a symlink swapped onto the temp name is refused and
+		// its target keeps its own mode and time.
+		if beforeIdentity != nil {
+			beforeIdentity(tmp, dest)
+		}
+		if err := takeIdentity(tmp, fr.Path, created); err != nil {
 			cleanup()
-			fr.Addf(CodeRemuxFail, report.Fail, "identity: %v", err)
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 			return fr
 		}
 		if beforePlace != nil {
@@ -511,21 +534,10 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 // appears at the name between the removal and the creation. The file gets
 // the mode mkvmerge would give a file it created itself, 0666 under the
 // umask, because in output mode the file is placed as it is; in place,
-// CopyIdentity gives it the source's mode before placement.
+// takeIdentity gives it the source's mode before placement.
 func createTemp(tmp string) (os.FileInfo, error) {
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("temp file: %v", err)
-	}
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	fi, err := fsutil.CreateTemp(tmp)
 	if err != nil {
-		return nil, fmt.Errorf("temp file: %v", err)
-	}
-	fi, err := f.Stat()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("temp file: %v", err)
 	}
 	return fi, nil
@@ -551,6 +563,29 @@ func tempUnchanged(tmp string, created os.FileInfo) error {
 	}
 	if n := fsutil.Nlink(now); n != 1 {
 		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
+	}
+	return nil
+}
+
+// takeIdentity gives the temp file the mode, ownership and modification
+// time of the source at src. The temp name is opened without following a
+// symlink and the open file must be the regular file created describes with
+// no other name; the metadata is then written through that descriptor and
+// the descriptor is closed. Nothing is written by name, so a symlink or a
+// different file swapped onto the temp name after the last tempUnchanged
+// check is refused rather than followed, and the swap is reported in the
+// words tempUnchanged uses.
+func takeIdentity(tmp, src string, created os.FileInfo) error {
+	f, err := fsutil.OpenOwn(tmp, created)
+	if err != nil {
+		return err
+	}
+	if err := fsutil.CopyIdentityTo(f, src); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("identity: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("identity: %v", err)
 	}
 	return nil
 }
@@ -584,7 +619,7 @@ func placedOwn(dest string, created os.FileInfo) error {
 	return fmt.Errorf("the entry placed at %s is not the file this run built; it was left in place", dest)
 }
 
-// replacedOwn reports an error when the entry ReplaceInPlace left at path
+// replacedOwn reports an error when the entry the in-place rename left at path
 // is not the regular file described by created. Unlike placedOwn it never
 // removes anything: the rename has already replaced the source, so whatever
 // sits at path is the only entry left under that name, and a symlink there
