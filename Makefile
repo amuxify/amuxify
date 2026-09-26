@@ -64,6 +64,5 @@ release-check: fmt test build
 	@grep -q "ghcr.io/amuxify/$(PROJECT):$(VERSION) " contrib/hooks/Dockerfile.sabnzbd || { echo "contrib/hooks/Dockerfile.sabnzbd does not pull the $(VERSION) image"; exit 1; }
 	@echo "Release checks passed for $(VERSION)."
 
-
 clean:
 	rm -rf bin/$(PROJECT) dist "$(FIXTURES)"

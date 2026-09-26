@@ -50,7 +50,6 @@ verified MKV that replaces the original. Audio and subtitle files are cleaned in
 Sidecars are scanned; with `--remove-blocked-sidecars` blocked ones are deleted. A file
 that scans as BLOCK is never modified; a file that scans as FAIL is left alone as well
 unless `--force` asks for the rebuild anyway. There is no `--output` and no
-
 `--in-place` flag: ingest is in place by definition; `remux --output` is the
 non-destructive path and `--dry-run` shows the plan.
 

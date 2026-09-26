@@ -27,7 +27,7 @@ All notable changes to amuxify will be documented in this file.
   the fixture corpus that skip when tools are missing and fail in CI.
 - Hardening: every directory in a quarantine or output path is checked for
   symlinks before a file is placed under it; the tools run with a UTF-8 locale
-  so that their output is read the same everywhere; decode verification checks
+  and English messages so that their output is read the same everywhere; decode verification checks
   the streams ffprobe reported rather than a fixed set; cleaning an MP4 twice
   leaves it unchanged; a tool named by a `tools.*` override must be executable
   or `doctor` reports it; a cancelled or timed-out run reports the cancellation
@@ -39,7 +39,6 @@ All notable changes to amuxify will be documented in this file.
   name cannot forge or overwrite a line. The JSON report carries the raw value.
 
 ### Changed
-
 
 - JSON: `started` and `finished` are UTC with whole seconds; `files`, `findings`
   and `errors` are `[]` rather than absent or `null`; `profile` is always present.
@@ -56,7 +55,6 @@ All notable changes to amuxify will be documented in this file.
   file correctly. A quarantine move across devices copies the file safely
   instead of failing or leaving two copies. A directory that cannot be read
   fails the run instead of being silently skipped. A hook run
-
   under `--json` writes exactly one JSON document to stdout and its own log
   lines to stderr, reports an interruption on stderr, and refuses a positional
   argument the adapter does not take, with a hint when a directory was written
@@ -65,7 +63,6 @@ All notable changes to amuxify will be documented in this file.
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under
   `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
-
 
 ## 0.2.0
 

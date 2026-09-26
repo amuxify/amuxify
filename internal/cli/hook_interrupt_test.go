@@ -84,7 +84,6 @@ func TestHookInterrupted(t *testing.T) {
 			if strings.Contains(out, "interrupted") {
 				t.Errorf("the interrupted line went to stdout:\n%s", out)
 			}
-
 			if strings.Contains(out, "PASS  "+c+"\n") {
 				t.Errorf("the run went on after the interrupt:\n%s", out)
 			}

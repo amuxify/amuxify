@@ -545,7 +545,7 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 	testutil.Stubs(t)
 	asUser(t, 1000)
 	dir := t.TempDir()
-	name := "\x1b[2K\rPASS  /forged\nBLOCK /forged‮" + "fni.nfo"
+	name := "\x1b[2K\rPASS  forged\nBLOCK forged‮" + "fni.nfo"
 	p := write(t, filepath.Join(dir, name), "nfo\n")
 	escaped := report.Sanitize(p)
 	if escaped == p || strings.ContainsAny(escaped, "\x1b\r\n‮") {
@@ -565,7 +565,6 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 			t.Errorf("%v: exit %d\n%s%s", args, code, out, errs)
 		}
 		for _, l := range append(lines(out), lines(errs)...) {
-
 			for _, r := range l {
 				if r < 0x20 && r != '\t' || r == 0x7f || r == 0x202e {
 					t.Errorf("%v: raw %U in %q", args, r, l)

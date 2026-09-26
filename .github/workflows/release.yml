@@ -46,4 +46,3 @@ jobs:
             ghcr.io/amuxify/amuxify:${{ steps.version.outputs.bare }}
             ghcr.io/amuxify/amuxify:${{ github.ref_name }}
             ghcr.io/amuxify/amuxify:latest
-

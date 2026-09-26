@@ -182,13 +182,16 @@ func TestCleanEnvDropsLDPreload(t *testing.T) {
 	}
 	// The locale is pinned to a UTF-8 variant: plain "C" makes mkvmerge
 	// truncate a path at the first non-ASCII byte.
-	if keys["LC_ALL"] != "C.UTF-8" || keys["LANG"] != "C.UTF-8" {
-		t.Errorf("locale not pinned to C.UTF-8: %v", env)
+	if keys["LANG"] != "C.UTF-8" || keys["LC_CTYPE"] != "C.UTF-8" || keys["LC_MESSAGES"] != "C" {
+		t.Errorf("locale not pinned to C.UTF-8 with English messages: %v", env)
+	}
+	if _, ok := keys["LC_ALL"]; ok {
+		t.Errorf("LC_ALL must stay unset so LC_MESSAGES=C can take effect: %v", env)
 	}
 	if keys["PATH"] != "/usr/bin" {
 		t.Errorf("PATH not forwarded: %v", env)
 	}
-	allowed := map[string]bool{"LC_ALL": true, "LANG": true, "PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SystemRoot": true, "USERPROFILE": true}
+	allowed := map[string]bool{"LANG": true, "LC_CTYPE": true, "LC_MESSAGES": true, "PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SystemRoot": true, "USERPROFILE": true}
 	for k := range keys {
 		if !allowed[k] {
 			t.Errorf("unexpected variable %s in the tool environment", k)
@@ -214,7 +217,7 @@ func TestRunUsesCleanEnv(t *testing.T) {
 			t.Errorf("child environment contains %s:\n%s", bad, out)
 		}
 	}
-	if !strings.Contains(out, "LC_ALL=C.UTF-8\n") || !strings.Contains(out, "LANG=C.UTF-8\n") {
+	if !strings.Contains(out, "LC_CTYPE=C.UTF-8\n") || !strings.Contains(out, "LANG=C.UTF-8\n") || !strings.Contains(out, "LC_MESSAGES=C\n") || strings.Contains(out, "LC_ALL=") {
 		t.Errorf("child environment lacks the C.UTF-8 locale:\n%s", out)
 	}
 }
@@ -558,10 +561,12 @@ func TestOverrideNameIsUpperCasedToolName(t *testing.T) {
 }
 
 // The locale handed to the tools is the caller's own UTF-8 locale when one
-// is set, because that one exists on the host, and C.UTF-8 otherwise. A
-// value that is not shaped like a locale name is never forwarded, however
-// it mentions UTF-8, so nothing but the two locale variables can come out
-// of the caller's locale settings.
+// is set, because that one exists on the host, and C.UTF-8 otherwise. It
+// reaches the child as LANG and LC_CTYPE only; LC_MESSAGES is pinned to C so
+// the tool messages amuxify matches on stay English, and LC_ALL is never
+// set because it would override that pin. A value that is not shaped like
+// a locale name is never forwarded, however it mentions UTF-8, so nothing
+// but those three variables can come out of the caller's locale settings.
 func TestLocaleSelection(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -601,18 +606,23 @@ func TestLocaleSelection(t *testing.T) {
 				t.Fatalf("Locale() = %q, want %q", got, tc.want)
 			}
 			env := cleanEnv()
-			var lcAll, lang int
+			var lang, lcType, lcMessages int
 			for _, kv := range env {
 				k, v, _ := strings.Cut(kv, "=")
 				switch k {
-				case "LC_ALL":
-					lcAll++
 				case "LANG":
 					lang++
 				case "LC_CTYPE":
-					t.Errorf("LC_CTYPE forwarded: %q", kv)
+					lcType++
+				case "LC_MESSAGES":
+					lcMessages++
+					if v != "C" {
+						t.Errorf("LC_MESSAGES=%q, want C so tool messages stay English", v)
+					}
+				case "LC_ALL":
+					t.Errorf("LC_ALL forwarded, which would override LC_MESSAGES: %q", kv)
 				}
-				if k == "LC_ALL" || k == "LANG" {
+				if k == "LANG" || k == "LC_CTYPE" {
 					if v != tc.want {
 						t.Errorf("%s=%q, want %q", k, v, tc.want)
 					}
@@ -621,10 +631,10 @@ func TestLocaleSelection(t *testing.T) {
 					t.Errorf("hostile bytes reached the tool environment: %q", kv)
 				}
 			}
-			if lcAll != 1 || lang != 1 {
-				t.Errorf("LC_ALL appears %d times and LANG %d times: %v", lcAll, lang, env)
+			if lang != 1 || lcType != 1 || lcMessages != 1 {
+				t.Errorf("LANG appears %d times, LC_CTYPE %d times and LC_MESSAGES %d times: %v", lang, lcType, lcMessages, env)
 			}
-			allowed := map[string]bool{"LC_ALL": true, "LANG": true, "PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SystemRoot": true, "USERPROFILE": true}
+			allowed := map[string]bool{"LANG": true, "LC_CTYPE": true, "LC_MESSAGES": true, "PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SystemRoot": true, "USERPROFILE": true}
 			for _, kv := range env {
 				if k, _, _ := strings.Cut(kv, "="); !allowed[k] {
 					t.Errorf("unexpected variable in the tool environment: %q", kv)
@@ -647,8 +657,8 @@ func TestRunForwardsCallerUTF8Locale(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(res.Stdout)
-	if !strings.Contains(out, "LC_ALL=en_US.UTF-8\n") || !strings.Contains(out, "LANG=en_US.UTF-8\n") {
-		t.Errorf("child environment lacks the caller's locale:\n%s", out)
+	if !strings.Contains(out, "LC_CTYPE=en_US.UTF-8\n") || !strings.Contains(out, "LANG=en_US.UTF-8\n") || !strings.Contains(out, "LC_MESSAGES=C\n") || strings.Contains(out, "LC_ALL=") {
+		t.Errorf("child environment lacks the caller's locale or the English message pin:\n%s", out)
 	}
 	t.Setenv("LANG", "en_US.UTF-8\nLD_PRELOAD=/tmp/evil.so")
 	res, err = r.RunWithTimeout(context.Background(), 10*time.Second, "envtool", prefix...)
@@ -656,7 +666,7 @@ func TestRunForwardsCallerUTF8Locale(t *testing.T) {
 		t.Fatal(err)
 	}
 	out = string(res.Stdout)
-	if strings.Contains(out, "LD_PRELOAD") || !strings.Contains(out, "LC_ALL=C.UTF-8\n") {
+	if strings.Contains(out, "LD_PRELOAD") || !strings.Contains(out, "LC_CTYPE=C.UTF-8\n") {
 		t.Errorf("hostile LANG reached the child:\n%s", out)
 	}
 }

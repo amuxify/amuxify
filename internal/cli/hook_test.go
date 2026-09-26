@@ -17,7 +17,6 @@ import (
 )
 
 // hookEnv replaces the environment the hook adapters read for the rest of
-
 // the test. Only these entries are visible; the process environment is not.
 func hookEnv(t *testing.T, kv ...string) {
 	t.Helper()
@@ -115,7 +114,6 @@ func TestHookUsage(t *testing.T) {
 		{"radarr with a stray argument", jobEnv("radarr", dir), []string{"hook", "radarr", "extra"}, 2, "hook radarr: unexpected argument \"extra\"; the adapter reads the job from the environment\n"},
 		{"sabnzbd with one positional", jobEnv("sabnzbd", dir), []string{"hook", "sabnzbd", "--quarantine", dir}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 1 beginning with \"" + dir + "\"; if it was meant as the quarantine directory write --quarantine=" + dir},
 		{"sabnzbd with six positionals", nil, []string{"hook", "sabnzbd", dir, "n", "c", "1", "tv", "g"}, 2, "hook sabnzbd: expected no positional arguments or SABnzbd's eight parameters, got 6 beginning with \"" + dir + "\"\n"},
-
 		{"sonarr without env", nil, []string{"hook", "sonarr"}, 2, "hook sonarr: not started by Sonarr: sonarr_eventtype is not set"},
 		{"radarr without env", nil, []string{"hook", "radarr"}, 2, "hook radarr: not started by Radarr: radarr_eventtype is not set"},
 		{"sonarr download without a path", []string{"sonarr_eventtype=Download"}, []string{"hook", "sonarr"}, 2, "event Download without sonarr_episodefile_path"},
@@ -590,7 +588,6 @@ func TestHookNZBGetSidecarTree(t *testing.T) {
 		if strings.Count(out, `\x0a[NZB] `) != 4 || strings.Contains(out, "\n[NZB]") || strings.Contains(out, "\n[nzb]") {
 			t.Errorf("file names with a newline were not escaped:\n%s", out)
 		}
-
 	})
 	t.Run("trace lines stay tagged", func(t *testing.T) {
 		dir := t.TempDir()
@@ -1008,7 +1005,6 @@ func TestHookArgumentInjection(t *testing.T) {
 				}
 				// The argument is quoted on one stderr line with the hint.
 				if ls := lines(errs); len(ls) != 1 || !strings.Contains(ls[0], fmt.Sprintf("%q", v)) || !strings.Contains(ls[0], "--quarantine="+report.Sanitize(v)) {
-
 					t.Errorf("%s %q: stderr %q", a, v, errs)
 				}
 				if a == "nzbget" {
