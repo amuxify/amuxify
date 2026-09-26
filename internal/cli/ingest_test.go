@@ -10,10 +10,12 @@ import (
 	"testing"
 
 	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/testutil"
 )
 
 // tree records name, size, mtime and mode of everything under root.
+
 func tree(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -363,10 +365,12 @@ func TestIngestDryRunOnFixtures(t *testing.T) {
 		t.Errorf("%d verdict lines for %d files:\n%s", verdicts, len(files), out)
 	}
 	for _, p := range files {
-		if !strings.Contains(out, " "+p+"\n") {
+		// The terminal form escapes the bidi override in one corpus name.
+		if !strings.Contains(out, " "+report.Sanitize(p)+"\n") {
 			t.Errorf("no line for %s", p)
 		}
 	}
+
 	if !strings.Contains(out, "BLOCK "+filepath.Join(corpus, "polyglot.mkv")+"\n") {
 		t.Errorf("polyglot.mkv not BLOCK:\n%s", out)
 	}
