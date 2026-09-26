@@ -127,6 +127,12 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 		reasons = []string{"sidecar"}
 	} else {
 		switch {
+		case fr.Has(scan.CodeSymlink):
+			// Guarantee 3: a symlink is never followed and never aborts a
+			// run. The scanner already reported it as WARN SYMLINK; it is
+			// skipped here without a REFUSED finding because nothing was
+			// refused, the link simply is not media to be ingested.
+			reasons = []string{"symlink skipped"}
 		case fr.Verdict >= report.Block:
 			fr.Addf(remux.CodeRefused, report.Block, "scan blocked this file; not ingested")
 			reasons = []string{"scan verdict BLOCK"}
