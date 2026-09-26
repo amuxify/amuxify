@@ -401,12 +401,6 @@ func TestProgressFiresBeforeNextFile(t *testing.T) {
 	expect(t, res[1].File, report.Fail, CodeUnreadable)
 }
 
-// quarantineGap is the reason the QUARANTINED finding is missing from a
-// result although the file was moved. ScanFile builds its result in a local
-// variable, returns it by value and only then runs the deferred quarantine,
-// so the finding (and Duration) never reach the caller.
-const quarantineGap = "the file was quarantined but the result carries no QUARANTINED finding: internal/scan/scan.go ScanFile returns r by value before its deferred quarantine runs; use a named result (func (s *Scanner) ScanFile(...) (r Result)) so the finding and Duration are returned"
-
 // requireQuarantineFinding checks the frozen QUARANTINED finding. The file
 // placement itself is asserted by the caller before this is called.
 func requireQuarantineFinding(t *testing.T, fr report.FileResult, sev report.Severity, msg string) {
@@ -420,7 +414,7 @@ func requireQuarantineFinding(t *testing.T, fr report.FileResult, sev report.Sev
 		}
 		return
 	}
-	t.Skip(quarantineGap)
+	t.Errorf("no QUARANTINED finding in %v, want %s %q", codes(fr), sev, msg)
 }
 
 // Guarantee 1: quarantine mirrors the tree and never overwrites.
@@ -567,7 +561,19 @@ func TestQuarantineRefusesSymlinkedSubdir(t *testing.T) {
 		t.Fatalf("verdict %s", res[0].File.Verdict)
 	}
 	if _, err := os.Lstat(filepath.Join(elsewhere, "x.url")); err == nil {
-		t.Skip("quarantine followed a symlinked directory inside the quarantine root and placed the file outside it; internal/scan/scan.go quarantine() should refuse a destination whose parent is a symlink (Lstat each component or open the parent with O_NOFOLLOW)")
+		t.Fatal("quarantine followed a symlinked directory inside the quarantine root and placed the file outside it")
+	}
+	// The source stays where it was, the symlink is untouched, and the
+	// result says why the move was refused.
+	if _, err := os.Lstat(filepath.Join(root, "sub", "x.url")); err != nil {
+		t.Fatalf("source file gone: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(q, "sub")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("planted symlink was replaced or removed: %v", err)
+	}
+	requireQuarantineFinding(t, res[0].File, report.Warn, "quarantine failed")
+	if res[0].File.Duration <= 0 {
+		t.Error("Duration not recorded")
 	}
 }
 
