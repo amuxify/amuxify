@@ -655,6 +655,25 @@ func TestSanitize(t *testing.T) {
 		{"\u202a\u202b\u202c\u202d\u200e\u200f\u2066\u2067\u2068\u2069", `\u202a\u202b\u202c\u202d\u200e\u200f\u2066\u2067\u2068\u2069`},
 		{"zero\u200b\u200c\u200d\u2060\ufeffwidth", `zero\u200b\u200c\u200d\u2060\ufeffwidth`},
 		{"line\u2028para\u2029", `line\u2028para\u2029`},
+		// The Arabic letter mark is a bidi control too, and the soft
+		// hyphen, Mongolian vowel separator, invisible operators,
+		// deprecated format characters, interlinear annotation marks and
+		// tag characters are format characters that print as nothing.
+		{"alm\u061c.exe", `alm\u061c.exe`},
+		// The soft hyphen sits below U+0100 and takes the two-digit form
+		// like the C1 controls do.
+		{"soft\u00adhyphen", `soft\xadhyphen`},
+		{"mongolian\u180e", `mongolian\u180e`},
+		{"ops\u2061\u2062\u2063\u2064", `ops\u2061\u2062\u2063\u2064`},
+		{"deprecated\u206a\u206b\u206c\u206d\u206e\u206f", `deprecated\u206a\u206b\u206c\u206d\u206e\u206f`},
+		{"annot\ufff9a\ufffab\ufffb", `annot\ufff9a\ufffab\ufffb`},
+		// A tag character is above U+FFFF and is written with eight
+		// digits, so "tag A" followed by the digit 1 cannot be read as
+		// \ue004 followed by "11".
+		{"tag\U000e0001\U000e0041\U000e007f1", `tag\U000e0001\U000e0041\U000e007f1`},
+		// Combining marks, variation selectors and private-use characters
+		// are not format characters and pass through.
+		{"e\u0301 \ufe0f \ue000", "e\u0301 \ufe0f \ue000"},
 		{"caf\xe9.mkv", "caf\xe9.mkv"},
 		{"\xff\xfe\x1b", "\xff\xfe" + `\x1b`},
 		{"emoji\U0001F600 日本語", "emoji\U0001F600 日本語"},

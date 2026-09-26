@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -669,12 +670,19 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	fr.Addf(CodeQuarantined, report.Block, "moved to %s", dest)
 }
 
+// bidiChars names the first character of name that can hide or reorder
+// what a file is called: a bidirectional control (unicode.Bidi_Control,
+// which includes U+061C) or any other Unicode format character (unicode.Cf:
+// zero-width characters, the byte order mark, the soft hyphen, the tag
+// characters and the rest of the invisible ones). It returns "" for a clean
+// name. The property tests, rather than a list of code points, keep a
+// newly noticed invisible character from slipping through.
 func bidiChars(name string) string {
 	for _, r := range name {
-		switch r {
-		case 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x200E, 0x200F, 0x2066, 0x2067, 0x2068, 0x2069:
+		switch {
+		case unicode.Is(unicode.Bidi_Control, r):
 			return fmt.Sprintf("bidi control U+%04X", r)
-		case 0x200B, 0x200C, 0x200D, 0xFEFF, 0x2060:
+		case unicode.Is(unicode.Cf, r):
 			return fmt.Sprintf("zero-width character U+%04X", r)
 		}
 	}

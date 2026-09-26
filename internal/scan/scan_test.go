@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -214,6 +217,18 @@ func TestBidiNameBlocks(t *testing.T) {
 		"s⁠ub.srt",        // word joiner
 		"‭safe.mkv",       // left-to-right override
 		"deep‮/inner.nfo", // in a directory name too
+		// The Arabic letter mark is a bidi control outside the U+20xx
+		// block, and the soft hyphen, tag characters, interlinear
+		// annotation anchor, Mongolian vowel separator, invisible
+		// operators and deprecated format characters are format
+		// characters that print as nothing at all.
+		"alm\u061cvkm.mkv",
+		"soft\u00adhyphen.nfo",
+		"tag\U000e0041.mkv",
+		"annot\ufff9ation.nfo",
+		"mongol\u180eian.mkv",
+		"invisible\u2063times.nfo",
+		"deprecated\u206a.nfo",
 	}
 	s := newScanner(t, mustProfile(t, "homelab"), nil)
 	for _, n := range names {
@@ -248,9 +263,46 @@ func TestBidiNameBlocks(t *testing.T) {
 			t.Errorf("%q: scanning continued after BIDI_NAME: %v", r.File.Path, codes(r.File))
 		}
 	}
-	// A name that only looks odd is fine.
-	fr := scanOne(t, s, write(t, filepath.Join(t.TempDir(), "ünïcödé — 日本語.nfo"), "nfo\n", 0o644))
-	expect(t, fr, report.Pass, CodeSidecarOK)
+	// A name that only looks odd is fine: accented letters, an em dash,
+	// CJK, a combining mark, an emoji variation selector and a private
+	// use character are none of them format characters.
+	for _, n := range []string{"ünïcödé — 日本語.nfo", "cafe\u0301.nfo", "star\u2b50\ufe0f.nfo", "private\ue000.nfo"} {
+		fr := scanOne(t, s, write(t, filepath.Join(t.TempDir(), n), "nfo\n", 0o644))
+		expect(t, fr, report.Pass, CodeSidecarOK)
+	}
+}
+
+// TestBidiCharsNamesEveryFormatCharacter walks the whole Unicode range and
+// checks that bidiChars flags exactly the format characters, naming the
+// bidi controls (U+061C among them) as such and every other one as a
+// zero-width character, and never flags anything else.
+func TestBidiCharsNamesEveryFormatCharacter(t *testing.T) {
+	for r := rune(1); r <= unicode.MaxRune; r++ {
+		if !utf8.ValidRune(r) {
+			continue
+		}
+		got := bidiChars("a" + string(r) + "b")
+		var want string
+		switch {
+		case unicode.Is(unicode.Bidi_Control, r):
+			want = fmt.Sprintf("bidi control U+%04X", r)
+		case unicode.Is(unicode.Cf, r):
+			want = fmt.Sprintf("zero-width character U+%04X", r)
+		}
+		if got != want {
+			t.Errorf("bidiChars(%U) = %q, want %q", r, got, want)
+		}
+	}
+	for _, r := range []rune{0x061C, 0x202E, 0x2066} {
+		if !strings.HasPrefix(bidiChars(string(r)), "bidi control") {
+			t.Errorf("%U is not reported as a bidi control", r)
+		}
+	}
+	for _, r := range []rune{0x00AD, 0x180E, 0x2063, 0x206A, 0xFEFF, 0xFFF9, 0xE0001, 0xE0041} {
+		if !strings.HasPrefix(bidiChars(string(r)), "zero-width character") {
+			t.Errorf("%U is not reported as a zero-width character", r)
+		}
+	}
 }
 
 func TestEmptyFileBlocks(t *testing.T) {

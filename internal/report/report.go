@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -270,13 +271,17 @@ func (s *Summary) WriteHumanTail(w io.Writer) {
 
 // Sanitize returns s with every character that could reshape terminal or
 // log output replaced by a visible escape: a control character other than
-// tab (0x00-0x1F, 0x7F and the C1 range 0x80-0x9F) becomes \xNN and a
-// Unicode bidirectional, zero-width or line separator control becomes
-// \uNNNN. The human report writers and the hook log lines use it, so a file
-// name carrying an escape sequence, a carriage return, a newline or a bidi
+// tab (0x00-0x1F, 0x7F and the C1 range 0x80-0x9F) becomes \xNN, and every
+// Unicode format character (general category Cf: the bidirectional
+// controls, zero-width characters, the byte order mark, the soft hyphen,
+// the tag characters and the other invisible ones) and the line and
+// paragraph separators become \uNNNN, or \UNNNNNNNN above U+FFFF so the
+// escape cannot be confused with a shorter one followed by a hex digit. The
+// human report writers and the hook log lines use it, so a file name
+// carrying an escape sequence, a carriage return, a newline or a bidi
 // override cannot overwrite, split or reorder a line. Bytes that are not
-// valid UTF-8 pass through unchanged, as the terminal form promises. The JSON
-// form is untouched: it carries the raw value with JSON escaping.
+// valid UTF-8 pass through unchanged, as the terminal form promises. The
+// JSON form is untouched: it carries the raw value with JSON escaping.
 func Sanitize(s string) string {
 	i := 0
 	for i < len(s) {
@@ -301,6 +306,8 @@ func Sanitize(s string) string {
 			b.WriteString(s[i : i+n])
 		case r < 0x100:
 			fmt.Fprintf(&b, `\x%02x`, r)
+		case r > 0xFFFF:
+			fmt.Fprintf(&b, `\U%08x`, r)
 		default:
 			fmt.Fprintf(&b, `\u%04x`, r)
 		}
@@ -309,7 +316,13 @@ func Sanitize(s string) string {
 	return b.String()
 }
 
-// sanitized reports whether Sanitize replaces r.
+// sanitized reports whether Sanitize replaces r: the C0 and C1 controls and
+// DEL except tab, every format character (unicode.Cf, which holds the bidi
+// controls, the zero-width characters, the byte order mark, the soft
+// hyphen, the tag characters and the rest of the invisible ones), and the
+// line and paragraph separators. The category test, rather than a list of
+// code points, is what keeps a newly noticed invisible character from
+// slipping through.
 func sanitized(r rune) bool {
 	switch {
 	case r == '\t':
@@ -317,13 +330,5 @@ func sanitized(r rune) bool {
 	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 		return true
 	}
-	switch r {
-	case 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, // zero-width and marks
-		0x2028, 0x2029, // line and paragraph separators
-		0x202A, 0x202B, 0x202C, 0x202D, 0x202E, // bidi embeddings and overrides
-		0x2060, 0x2066, 0x2067, 0x2068, 0x2069, // word joiner and bidi isolates
-		0xFEFF: // byte order mark
-		return true
-	}
-	return false
+	return unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029
 }
