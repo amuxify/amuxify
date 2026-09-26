@@ -1514,3 +1514,99 @@ func TestSourceSwappedForFileRefused(t *testing.T) {
 		})
 	}
 }
+
+// Guarantee 1 and 3 for the temp file: a symlink planted at the
+// .amuxify-<name>.tmp path must never be verified as this run's output
+// nor placed. The wrapper swaps the -o target for a link to a victim, once
+// before the real mkvmerge opens the name and once after it has written.
+// In the first window mkvmerge itself follows the link and rewrites the
+// victim, which no check inside amuxify can prevent once the name has been
+// handed over; what amuxify guarantees is that the result is refused, that
+// nothing is placed, that the source is untouched and that only the planted
+// link is removed. In the second window the victim keeps its bytes as well.
+// The victim is real media identical to the source, so a followed link
+// would have verified and been placed.
+func TestPlantedTempSymlinkRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		inPlace bool
+		before  bool
+	}{
+		{"before mkvmerge to output tree", false, true},
+		{"after mkvmerge to output tree", false, false},
+		{"before mkvmerge in place", true, true},
+		{"after mkvmerge in place", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := testutil.Copy(t, "clean.mkv")
+			dir := filepath.Dir(src)
+			srcBefore := fileSHA(t, src)
+			victim := testutil.Copy(t, "clean.mkv")
+			victimBefore := fileSHA(t, victim)
+			outRoot := filepath.Join(t.TempDir(), "out")
+			dest := filepath.Join(outRoot, "clean.mkv")
+			if tc.inPlace {
+				dest = src
+			}
+			tmp := fsutil.TempName(dest)
+			plant := "rm -f " + shq(tmp) + " && ln -s " + shq(victim) + " " + shq(tmp)
+			if tc.before {
+				mkvmergeWrapper(t, r, plant, "")
+			} else {
+				mkvmergeWrapper(t, r, "", plant)
+			}
+			rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+			rm.InPlace = tc.inPlace
+			if !tc.inPlace {
+				rm.OutputRoot = outRoot
+			}
+			res, err := rm.RemuxPath(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%d results", len(res))
+			}
+			fr := res[0]
+			if len(tr.writes()) == 0 {
+				t.Fatalf("mkvmerge never ran: %v", codes(fr))
+			}
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Has(CodeHashOK) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "symlink") && strings.Contains(f.Message, "nothing was placed") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+			}
+			if fileSHA(t, src) != srcBefore {
+				t.Fatal("source changed")
+			}
+			if fi, err := os.Lstat(src); err != nil || !fi.Mode().IsRegular() || fsutil.Nlink(fi) != 1 {
+				t.Fatalf("source is no longer a plain regular file: %v", err)
+			}
+			if !tc.inPlace {
+				if _, err := os.Lstat(dest); err == nil {
+					t.Fatalf("%s was placed through the planted link", dest)
+				}
+			}
+			if _, err := os.Lstat(tmp); err == nil {
+				t.Fatal("the planted symlink is still there")
+			}
+			if fi, err := os.Lstat(victim); err != nil || fi.Mode()&os.ModeSymlink != 0 || fsutil.Nlink(fi) != 1 {
+				t.Fatalf("victim is no longer a plain regular file: %v", err)
+			}
+			if !tc.before && fileSHA(t, victim) != victimBefore {
+				t.Fatal("victim rewritten although mkvmerge had already finished")
+			}
+			if l := leftovers(t, dir, outRoot); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+		})
+	}
+}
