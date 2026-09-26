@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/amuxify/amuxify/internal/fsutil"
+	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/testutil"
 )
 
@@ -42,54 +43,117 @@ func asUser(t *testing.T, uid int) {
 	t.Cleanup(func() { fsutil.Geteuid = orig })
 }
 
-// Guarantee 8: modifying commands refuse to run as root.
+// Guarantee 8: modifying commands refuse to run as root. That includes
+// ingest and every hook adapter, which is where a container running as root
+// would hit it, so the rows below cover each of them with the flags that
+// delete or move files. Nothing under the directory may change and no
+// quarantine directory may appear.
 func TestSetupRefusesRoot(t *testing.T) {
 	testutil.Stubs(t)
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a.nfo"), "nfo\n")
+	write(t, filepath.Join(dir, "b.url"), "x\n")
+	state := t.TempDir()
+	q := filepath.Join(t.TempDir(), "q")
+	before := tree(t, dir)
 	asUser(t, 0)
 
-	for _, args := range [][]string{
-		{"clean", dir},
-		{"remux", dir},
-		{"scan", "--quarantine", filepath.Join(t.TempDir(), "q"), dir},
-		{"clean", "--remove-blocked-sidecars", dir},
-		{"remux", "--in-place", dir},
+	for _, tc := range []struct {
+		env  []string
+		args []string
+		code int
+	}{
+		{nil, []string{"clean", dir}, 2},
+		{nil, []string{"remux", dir}, 2},
+		{nil, []string{"scan", "--quarantine", q, dir}, 2},
+		{nil, []string{"clean", "--remove-blocked-sidecars", dir}, 2},
+		{nil, []string{"remux", "--in-place", dir}, 2},
+		{nil, []string{"ingest", dir}, 2},
+		{nil, []string{"ingest", "--remove-blocked-sidecars", dir}, 2},
+		{nil, []string{"ingest", "--quarantine=" + q, dir}, 2},
+		{nil, []string{"--state-dir", state, "ingest", "--quarantine", "--force", dir}, 2},
+		{jobEnv("sabnzbd", dir), []string{"hook", "sabnzbd"}, 2},
+		{jobEnv("sabnzbd", dir), []string{"--state-dir", state, "hook", "sabnzbd", "--quarantine", "--remove-blocked-sidecars"}, 2},
+		{nil, []string{"hook", "sabnzbd", dir, "n", "c", "1", "tv", "g", "0", ""}, 2},
+		{jobEnv("nzbget", dir), []string{"hook", "nzbget"}, 94},
+		{jobEnv("nzbget", dir), []string{"hook", "nzbget", "--quarantine=" + q, "--remove-blocked-sidecars"}, 94},
+		{jobEnv("sonarr", dir), []string{"hook", "sonarr"}, 2},
+		{jobEnv("sonarr", dir), []string{"hook", "sonarr", "--remove-blocked-sidecars"}, 2},
+		{jobEnv("radarr", dir), []string{"hook", "radarr"}, 2},
+		{jobEnv("radarr", dir), []string{"--state-dir", state, "hook", "radarr", "--quarantine"}, 2},
 	} {
-		code, out, errs := run(t, args...)
-		if code != 2 || !strings.Contains(errs, "refusing to modify files as root") {
-			t.Errorf("%v as root: code %d stderr %q", args, code, errs)
+		hookEnv(t, tc.env...)
+		code, out, errs := run(t, tc.args...)
+		if code != tc.code || !strings.Contains(errs, "refusing to modify files as root") {
+			t.Errorf("%v as root: code %d stderr %q", tc.args, code, errs)
 		}
 		if out != "" {
-			t.Errorf("%v as root: stdout %q", args, out)
+			t.Errorf("%v as root: stdout %q", tc.args, out)
+		}
+	}
+	unchanged(t, before, tree(t, dir))
+	for _, p := range []string{q, filepath.Join(state, "quarantine")} {
+		if _, err := os.Lstat(p); err == nil {
+			t.Errorf("%s was created by a refused run", p)
 		}
 	}
 	// Reading commands and dry runs are fine as root.
-	for _, args := range [][]string{
-		{"scan", dir},
-		{"--dry-run", "clean", dir},
-		{"--dry-run", "remux", dir},
+	for _, tc := range []struct {
+		env  []string
+		args []string
+	}{
+		{nil, []string{"scan", dir}},
+		{nil, []string{"--dry-run", "clean", dir}},
+		{nil, []string{"--dry-run", "remux", dir}},
+		{nil, []string{"--dry-run", "ingest", "--remove-blocked-sidecars", dir}},
+		{nil, []string{"--dry-run", "--state-dir", state, "ingest", "--quarantine", dir}},
+		{jobEnv("sabnzbd", dir), []string{"--dry-run", "hook", "sabnzbd", "--remove-blocked-sidecars"}},
+		{jobEnv("nzbget", dir), []string{"--dry-run", "--state-dir", state, "hook", "nzbget", "--quarantine"}},
+		{jobEnv("sonarr", dir), []string{"--dry-run", "hook", "sonarr"}},
+		{jobEnv("radarr", dir), []string{"--dry-run", "hook", "radarr", "--remove-blocked-sidecars"}},
 	} {
-		code, _, errs := run(t, args...)
+		hookEnv(t, tc.env...)
+		code, _, errs := run(t, tc.args...)
 		if strings.Contains(errs, "refusing to modify files as root") {
-			t.Errorf("%v as root refused: code %d stderr %q", args, code, errs)
+			t.Errorf("%v as root refused: code %d stderr %q", tc.args, code, errs)
 		}
 	}
-	// --allow-root lets a writer proceed past setup.
-	code, out, errs := run(t, "--allow-root", "clean", dir)
-	if strings.Contains(errs, "refusing to modify files as root") || code != 0 {
-		t.Fatalf("--allow-root: code %d stdout %q stderr %q", code, out, errs)
+	unchanged(t, before, tree(t, dir))
+	for _, p := range []string{q, filepath.Join(state, "quarantine")} {
+		if _, err := os.Lstat(p); err == nil {
+			t.Errorf("%s was created by a dry run", p)
+		}
 	}
-	if !strings.Contains(out, "a.nfo") {
-		t.Fatalf("--allow-root clean did not reach the file: %q", out)
+	// --allow-root lets a writer proceed past setup, for ingest and the
+	// hooks as well as for clean.
+	for _, tc := range []struct {
+		env  []string
+		args []string
+		code int
+	}{
+		{nil, []string{"--allow-root", "clean", dir}, 1},
+		{nil, []string{"--allow-root", "ingest", dir}, 4},
+		{jobEnv("sabnzbd", dir), []string{"--allow-root", "hook", "sabnzbd"}, 1},
+		{jobEnv("nzbget", dir), []string{"--allow-root", "hook", "nzbget"}, 94},
+		{jobEnv("sonarr", dir), []string{"--allow-root", "hook", "sonarr"}, 1},
+		{jobEnv("radarr", dir), []string{"--allow-root", "hook", "radarr"}, 1},
+	} {
+		hookEnv(t, tc.env...)
+		code, out, errs := run(t, tc.args...)
+		if strings.Contains(errs, "refusing to modify files as root") || code != tc.code {
+			t.Fatalf("%v: code %d stdout %q stderr %q", tc.args, code, out, errs)
+		}
+		if !strings.Contains(out, "a.nfo") {
+			t.Fatalf("%v did not reach the file: %q", tc.args, out)
+		}
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "a.nfo")); err != nil {
-		t.Fatal("sidecar removed")
-	}
+	// Without --remove-blocked-sidecars nothing was deleted or moved.
+	unchanged(t, before, tree(t, dir))
+
 	// A non-root user is not refused, and the check reads the seam rather
 	// than any cached value.
 	asUser(t, 1000)
-	if code, _, errs := run(t, "clean", dir); code != 0 || strings.Contains(errs, "root") {
+	if code, _, errs := run(t, "clean", dir); code != 1 || strings.Contains(errs, "root") {
 		t.Fatalf("uid 1000: code %d stderr %q", code, errs)
 	}
 }
@@ -339,8 +403,8 @@ func TestJSONReportHasSchemaAndNoNulls(t *testing.T) {
 	if strings.Count(out, "\n{") != 0 || !strings.HasPrefix(out, "{") {
 		t.Errorf("stdout is not a single document:\n%s", out)
 	}
-	if _, ok := doc["schema"]; !ok {
-		t.Skip("the schema field arrives with WP3")
+	if doc["schema"] != report.SchemaID {
+		t.Errorf("schema %v, want %q", doc["schema"], report.SchemaID)
 	}
 }
 
@@ -465,5 +529,65 @@ func TestDryRunTouchesNothing(t *testing.T) {
 		if len(entries) != 2 {
 			t.Errorf("directory changed: %d entries", len(entries))
 		}
+	}
+}
+
+// A file whose name carries an escape sequence, a carriage return, a bidi
+// override and a newline that spells a verdict line cannot reshape the
+// terminal report: every command prints it as one line with visible
+// escapes, while --json carries the raw name. The quarantine path in a
+// QUARANTINED message and the run-level error for a vanished path go
+// through the same writer.
+func TestHumanReportEscapesHostileNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("control characters are not allowed in file names on windows")
+	}
+	testutil.Stubs(t)
+	asUser(t, 1000)
+	dir := t.TempDir()
+	name := "\x1b[2K\rPASS  /forged\nBLOCK /forged‮" + "fni.nfo"
+	p := write(t, filepath.Join(dir, name), "nfo\n")
+	escaped := report.Sanitize(p)
+	if escaped == p || strings.ContainsAny(escaped, "\x1b\r\n‮") {
+		t.Fatalf("test setup: %q", escaped)
+	}
+	for _, args := range [][]string{
+		{"scan", dir},
+		{"--verbose", "scan", dir},
+		{"--dry-run", "clean", dir},
+		{"--dry-run", "ingest", "--remove-blocked-sidecars", dir},
+		{"--dry-run", "--verbose", "remux", dir},
+	} {
+		code, out, errs := run(t, args...)
+		// The bidi override makes the file BLOCK (BIDI_NAME); the clean
+		// dry run over a sidecar never reaches that finding.
+		if code != 4 && code != 0 {
+			t.Errorf("%v: exit %d\n%s%s", args, code, out, errs)
+		}
+		for _, l := range append(lines(out), lines(errs)...) {
+
+			for _, r := range l {
+				if r < 0x20 && r != '\t' || r == 0x7f || r == 0x202e {
+					t.Errorf("%v: raw %U in %q", args, r, l)
+				}
+			}
+			if strings.HasPrefix(l, "PASS  /forged") || strings.HasPrefix(l, "BLOCK /forged") {
+				t.Errorf("%v: forged verdict line %q", args, l)
+			}
+		}
+		if !strings.Contains(out, " "+escaped+"\n") {
+			t.Errorf("%v: no escaped line for the file:\n%s", args, out)
+		}
+	}
+	// The JSON report keeps the raw name.
+	_, out, _ := run(t, "--json", "scan", dir)
+	var doc struct {
+		Files []struct{ Path string } `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Files) != 1 || doc.Files[0].Path != p {
+		t.Errorf("JSON path %q, want %q", doc.Files, p)
 	}
 }
