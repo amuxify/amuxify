@@ -1354,3 +1354,55 @@ func TestSourceSwappedForSymlinkRefused(t *testing.T) {
 		}
 	})
 }
+
+// A placement failure that is not a file at the destination must be
+// reported as REMUX_FAIL, not as OUTPUT_EXISTS, which would tell the user a
+// file is in the way when there is none. The wrapper takes write permission
+// off the output directory once mkvmerge has written the temp file, so the
+// link and the rename both fail with a permission error. The temp file
+// cannot be removed from a directory that refuses writes, so leftovers are
+// not asserted here; the directory is made writable again on cleanup.
+func TestOutputPlacementErrorIsRemuxFail(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "clean.mkv")
+	root := filepath.Dir(src)
+	before := fileSHA(t, src)
+	outRoot := filepath.Join(t.TempDir(), "out")
+	dest := filepath.Join(outRoot, "clean.mkv")
+	t.Cleanup(func() { _ = os.Chmod(outRoot, 0o755) })
+	mkvmergeWrapper(t, r, "", "chmod 0555 "+shq(outRoot))
+	rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	rm.OutputRoot = outRoot
+	res, err := rm.RemuxPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never ran: %v", codes(fr))
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodeOutputExists) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeRemuxFail && strings.HasPrefix(f.Message, "place: ") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not name the placement: %v", fr.Findings)
+	}
+	if _, err := os.Lstat(dest); err == nil {
+		t.Fatal("output placed although placement failed")
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+}

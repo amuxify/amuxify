@@ -298,9 +298,16 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		return fr
 	}
 	if !inPlace {
+		// Only a file that appeared at dest is OUTPUT_EXISTS; any other
+		// placement failure, such as a directory that became unwritable,
+		// is a failed remux and says so.
 		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
 			cleanup()
-			fr.Addf(CodeOutputExists, report.Fail, "%v", err)
+			if errors.Is(err, fsutil.ErrExists) {
+				fr.Addf(CodeOutputExists, report.Fail, "%v", err)
+			} else {
+				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
+			}
 			return fr
 		}
 		fr.Output = dest
