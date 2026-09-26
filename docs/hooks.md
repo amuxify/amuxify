@@ -8,8 +8,11 @@ expects, so the wrapper script is one line.
 
 Exit codes: 0 PASS, 1 WARN, 2 usage error, 3 FAIL, 4 BLOCK, 130 interrupted.
 `--json` gives the full report on stdout; `--quiet` suppresses the text report.
-The hook adapters add `--json-out <file>`, which writes the JSON report to a
-file while stdout keeps the lines the caller logs.
+Under `--json` stdout carries exactly one JSON document and nothing else: the
+adapter's own lines (the start line, the skipping line and SABnzbd's closing
+count line) move to stderr. The hook adapters add `--json-out <file>`, which
+writes the JSON report to a file while stdout keeps the lines the caller logs.
+
 
 ## The adapters
 
@@ -23,10 +26,14 @@ file while stdout keeps the lines the caller logs.
 A BLOCK verdict produces the failure code for every `--fail-on` value. Each
 adapter prints one line `amuxify hook <adapter>: <label> (<event>)` before the
 per-file report, or `amuxify hook <adapter>: skipping, <reason>` when there is
-nothing to do. When the environment is missing altogether (for example
-`SAB_COMPLETE_DIR` unset and no arguments, or `sonarr_eventtype` unset) the
-adapter reports that it was not started by that program and exits with the
-usage code.
+nothing to do. Under `--json` both lines go to stderr instead, so that stdout
+is the JSON document alone. When the run is interrupted the adapter writes
+`amuxify hook <adapter>: interrupted` to stderr and exits with the caller's
+interruption code (130, or 94 for NZBGet). When the environment is missing
+altogether (for example `SAB_COMPLETE_DIR` unset and no arguments, or
+`sonarr_eventtype` unset) the adapter reports that it was not started by that
+program and exits with the usage code.
+
 
 The hook flags are `--fail-on warn|fail|block` (default `fail`), `--category
 <glob>`, `--json-out <file>` and the ingest flags `--verify`, `--hardlinks`,
@@ -68,23 +75,35 @@ that quotes `SAB_FAIL_MSG` when SABnzbd set it, and exits 0 so the failure
 stays SABnzbd's own.
 
 SABnzbd only fails a job on a non-zero script exit when its `script_can_fail`
-setting is on; turn it on. With it, an exit of 1 fails the job, and SABnzbd
-shows the last line the script printed next to the exit code, so the adapter
-always ends its stdout with one line of the form
+setting is on; turn it on. With it, every non-zero exit fails the job: 1 for a
+verdict at or above `--fail-on`, 2 for a usage error and 130 for an
+interruption. SABnzbd reports a failed job to Sonarr and Radarr as a failed
+download, and they blocklist the release and search for another one. That is
+what you want for a BLOCK, which means an executable payload, a polyglot or a
+blocked sidecar. If a damaged or noisy file should not cost you the release,
+pass `--fail-on block` on the `exec` line: a FAIL then leaves the job
+successful, the file is imported and its findings stay in the log.
+
+SABnzbd shows the last line the script printed next to the exit code, so the
+adapter always ends its output with one line of the form
 
 ```
 amuxify: FAIL, 3 file(s)
 ```
 
 which SABnzbd displays as `Exit(1): amuxify: FAIL, 3 file(s)`. The line is
-omitted under `--quiet`. With `--json` the line would follow the JSON document
-on stdout, so use `--json-out <file>` when you want the report as a file.
+omitted under `--quiet`. Under `--json` it goes to stderr together with the
+start line, so that stdout holds the JSON document alone; use `--json-out
+<file>` when you want the report as a file and the log lines on stdout.
+
 
 `--category <glob>` limits the adapter to jobs whose `SAB_CAT` matches the
 pattern (case-insensitive, `path.Match` syntax, so `tv*` matches `tv` and
-`tv-4k`). Other jobs print a skipping line and exit 0. Assigning the script per
+`tv-4k`). Other jobs print a skipping line and exit 0. A job that carries no
+category at all is processed regardless of the flag. Assigning the script per
 category in SABnzbd does the same job without the flag; the flag is for one
 script shared by several categories.
+
 
 ## NZBGet
 
@@ -225,8 +244,13 @@ directory, before anything else is done with the download. `--quarantine=DIR`
 names the directory; a bare `--quarantine` uses `<state-dir>/quarantine`
 (see [install.md](install.md) for the state directory); `--quarantine=off`
 turns it off again. The directory form must use `=`, because the flag also
-works without a value and the next word would otherwise be read as a path to
-ingest. Quarantine is cleared under `--dry-run`.
+works without a value. A directory written after a bare `--quarantine` is not
+read as its value: `hook sonarr`, `hook radarr` and `hook nzbget` take no
+positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's eight
+parameters, so the stray word is a usage error, and the message says to write
+`--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
+cleared under `--dry-run`.
+
 
 `--remove-blocked-sidecars` deletes sidecar files whose extension is on the
 profile's block list (`SIDECAR_BLOCKED`). Without it they are reported and left
@@ -242,8 +266,10 @@ it and replaces only this name, `copy` writes the rebuilt file to the output
 tree and leaves the original alone.
 
 `--category <glob>` (SABnzbd and NZBGet) acts only on jobs whose category
-matches; the match is case-insensitive and uses `path.Match` patterns. Sonarr
-and Radarr do not pass a category, so the flag is ignored for them.
+matches; the match is case-insensitive and uses `path.Match` patterns. A job
+that carries no category is processed regardless of the flag, and Sonarr and
+Radarr never pass one, so the flag is ignored for them.
+
 
 `--json-out <file>` writes the JSON report to a new file in addition to whatever
 the global flags print. The file must not exist yet: amuxify never overwrites
