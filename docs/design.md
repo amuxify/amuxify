@@ -82,7 +82,8 @@ The clean route decodes the file first (head and tail for `quick`, everything fo
 `DECODE_FAIL` and left untouched. The remux route does not decode the input twice:
 the scanner runs without a verify tier and the remuxer verifies its output. The
 same file can take different routes under different profiles; `multi.mkv` in the
-fixture corpus is cleaned under `homelab` and rebuilt under `archive`.
+fixture corpus is cleaned under `homelab`, while under `archive` its embedded links
+are a failure, so it is refused unless `--force` is given, and then it is rebuilt.
 
 ## Why not ffmpeg for Matroska
 
