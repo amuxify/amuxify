@@ -394,6 +394,14 @@ func TestDecideRoutes(t *testing.T) {
 			wantRoute: RouteRemux, wantText: "scan verdict FAIL; rebuilt because --force was given"},
 		{name: "2 BLOCK with force is not overridden here either", path: "a.mkv", verdict: report.Block, info: video(), force: true,
 			wantRoute: RouteRemux, wantText: "scan verdict FAIL; rebuilt because --force was given"},
+		{name: "2 FAIL with force on audio is cleaned, not rebuilt", path: "a.mka", verdict: report.Fail, info: audioInfo(), force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on subtitles is cleaned, not rebuilt", path: "a.mks", verdict: report.Fail, info: audioInfo(), force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on mp3 is cleaned, not rebuilt", path: "a.mp3", verdict: report.Fail, info: &probe.MediaInfo{Container: "mp3", Streams: audioInfo().Streams}, force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on hard-linked audio still skips", path: "a.mka", verdict: report.Fail, info: audioInfo(), force: true, nlink: "2", hardlinks: "break",
+			wantRoute: RouteSkip, wantText: "hard-linked audio or subtitle file", wantCodes: []string{"HARDLINKED/WARN"}},
 		{name: "3 hard-linked audio", path: "a.mka", info: audioInfo(), nlink: "2", hardlinks: "break",
 			wantRoute: RouteSkip, wantText: "hard-linked audio or subtitle file", wantCodes: []string{"HARDLINKED/WARN"}},
 		{name: "3 hard-linked subtitle", path: "a.mks", info: audioInfo(), nlink: "3", hardlinks: "copy",
@@ -1799,5 +1807,42 @@ func TestIngestReportsUnreadableDirectory(t *testing.T) {
 	s.Error(err.Error())
 	if s.Verdict != report.Fail {
 		t.Errorf("run verdict %s, want FAIL", s.Verdict)
+	}
+}
+
+// Review C9: a FAIL audio or subtitle file under --force takes the clean
+// route and keeps its FAIL verdict. Before the fix it was routed to remux,
+// which only handles video containers and skipped it, so the ROUTE line
+// promised a rebuild that never happened.
+func TestForcedFailAudioIsCleanedNotRemuxed(t *testing.T) {
+	r := needTools(t)
+	for _, name := range []string{"audio.mka", "subs.mks", "sample.mp3"} {
+		t.Run(name, func(t *testing.T) {
+			src := testutil.Copy(t, name)
+			if err := os.Chmod(src, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			in, _ := newIngester(t, r, mustProfile(t, "archive"))
+			in.Force = true
+			in.apply(t)
+			res, err := in.IngestPath(context.Background(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr := res[0]
+			rt, text := route(t, fr)
+			if rt != RouteClean || text != "scan verdict FAIL; cleaned because --force was given" {
+				t.Errorf("route %s %q", rt, text)
+			}
+			if fr.Verdict != report.Fail || !fr.Has(scan.CodeExecPerm) {
+				t.Errorf("verdict %s %v, want FAIL with EXEC_PERM kept", fr.Verdict, codes(fr))
+			}
+			if f, ok := finding(fr, remux.CodeSkipped); ok && strings.Contains(f.Message, "no video stream") {
+				t.Errorf("remux skipped the file: %v", codes(fr))
+			}
+			if _, err := os.Lstat(src); err != nil {
+				t.Errorf("source gone: %v", err)
+			}
+		})
 	}
 }
