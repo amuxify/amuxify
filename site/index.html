@@ -3,14 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>amuxify · the ingest gate for self-hosted media</title>
+<title>amuxify: verify, sanitize and remux media before it enters Plex or Jellyfin</title>
 <meta name="description" content="amuxify checks media files before they go into your library. It verifies integrity, strips metadata and provenance, remuxes to a clean MKV with mkvmerge, and exits with a code your download client can act on.">
+<link rel="canonical" href="https://amuxify.com/">
 <link rel="icon" type="image/png" href="amuxify-logo.png">
 <link rel="stylesheet" href="style.css">
-<meta property="og:title" content="amuxify">
-<meta property="og:description" content="The ingest gate for self-hosted media. Verify, sanitize, normalize, prove.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="amuxify">
+<meta property="og:title" content="amuxify: the ingest gate for self-hosted media">
+<meta property="og:description" content="Verify, sanitize and remux downloads into clean MKV before they reach Plex, Jellyfin or your NAS. Stream-hash verified, exit codes for SABnzbd, NZBGet, Sonarr and Radarr.">
 <meta property="og:image" content="https://amuxify.com/amuxify-logo.png">
+<meta property="og:image:width" content="1254">
+<meta property="og:image:height" content="1254">
 <meta property="og:url" content="https://amuxify.com/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="amuxify: the ingest gate for self-hosted media">
+<meta name="twitter:description" content="Verify, sanitize and remux downloads into clean MKV before they reach Plex, Jellyfin or your NAS.">
+<meta name="twitter:image" content="https://amuxify.com/amuxify-logo.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "amuxify",
+  "url": "https://amuxify.com/",
+  "description": "Command-line ingest gate for self-hosted media. Verifies, sanitizes and remuxes downloaded or purchased video into clean MKV files, with per-stream hash verification and exit codes for SABnzbd, NZBGet, Sonarr and Radarr.",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Linux, macOS",
+  "softwareVersion": "0.2.0",
+  "license": "https://opensource.org/licenses/BSD-3-Clause",
+  "codeRepository": "https://github.com/amuxify/amuxify",
+  "downloadUrl": "https://github.com/amuxify/amuxify/releases",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "image": "https://amuxify.com/amuxify-logo.png"
+}
+</script>
 </head>
 <body>
 
@@ -18,9 +44,9 @@
   <img class="logo" src="amuxify-logo.webp" alt="amuxify logo" width="112" height="112">
   <h1>amuxify</h1>
   <p class="tagline">The ingest gate for self-hosted media.<br>Verify, sanitize, normalize, prove.</p>
-  <p class="lede">amuxify sits between “downloaded or purchased” and “in the library”. It runs once per file,
-  changes nothing it cannot prove is safe, and exits with a verdict your download client, Sonarr, Radarr or
-  cron job can act on.</p>
+  <p class="lede">amuxify is a command-line tool that sits between “downloaded or purchased” and “in the Plex or
+  Jellyfin library”. It runs once per file, changes nothing it cannot prove is safe, and exits with a verdict
+  your download client, Sonarr, Radarr or cron job can act on. Linux, macOS and Docker.</p>
   <nav class="cta">
     <a class="button primary" href="#install">Install</a>
     <a class="button" href="https://github.com/amuxify/amuxify">Source on GitHub</a>
@@ -41,6 +67,25 @@
 BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1</code></pre>
 <p>It is not a transcoder, a renamer or a library manager. Streams are never re-encoded. After a remux,
 every kept stream is hashed and compared with the source before the output is moved into place.</p>
+</section>
+
+<section id="what-it-catches">
+<h2>What it catches</h2>
+<p>Files from Usenet, torrents and untrusted storefronts arrive with more than video and audio in them.
+amuxify looks for the things a media server will happily import and a virus scanner will not flag:</p>
+<ul>
+<li><strong>Executable payloads</strong> hiding as font or image attachments inside an MKV, and polyglot files
+that are a valid video and a valid ZIP, PE, ELF or script at the same time.</li>
+<li><strong>Tracker URLs and release-group links</strong> in tags, the title, chapter names and subtitle text.</li>
+<li><strong>Purchase identifiers</strong> in MP4 and M4V metadata atoms (account name, purchase date, store IDs) and XMP blocks.</li>
+<li><strong>Dangerous sidecars</strong> next to the video: <code>.lnk</code>, <code>.url</code>, <code>.exe</code>, <code>.scr</code>, <code>.bat</code>, <code>.ps1</code> and friends.</li>
+<li><strong>Mislabeled and broken files</strong>: the extension does not match the content, the container is
+truncated, the duration is wrong, or the file does not decode.</li>
+<li><strong>Filenames</strong> with right-to-left override or zero-width characters, and double extensions.</li>
+</ul>
+<p>Then it fixes what a policy allows it to fix: strips metadata and extended attributes, drops commentary
+tracks, unwanted languages or attachments, sets language and default flags, and rebuilds the file as a clean
+Matroska container. Nothing is re-encoded.</p>
 </section>
 
 <section id="install">
@@ -128,6 +173,22 @@ amuxify --profile ./my.toml remux ~/incoming</code></pre>
 <p>Each of these is covered by a test in the repository.
 <a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">docs/safety.md</a> explains what each one
 protects against and what happens when it fires.</p>
+</section>
+
+<section id="works-with">
+<h2>Works with</h2>
+<p>amuxify does not replace anything in a typical self-hosted stack. It runs after the download client and
+before the library:</p>
+<ul>
+<li><strong>Download clients:</strong> SABnzbd, NZBGet, qBittorrent, Transmission, Deluge. Call amuxify from
+the post-processing script and use the exit code to fail the job.</li>
+<li><strong>Managers:</strong> Sonarr, Radarr, Lidarr-style custom scripts. Run on import and reject files
+that <code>FAIL</code> or <code>BLOCK</code>.</li>
+<li><strong>Media servers:</strong> Plex, Jellyfin, Emby, Kodi. They only ever see files that passed.</li>
+<li><strong>Storage:</strong> TrueNAS, Unraid, Synology and any NFS or SMB share. Ownership, mode and mtime
+are preserved in place, hardlinked files are skipped instead of broken, and the tool refuses to run as root
+unless told to.</li>
+</ul>
 </section>
 
 <section>
