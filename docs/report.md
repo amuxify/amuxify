@@ -9,7 +9,11 @@ modes, so stdout can be piped straight into a parser. The hook adapters print
 a few lines of their own for the caller's log (the start line, the skipping
 line and SABnzbd's closing count line); they go to stdout, except under
 `--json`, where they go to stderr so that stdout is still exactly one
-document. `--quiet` prints nothing and leaves only the exit code.
+document. A hook run that skips its job (the download did not succeed, the
+event carries no files, or the category does not match) writes only the
+skipping line to stderr and no report at all, so stdout is empty under
+`--json` and `--json-out` writes no file. `--quiet` prints nothing and leaves
+only the exit code.
 
 This is the report of an `amuxify ingest` run started by the SABnzbd hook
 adapter. It is the file `internal/report/testdata/report-golden.json`, which a

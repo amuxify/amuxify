@@ -12,6 +12,10 @@ Under `--json` stdout carries exactly one JSON document and nothing else: the
 adapter's own lines (the start line, the skipping line and SABnzbd's closing
 count line) move to stderr. The hook adapters add `--json-out <file>`, which
 writes the JSON report to a file while stdout keeps the lines the caller logs.
+A skipped run (a status that is not successful, an event that carries no
+files, or a category that does not match `--category`) never starts ingest:
+it writes only the skipping line to stderr, exits 0 (95 for NZBGet), and
+produces no JSON document and no `--json-out` file.
 
 ## The adapters
 
@@ -26,7 +30,9 @@ A BLOCK verdict produces the failure code for every `--fail-on` value. Each
 adapter prints one line `amuxify hook <adapter>: <label> (<event>)` before the
 per-file report, or `amuxify hook <adapter>: skipping, <reason>` when there is
 nothing to do. Under `--json` both lines go to stderr instead, so that stdout
-is the JSON document alone. When the run is interrupted the adapter writes
+is the JSON document alone. A skipped run ends with that line: no report is
+built, so stdout stays empty under `--json` and `--json-out` writes no file.
+When the run is interrupted the adapter writes
 `amuxify hook <adapter>: interrupted` to stderr and exits with the caller's
 interruption code (130, or 94 for NZBGet). When the environment is missing
 altogether (for example `SAB_COMPLETE_DIR` unset and no arguments, or
