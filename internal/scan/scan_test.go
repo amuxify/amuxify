@@ -1169,3 +1169,57 @@ func TestQuarantineWithFileAsRootUsesBaseName(t *testing.T) {
 		})
 	}
 }
+
+// lockDir removes every permission bit from dir for the test and restores
+// them at cleanup so the temp tree can be deleted. Root ignores mode bits,
+// so the caller skips under uid 0.
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+// An unreadable directory never disappears from a run. The readable files
+// are still reported and the walk returns an error naming the directory,
+// which the callers record at run level, so a tree whose only media sits
+// in a mode-000 corner is never PASS with zero files (review C2).
+func TestWalkReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n", 0o644)
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "payload.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	lockDir(t, locked)
+
+	paths, err := Walk(root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("Walk error %v, want one naming %s", err, locked)
+	}
+	if len(paths) != 1 || paths[0] != ok {
+		t.Fatalf("paths %v, want only %s", paths, ok)
+	}
+
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	res, err := s.ScanPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), locked) {
+		t.Fatalf("ScanPath error %v", err)
+	}
+	if len(res) != 1 || res[0].File.Path != ok {
+		t.Fatalf("results %d", len(res))
+	}
+	expect(t, res[0].File, report.Pass, CodeSidecarOK)
+
+	// The root itself unreadable: nothing is listed and the error says so.
+	lockedRoot := filepath.Join(t.TempDir(), "root")
+	write(t, filepath.Join(lockedRoot, "payload.url"), "x", 0o644)
+	lockDir(t, lockedRoot)
+	res, err = s.ScanPath(context.Background(), lockedRoot)
+	if err == nil || len(res) != 0 {
+		t.Fatalf("unreadable root: %d results, err %v", len(res), err)
+	}
+}

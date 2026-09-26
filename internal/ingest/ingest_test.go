@@ -1763,3 +1763,41 @@ func TestIngestSingleFileRootQuarantines(t *testing.T) {
 		})
 	}
 }
+
+// An unreadable directory inside the tree is reported as a run-level error
+// after the readable files, never dropped, so a hook cannot tell its caller
+// the download is good when part of it could not be read (review C2).
+func TestIngestReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n")
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "payload.url"), "[InternetShortcut]\nURL=http://x\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	in, _ := newIngester(t, nil, mustProfile(t, "homelab"))
+	fired := 0
+	in.Progress = func(report.FileResult) { fired++ }
+	res, err := in.IngestPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("err %v, want one naming %s", err, locked)
+	}
+	if len(res) != 1 || res[0].Path != ok || fired != 1 {
+		t.Fatalf("results %d, progress %d", len(res), fired)
+	}
+	// The way cli.runIngest records it, the run verdict is FAIL.
+	s := report.NewSummary("amuxify", "test", "ingest", "homelab")
+	for _, r := range res {
+		s.Append(r)
+	}
+	s.Error(err.Error())
+	if s.Verdict != report.Fail {
+		t.Errorf("run verdict %s, want FAIL", s.Verdict)
+	}
+}
