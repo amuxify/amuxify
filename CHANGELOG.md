@@ -68,7 +68,14 @@ All notable changes to amuxify will be documented in this file.
   rebuilt and verified, and refuses with `REMUX_FAIL` when the file was
   swapped while mkvmerge ran; the temp file is created by amuxify itself
   and checked after mkvmerge returns and again before placement, so a
-  symlink planted at the temp name is never followed. A dry run of `remux`
+  symlink planted at the temp name is never followed. The entry placed at
+  the destination is checked to be the file the run built, and the
+  ownership, mode and time copy onto an in-place output, in `remux` and in
+  the MP4 rewrite of `clean`, goes through the open descriptor of that file
+  rather than through its name, so a symlink swapped onto the temp name
+  after the last check cannot have its target's mode or time rewritten; a
+  failed replacement in the MP4 rewrite is now reported as `CLEAN_FAIL`
+  instead of being lost. A dry run of `remux`
   predicts the `OUTPUT_EXISTS` collision two files of one run produce when
   they rebuild to the same destination, as an `ingest` dry run already did,
   and the prediction treats `Ep.mkv` and `ep.mkv` as one entry on a
