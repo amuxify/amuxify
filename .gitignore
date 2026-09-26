@@ -9,7 +9,6 @@
 /bin/amuxify
 /dist/
 /testdata/out/
-/site/public/
 
 # Personal notes, never committed
 AGENT.md

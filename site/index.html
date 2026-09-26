@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>amuxify · the ingest gate for self-hosted media</title>
+<meta name="description" content="amuxify verifies, sanitizes, normalizes and proves media files before they enter your library. One binary, four verdicts, stable exit codes for SABnzbd, NZBGet, Sonarr and Radarr.">
+<link rel="icon" type="image/png" href="amuxify-logo.png">
+<link rel="stylesheet" href="style.css">
+<meta property="og:title" content="amuxify">
+<meta property="og:description" content="The ingest gate for self-hosted media. Verify, sanitize, normalize, prove.">
+<meta property="og:image" content="https://amuxify.com/amuxify-logo.png">
+<meta property="og:url" content="https://amuxify.com/">
+</head>
+<body>
+
+<header class="hero">
+  <img class="logo" src="amuxify-logo.webp" alt="amuxify logo" width="112" height="112">
+  <h1>amuxify</h1>
+  <p class="tagline">The ingest gate for self-hosted media.<br>Verify, sanitize, normalize, prove.</p>
+  <p class="lede">amuxify sits between “downloaded or purchased” and “in the library”. It runs once per file,
+  changes nothing it cannot prove is safe, and exits with a verdict your download client, Sonarr, Radarr or
+  cron job can act on.</p>
+  <nav class="cta">
+    <a class="button primary" href="#install">Install</a>
+    <a class="button" href="https://github.com/amuxify/amuxify">Source on GitHub</a>
+    <a class="button" href="https://github.com/amuxify/amuxify/tree/main/docs">Documentation</a>
+  </nav>
+</header>
+
+<main>
+
+<section>
+<pre class="terminal"><code>$ amuxify scan ~/incoming
+<span class="pass">PASS </span> /home/me/incoming/Show.S01E01.mkv
+<span class="warn">WARN </span> /home/me/incoming/Movie.2019.mkv
+      WARN  LINK_IN_TAG        1 link(s) in metadata: tag COMMENT: http://tracker.example/x
+<span class="block">BLOCK</span> /home/me/incoming/Movie.2019.Sub.mkv
+      BLOCK ATTACH_EXEC        attachment #1 "font.ttf" (font/ttf, 71 KiB) contains executable PE/DOS executable
+
+BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1</code></pre>
+<p>It is not a transcoder, a renamer or a library manager. Streams are never re-encoded. Every remux is
+verified by hashing each kept stream against the source before the output is placed.</p>
+</section>
+
+<section id="install">
+<h2>Install</h2>
+<pre><code><span class="c"># release binary, Linux and macOS (verifies the SHA-256 checksum)</span>
+curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
+
+<span class="c"># Homebrew</span>
+brew install --cask amuxify/tap/amuxify
+
+<span class="c"># Docker, run as the uid that owns the library, never root</span>
+docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/amuxify/amuxify scan /data</code></pre>
+<p>amuxify drives <strong>MKVToolNix 50+</strong> and <strong>ffmpeg 4.4+</strong>. exiftool and clamscan are
+optional. <code>amuxify doctor</code> tells you what is missing.
+<a href="https://github.com/amuxify/amuxify/blob/main/docs/install.md">Full install guide.</a></p>
+</section>
+
+<section>
+<h2>Commands</h2>
+<table>
+<thead><tr><th>Command</th><th>What it does</th><th>Writes</th></tr></thead>
+<tbody>
+<tr><td><code>amuxify scan</code></td><td>Inspect files and sidecars, report findings, verdict per file</td><td>nothing</td></tr>
+<tr><td><code>amuxify remux</code></td><td>Rebuild any supported container into a sanitized MKV with mkvmerge, verify, place</td><td><code>&lt;root&gt;__remuxed/</code>, <code>--output</code> or <code>--in-place</code></td></tr>
+<tr><td><code>amuxify clean</code></td><td>Strip metadata, provenance atoms and extended attributes in place, tracks untouched</td><td>the file, after verification</td></tr>
+<tr><td><code>amuxify doctor</code></td><td>Check tools, version floors, profile and environment</td><td>nothing</td></tr>
+<tr><td><code>amuxify profile</code></td><td>List or print built-in profiles</td><td>nothing</td></tr>
+</tbody>
+</table>
+<p>Input: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV. Output is always Matroska written by
+mkvmerge. ffmpeg never writes an MKV.</p>
+</section>
+
+<section>
+<h2>Four verdicts, stable exit codes</h2>
+<table>
+<thead><tr><th>Verdict</th><th>Exit</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><span class="pass">PASS</span></td><td>0</td><td>Nothing to report</td></tr>
+<tr><td><span class="warn">WARN</span></td><td>1</td><td>Something to know about; file is usable</td></tr>
+<tr><td>usage</td><td>2</td><td>Bad arguments or missing tool</td></tr>
+<tr><td><span class="fail">FAIL</span></td><td>3</td><td>Integrity problem: unparseable, truncated, hash mismatch, mislabeled</td></tr>
+<tr><td><span class="block">BLOCK</span></td><td>4</td><td>Security problem: executable payloads, polyglots, bidi names, blocked sidecars. Never overridable</td></tr>
+<tr><td>interrupted</td><td>130</td><td>Ctrl-C or SIGTERM; temp files removed</td></tr>
+</tbody>
+</table>
+<p>The worst verdict of the run is the exit code. <code>--json</code> prints the full report with the same codes.
+<a href="https://github.com/amuxify/amuxify/blob/main/docs/report.md">Report schema.</a></p>
+</section>
+
+<section>
+<h2>Profiles</h2>
+<p>A profile is a TOML file. Four are built in; <code>homelab</code> is the default. Unknown keys are rejected so
+a typo cannot silently widen a policy.</p>
+<table>
+<thead><tr><th>Profile</th><th>Languages</th><th>Chapters</th><th>Fonts</th><th>Commentary</th><th>Links / provenance</th><th>Verify</th></tr></thead>
+<tbody>
+<tr><td><code>homelab</code></td><td>keep all</td><td>keep</td><td>keep if text subs</td><td>keep</td><td>warn</td><td>quick</td></tr>
+<tr><td><code>anime</code></td><td>keep all, prefer original</td><td>keep</td><td>keep</td><td>drop</td><td>warn</td><td>quick</td></tr>
+<tr><td><code>archive</code></td><td>English only</td><td>drop</td><td>drop</td><td>drop</td><td>fail</td><td>quick</td></tr>
+<tr><td><code>strict</code></td><td>English only</td><td>drop</td><td>drop</td><td>drop</td><td>fail</td><td>full + ClamAV</td></tr>
+</tbody>
+</table>
+<pre><code>amuxify profile show homelab &gt; my.toml   <span class="c"># edit, then</span>
+amuxify --profile ./my.toml remux ~/incoming</code></pre>
+<p><a href="https://github.com/amuxify/amuxify/blob/main/docs/profiles.md">Every key, documented.</a></p>
+</section>
+
+<section>
+<h2>Ten safety guarantees</h2>
+<ol class="guarantees">
+<li>Never overwrites an existing path; a collision is a <code>FAIL</code>.</li>
+<li>Writes a temp file beside the destination, fsyncs, then renames. Never across filesystems.</li>
+<li>Symlinks are skipped per file, never followed, never abort a tree.</li>
+<li>Every ffmpeg and ffprobe call carries <code>-protocol_whitelist file,pipe</code> and a timeout.</li>
+<li>Every kept stream's SHA-256 matches source and output, or the output is deleted.</li>
+<li>In-place mode preserves owner, group, mode and mtime.</li>
+<li>Extended attribute removal touches only <code>user.*</code> (Linux) and <code>com.apple.*</code> (macOS).</li>
+<li><code>--verify none</code> is refused together with <code>--in-place</code>.</li>
+<li><code>BLOCK</code> cannot be overridden by any flag.</li>
+<li>Refuses to modify files as root unless <code>--allow-root</code>.</li>
+</ol>
+<p>Each guarantee has a test. <a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">Details.</a></p>
+</section>
+
+<section>
+<h2>Unattended use</h2>
+<p>amuxify never prompts. Untagged-language tracks follow <code>languages.und</code> in the profile. Call it from
+your post-processing script and branch on the exit code; hook adapters for SABnzbd, NZBGet, Sonarr and Radarr
+arrive in 0.3.</p>
+<pre><code>amuxify remux --in-place "$SAB_COMPLETE_DIR" || exit 1</code></pre>
+<p><a href="https://github.com/amuxify/amuxify/blob/main/docs/hooks.md">Hook examples.</a></p>
+</section>
+
+</main>
+
+<footer>
+<p>BSD-3-Clause ·
+<a href="https://github.com/amuxify/amuxify">GitHub</a> ·
+<a href="https://github.com/amuxify/amuxify/releases">Releases</a> ·
+<a href="https://github.com/amuxify/amuxify/blob/main/CHANGELOG.md">Changelog</a> ·
+<a href="https://github.com/amuxify/amuxify/blob/main/SECURITY.md">Security</a></p>
+</footer>
+
+</body>
+</html>
