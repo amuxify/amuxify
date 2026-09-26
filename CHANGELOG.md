@@ -63,6 +63,16 @@ All notable changes to amuxify will be documented in this file.
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under
   `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
+  A quarantine move on the same filesystem now refuses a source that is not
+  a regular file and checks that the entry it placed is the very file it
+  started with, so a symlink swapped in during the move can never leave a
+  hard link to its target in the quarantine tree. A quarantine directory
+  that sits inside the scanned tree is skipped by the walk, and a path that
+  is the quarantine directory or lies inside it is refused as a usage error
+  before anything runs, so a file is quarantined once rather than moved a
+  level deeper on every run. The human report sanitiser and the `BIDI_NAME`
+  check now cover every Unicode format character, including U+061C and the
+  tag characters, rather than a fixed list of code points.
 
 ## 0.2.0
 
