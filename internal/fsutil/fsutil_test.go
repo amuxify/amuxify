@@ -819,3 +819,103 @@ func TestReplaceInPlaceRefusesSwappedTemp(t *testing.T) {
 		t.Fatalf("the replacement did not take the destination's mode: %o", mode)
 	}
 }
+
+// The rename in ReplaceInPlaceOwn uses the temp name once more after the
+// descriptor is closed. A symlink swapped onto that name in that instant is
+// renamed over the destination; the outcome is reported as an error that
+// says the file is gone, the planted entry is left in place rather than
+// removed, and the link's target is never followed or changed.
+func TestReplaceInPlaceOwnReportsSwapBeforeRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits and symlinks differ on windows")
+	}
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "movie.mkv")
+	writeFile(t, dest, "original", 0o666)
+	victim := filepath.Join(t.TempDir(), "victim.mkv")
+	writeFile(t, victim, "precious", 0o600)
+	victimStamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(victim, victimStamp, victimStamp); err != nil {
+		t.Fatal(err)
+	}
+	tmp := TempName(dest)
+	created, err := CreateTemp(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, []byte("rebuilt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		plant func()
+		check func()
+	}{
+		{"symlink", func() {
+			if err := os.Symlink(victim, tmp); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}, func() {
+			if target, err := os.Readlink(dest); err != nil || target != victim {
+				t.Fatalf("the planted link was not left at the destination: %q %v", target, err)
+			}
+		}},
+		{"foreign file", func() { writeFile(t, tmp, "foreign", 0o644) }, func() {
+			if got := readFile(t, dest); got != "foreign" {
+				t.Fatalf("the foreign file was not left at the destination: %q", got)
+			}
+			if fi, err := os.Lstat(dest); err != nil || Nlink(fi) != 1 {
+				t.Fatalf("foreign file removed or linked: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, dest, "original", 0o666)
+			fired := false
+			beforeRename = func(gotTmp, gotDest string) {
+				fired = true
+				if gotTmp != tmp || gotDest != dest {
+					t.Fatalf("seam saw %q %q", gotTmp, gotDest)
+				}
+				if err := os.Remove(tmp); err != nil {
+					t.Fatal(err)
+				}
+				tc.plant()
+			}
+			t.Cleanup(func() { beforeRename = nil })
+			err := ReplaceInPlaceOwn(tmp, dest, created)
+			if !fired {
+				t.Fatal("the seam never ran")
+			}
+			if err == nil || !strings.Contains(err.Error(), "not the file this run created") || !strings.Contains(err.Error(), "left in place") {
+				t.Fatalf("ReplaceInPlaceOwn after a swap before the rename: %v", err)
+			}
+			if mode, mtime := identityOfPath(t, victim); mode != 0o600 || !mtime.Equal(victimStamp) {
+				t.Fatalf("victim changed: mode %o mtime %v", mode, mtime)
+			}
+			if got := readFile(t, victim); got != "precious" {
+				t.Fatalf("victim rewritten: %q", got)
+			}
+			if fi, err := os.Lstat(victim); err != nil || Nlink(fi) != 1 {
+				t.Fatalf("victim gained a name: %v", err)
+			}
+			tc.check()
+			if _, err := os.Lstat(tmp); err == nil {
+				t.Fatal("the temp name still exists")
+			}
+			// The file this run built is gone with the swap; recreate it
+			// for the next row.
+			if _, err := os.Lstat(dest); err == nil {
+				_ = os.Remove(dest)
+			}
+			var cerr error
+			created, cerr = CreateTemp(tmp)
+			if cerr != nil {
+				t.Fatal(cerr)
+			}
+			if err := os.WriteFile(tmp, []byte("rebuilt"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
