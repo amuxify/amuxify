@@ -249,8 +249,20 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			return fr
 		}
 	}
+	// The temp file is created here, empty and exclusively, before its name
+	// is handed to mkvmerge, so a symlink planted at the name in the
+	// meantime can only get there by replacing this run's own entry, which
+	// tempUnchanged notices after mkvmerge returns and again before the
+	// output is placed. mkvmerge writing through a planted link would
+	// otherwise be verified through that link and the link itself placed.
+	// cleanup removes whatever sits at the name; os.Remove never follows a
+	// link, so a planted one is removed and its target is left alone.
 	tmp := fsutil.TempName(dest)
-	_ = os.Remove(tmp)
+	created, err := createTemp(tmp)
+	if err != nil {
+		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+		return fr
+	}
 	cleanup := func() { _ = os.Remove(tmp) }
 
 	args := r.mkvmergeArgs(tmp, sc.Info, d)
@@ -263,6 +275,11 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	if res.ExitCode >= 2 {
 		cleanup()
 		fr.Add(report.Finding{Code: CodeRemuxFail, Severity: report.Fail, Message: "mkvmerge failed", Detail: strings.TrimSpace(string(res.Stdout) + string(res.Stderr))})
+		return fr
+	}
+	if err := tempUnchanged(tmp, created); err != nil {
+		cleanup()
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 		return fr
 	}
 	if res.ExitCode == 1 {
@@ -297,6 +314,13 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	if err := fsutil.Fsync(tmp); err != nil {
 		cleanup()
 		fr.Addf(CodeRemuxFail, report.Fail, "fsync: %v", err)
+		return fr
+	}
+	// Verification read the temp file by name, so the name must still lead
+	// to the file this run created before that file is placed anywhere.
+	if err := tempUnchanged(tmp, created); err != nil {
+		cleanup()
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 		return fr
 	}
 	if !inPlace {
@@ -361,12 +385,6 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "identity: %v", err)
 			return fr
 		}
-		placed, err := os.Lstat(tmp)
-		if err != nil {
-			cleanup()
-			fr.Addf(CodeRemuxFail, report.Fail, "temp file: %v", err)
-			return fr
-		}
 		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
 			cleanup()
 			if errors.Is(err, fsutil.ErrExists) {
@@ -381,7 +399,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// a file that was never rebuilt. The output is then taken back
 		// again, provided dest still is the file this run placed there.
 		if err := sourceUnchanged(fr.Path, fi); err != nil {
-			if rerr := removeOwn(dest, placed); rerr != nil {
+			if rerr := removeOwn(dest, created); rerr != nil {
 				fr.Output = dest
 				fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the rebuilt file stays at %s: %v", err, dest, rerr)
 				return fr
@@ -421,6 +439,56 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 	}
 	if was == nil || !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
 		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
+	}
+	return nil
+}
+
+// createTemp clears tmp and creates it empty and exclusively, so that the
+// name mkvmerge writes to belongs to this run before the tool starts. A
+// leftover entry that cannot be removed is an error, as is anything that
+// appears at the name between the removal and the creation. The file gets
+// the mode mkvmerge would give a file it created itself, 0666 under the
+// umask, because in output mode the file is placed as it is; in place,
+// CopyIdentity gives it the source's mode before placement.
+func createTemp(tmp string) (os.FileInfo, error) {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("temp file: %v", err)
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("temp file: %v", err)
+	}
+	fi, err := f.Stat()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("temp file: %v", err)
+	}
+	return fi, nil
+}
+
+// tempUnchanged reports an error when tmp no longer names the file
+// createTemp made: a symlink or another entry renamed onto the name, or a
+// hard link added to the file, any of which would let the verification or
+// the placement reach a file this run did not create. mkvmerge and
+// mkvpropedit write into the existing file rather than unlinking and
+// recreating it (checked against mkvmerge and mkvpropedit v102, which keep
+// the inode), so the identity survives both tools.
+func tempUnchanged(tmp string, created os.FileInfo) error {
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		return fmt.Errorf("temp file: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", tmp)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+		return fmt.Errorf("%s is not the file this run created", tmp)
+	}
+	if n := fsutil.Nlink(now); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
 	}
 	return nil
 }
