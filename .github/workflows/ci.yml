@@ -16,15 +16,19 @@ jobs:
           go-version-file: go.mod
       - name: Install media tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg mkvtoolnix
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg mkvtoolnix libimage-exiftool-perl
       - name: Install media tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg mkvtoolnix
+        run: brew install ffmpeg mkvtoolnix exiftool
       - run: make fmt
       - run: make test
       - run: make build
       - run: ./bin/amuxify doctor
-      - run: make difftest
+      # The frozen 0.1.x Bash scripts under legacy/ assume macOS tooling, so
+      # the differential test only runs there.
+      - name: Differential test against legacy scripts
+        if: runner.os == 'macOS'
+        run: make difftest
   docker:
     runs-on: ubuntu-latest
     steps:
