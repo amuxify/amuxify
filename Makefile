@@ -1,105 +1,64 @@
 SHELL := /bin/bash
-
 PROJECT := amuxify
-VERSION_FILE := VERSION
-
+VERSION := $(shell cat VERSION)
+GO ?= go
 PREFIX ?= /usr/local
+LDFLAGS := -s -w -X github.com/nxame/amuxify/internal/cli.Version=$(VERSION)
+FIXTURES ?= testdata/out
 
-BINDIR := bin
-LIBEXECDIR := libexec
-INSTALL_LIBEXECDIR := $(PREFIX)/libexec/$(PROJECT)
+.PHONY: all build test vet fmt lint fixtures difftest install uninstall clean docker release-check help
 
-.PHONY: all help setup wrappers permissions test install uninstall release-check clean
-
-all: test
+all: build
 
 help:
 	@printf '%s\n' \
 		'amuxify development targets:' \
 		'' \
-		'  make setup          Create launchers and set executable permissions' \
-		'  make test           Syntax-check scripts and verify repository files' \
-		'  make install        Install under PREFIX (default: /usr/local)' \
-		'  make uninstall      Remove files installed by make install' \
-		'  make release-check  Run release readiness checks' \
-		'  make clean          Remove generated bin launchers'
+		'  make build          Build ./bin/amuxify for this machine' \
+		'  make test           go vet + go test' \
+		'  make fixtures       Generate the fixture corpus into $(FIXTURES)' \
+		'  make difftest       Run the differential test against legacy/ (needs ffmpeg, mkvtoolnix)' \
+		'  make install        Install the binary and shims under PREFIX (default /usr/local)' \
+		'  make docker         Build the container image locally' \
+		'  make release-check  Everything CI runs before a tag'
 
-setup: wrappers permissions
-	@echo "Setup complete."
+build:
+	@mkdir -p bin
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(PROJECT) ./cmd/$(PROJECT)
 
-wrappers:
-	@test -s "$(VERSION_FILE)"
-	@mkdir -p "$(BINDIR)"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'ROOT="$$(cd "$$(dirname "$$0")/.." && pwd -P)"' "AMUXIFY_COMMAND=amux-clean AMUXIFY_VERSION=$$VERSION exec \"\$$ROOT/libexec/clean-media.sh\" \"\$$@\"" > "$(BINDIR)/amux-clean"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'ROOT="$$(cd "$$(dirname "$$0")/.." && pwd -P)"' "AMUXIFY_COMMAND=amux-remux AMUXIFY_VERSION=$$VERSION exec \"\$$ROOT/libexec/remux-media.sh\" \"\$$@\"" > "$(BINDIR)/amux-remux"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'ROOT="$$(cd "$$(dirname "$$0")/.." && pwd -P)"' "AMUXIFY_COMMAND=amux-scan AMUXIFY_VERSION=$$VERSION exec \"\$$ROOT/libexec/scan-media.sh\" --strict-permissions \"\$$@\"" > "$(BINDIR)/amux-scan"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'ROOT="$$(cd "$$(dirname "$$0")/.." && pwd -P)"' "AMUXIFY_COMMAND=amux-scan-all AMUXIFY_VERSION=$$VERSION exec \"\$$ROOT/libexec/scan-media.sh\" --strict-permissions --allow-data-tag text \"\$$@\"" > "$(BINDIR)/amux-scan-all"
+vet:
+	$(GO) vet ./...
 
-permissions:
-	@chmod +x "$(LIBEXECDIR)/clean-media.sh"
-	@chmod +x "$(LIBEXECDIR)/remux-media.sh"
-	@chmod +x "$(LIBEXECDIR)/scan-media.sh"
-	@chmod +x "$(BINDIR)/amux-clean"
-	@chmod +x "$(BINDIR)/amux-remux"
-	@chmod +x "$(BINDIR)/amux-scan"
-	@chmod +x "$(BINDIR)/amux-scan-all"
+fmt:
+	@test -z "$$(gofmt -l cmd internal test)" || { gofmt -l cmd internal test; echo "run gofmt -w"; exit 1; }
 
-test: setup
-	@echo "Checking repository files..."
-	@test -f README.md
-	@test -f LICENSE
-	@test -f "$(VERSION_FILE)"
-	@echo "Checking VERSION..."
-	@grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' "$(VERSION_FILE)"
-	@echo "Checking Bash syntax..."
-	@/bin/bash -n "$(LIBEXECDIR)/clean-media.sh"
-	@/bin/bash -n "$(LIBEXECDIR)/remux-media.sh"
-	@/bin/bash -n "$(LIBEXECDIR)/scan-media.sh"
-	@/bin/bash -n "$(BINDIR)/amux-clean"
-	@/bin/bash -n "$(BINDIR)/amux-remux"
-	@/bin/bash -n "$(BINDIR)/amux-scan"
-	@/bin/bash -n "$(BINDIR)/amux-scan-all"
-	@echo "Checking public command versions..."
-	@test "$$("$(BINDIR)/amux-clean" --version)" = "amux-clean $$(cat "$(VERSION_FILE)")"
-	@test "$$("$(BINDIR)/amux-remux" --version)" = "amux-remux $$(cat "$(VERSION_FILE)")"
-	@test "$$("$(BINDIR)/amux-scan" --version)" = "amux-scan $$(cat "$(VERSION_FILE)")"
-	@test "$$("$(BINDIR)/amux-scan-all" --version)" = "amux-scan-all $$(cat "$(VERSION_FILE)")"
-	@echo "All checks passed."
+test: vet
+	$(GO) test ./...
 
-install: test
-	@echo "Installing $(PROJECT) to $(PREFIX)..."
+fixtures:
+	@rm -rf "$(FIXTURES)"
+	testdata/gen-fixtures.sh "$(FIXTURES)"
+
+difftest: build
+	AMUXIFY_DIFFTEST=1 $(GO) test ./test/... -run Differential -v
+
+install: build
 	@mkdir -p "$(PREFIX)/bin"
-	@mkdir -p "$(INSTALL_LIBEXECDIR)"
-	@install -m 755 "$(LIBEXECDIR)/clean-media.sh" "$(INSTALL_LIBEXECDIR)/clean-media.sh"
-	@install -m 755 "$(LIBEXECDIR)/remux-media.sh" "$(INSTALL_LIBEXECDIR)/remux-media.sh"
-	@install -m 755 "$(LIBEXECDIR)/scan-media.sh" "$(INSTALL_LIBEXECDIR)/scan-media.sh"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' "AMUXIFY_COMMAND=amux-clean AMUXIFY_VERSION=$$VERSION exec \"$(INSTALL_LIBEXECDIR)/clean-media.sh\" \"\$$@\"" > "$(PREFIX)/bin/amux-clean"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' "AMUXIFY_COMMAND=amux-remux AMUXIFY_VERSION=$$VERSION exec \"$(INSTALL_LIBEXECDIR)/remux-media.sh\" \"\$$@\"" > "$(PREFIX)/bin/amux-remux"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' "AMUXIFY_COMMAND=amux-scan AMUXIFY_VERSION=$$VERSION exec \"$(INSTALL_LIBEXECDIR)/scan-media.sh\" --strict-permissions \"\$$@\"" > "$(PREFIX)/bin/amux-scan"
-	@VERSION="$$(cat "$(VERSION_FILE)")"; printf '%s\n' '#!/usr/bin/env bash' "AMUXIFY_COMMAND=amux-scan-all AMUXIFY_VERSION=$$VERSION exec \"$(INSTALL_LIBEXECDIR)/scan-media.sh\" --strict-permissions --allow-data-tag text \"\$$@\"" > "$(PREFIX)/bin/amux-scan-all"
-	@chmod +x "$(PREFIX)/bin/amux-clean"
-	@chmod +x "$(PREFIX)/bin/amux-remux"
-	@chmod +x "$(PREFIX)/bin/amux-scan"
-	@chmod +x "$(PREFIX)/bin/amux-scan-all"
-	@echo "Installed."
-	@echo "Try: $(PREFIX)/bin/amux-remux --version"
+	install -m 755 bin/$(PROJECT) "$(PREFIX)/bin/$(PROJECT)"
+	install -m 755 bin/amux-scan bin/amux-scan-all bin/amux-remux bin/amux-clean "$(PREFIX)/bin/"
+	@echo "Installed $(PROJECT) $(VERSION) to $(PREFIX)/bin"
 
 uninstall:
-	@echo "Removing $(PROJECT) from $(PREFIX)..."
-	@rm -f "$(PREFIX)/bin/amux-clean"
-	@rm -f "$(PREFIX)/bin/amux-remux"
-	@rm -f "$(PREFIX)/bin/amux-scan"
-	@rm -f "$(PREFIX)/bin/amux-scan-all"
-	@rm -rf "$(INSTALL_LIBEXECDIR)"
-	@echo "Uninstalled."
+	rm -f "$(PREFIX)/bin/$(PROJECT)" "$(PREFIX)/bin/amux-scan" "$(PREFIX)/bin/amux-scan-all" "$(PREFIX)/bin/amux-remux" "$(PREFIX)/bin/amux-clean"
 
-release-check: test
-	@echo "Version: $$(cat "$(VERSION_FILE)")"
-	@echo "Release checks passed."
+docker:
+	docker build --build-arg VERSION=$(VERSION) -t ghcr.io/nxame/$(PROJECT):$(VERSION) .
+
+release-check: fmt test build
+	@grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' VERSION
+	@grep -q "^## $(VERSION)" CHANGELOG.md || { echo "CHANGELOG.md has no entry for $(VERSION)"; exit 1; }
+	@./bin/$(PROJECT) version | grep -q "$(VERSION)"
+	@echo "Release checks passed for $(VERSION)."
 
 clean:
-	@rm -f "$(BINDIR)/amux-clean"
-	@rm -f "$(BINDIR)/amux-remux"
-	@rm -f "$(BINDIR)/amux-scan"
-	@rm -f "$(BINDIR)/amux-scan-all"
-	@echo "Generated launchers removed."
+	rm -rf bin/$(PROJECT) dist "$(FIXTURES)"

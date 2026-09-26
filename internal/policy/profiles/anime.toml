@@ -1,0 +1,54 @@
+# amuxify profile: anime
+#
+# Fansub-friendly: keep every language, keep fonts because ASS subtitles
+# depend on them, keep signs-and-songs tracks, prefer the original-language
+# audio as default when the caller tells us what it is.
+description = "Keep all languages and fonts, prefer original-language audio, keep signs and songs subtitles."
+
+[languages]
+keep = ["*"]
+prefer_original = true
+und = "keep"
+
+[audio]
+drop_commentary = true
+keep_first = false
+
+[subtitles]
+keep_forced = true
+drop_sdh_duplicates = false
+scan_links = true
+links = "warn"
+
+[chapters]
+keep = true
+
+[attachments]
+fonts = "keep"
+cover_art = "keep"
+other = "block"
+
+[metadata]
+strip_title = true
+strip_tags = true
+strip_track_titles = false
+strip_provenance = true
+links = "warn"
+provenance = "warn"
+
+[streams]
+allow_data_tags = ["tmcd", "text"]
+
+[verify]
+tier = "quick"
+stream_hash = true
+
+[safety]
+refuse_root = true
+hardlinks = "skip"
+exec_permissions = "warn"
+clamav = "off"
+
+[sidecars]
+allow = ["nfo", "srt", "ass", "ssa", "sub", "idx", "vtt", "sfv", "par2", "md5", "sha256", "jpg", "jpeg", "png", "webp", "txt", "ttf", "otf", "ttc"]
+block = ["lnk", "url", "exe", "scr", "com", "pif", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "msi", "msp", "dmg", "pkg", "app", "sh", "command", "py", "pl", "rb", "deb", "rpm", "apk", "iso", "img", "reg", "cpl", "dll", "so", "dylib"]
