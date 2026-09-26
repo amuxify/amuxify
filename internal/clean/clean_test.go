@@ -695,3 +695,34 @@ func TestCleanReportsUnreadableDirectory(t *testing.T) {
 		t.Fatalf("results %v", res)
 	}
 }
+
+// Review C10: the audio-tags advice names --strip-audio-tags only for the
+// clean command, which has that flag; under ingest it names no flag.
+func TestAudioTagsAdviceFollowsTheCommand(t *testing.T) {
+	noTools(t)
+	info := &probe.MediaInfo{Container: "mp3", Streams: []probe.Stream{{Index: 0, Type: "audio", Codec: "mp3"}}}
+	for _, tc := range []struct{ command, want string }{
+		{"", "audio tags left alone (use --strip-audio-tags)"},
+		{"clean", "audio tags left alone (use --strip-audio-tags)"},
+		{"ingest", "audio tags left alone; ingest does not strip audio tags"},
+	} {
+		c, tr := newCleaner(t, nil, mustProfile(t, "homelab"))
+		c.Command = tc.command
+		path := write(t, filepath.Join(t.TempDir(), "a.mp3"), "ID3\x03\x00\x00\x00\x00\x00\x00")
+		sum := fileSHA(t, path)
+		fr := report.FileResult{Path: path, Info: map[string]string{}}
+		c.cleanMedia(context.Background(), &fr, path, "mp3", info)
+		var got string
+		for _, f := range fr.Findings {
+			if f.Code == CodeSkipped {
+				got = f.Message
+			}
+		}
+		if got != tc.want {
+			t.Errorf("command %q: SKIPPED %q, want %q", tc.command, got, tc.want)
+		}
+		if fr.Verdict != report.Pass || fileSHA(t, path) != sum || len(tr.all()) != 0 {
+			t.Errorf("command %q: %s, file changed %v, tools %v", tc.command, fr.Verdict, fileSHA(t, path) != sum, tr.all())
+		}
+	}
+}
