@@ -186,7 +186,6 @@ func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
 		msg += fmt.Sprintf("; if it was meant as the quarantine directory write --quarantine=%s", report.Sanitize(args[0]))
 	}
 	return msg
-
 }
 
 // writeJSONOut writes the report to a new file. An existing file, a symlink

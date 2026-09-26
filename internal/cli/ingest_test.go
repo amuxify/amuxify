@@ -15,7 +15,6 @@ import (
 )
 
 // tree records name, size, mtime and mode of everything under root.
-
 func tree(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -370,7 +369,6 @@ func TestIngestDryRunOnFixtures(t *testing.T) {
 			t.Errorf("no line for %s", p)
 		}
 	}
-
 	if !strings.Contains(out, "BLOCK "+filepath.Join(corpus, "polyglot.mkv")+"\n") {
 		t.Errorf("polyglot.mkv not BLOCK:\n%s", out)
 	}

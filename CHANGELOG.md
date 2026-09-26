@@ -40,7 +40,6 @@ All notable changes to amuxify will be documented in this file.
 
 ### Changed
 
-
 - JSON: `started` and `finished` are UTC with whole seconds; `files`, `findings`
   and `errors` are `[]` rather than absent or `null`; `profile` is always present.
 - `docs/report.md` code table corrected to match the code (`HARDLINKED` is PASS in
@@ -56,7 +55,6 @@ All notable changes to amuxify will be documented in this file.
   file correctly. A quarantine move across devices copies the file safely
   instead of failing or leaving two copies. A directory that cannot be read
   fails the run instead of being silently skipped. A hook run
-
   under `--json` writes exactly one JSON document to stdout and its own log
   lines to stderr, reports an interruption on stderr, and refuses a positional
   argument the adapter does not take, with a hint when a directory was written
@@ -65,7 +63,6 @@ All notable changes to amuxify will be documented in this file.
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under
   `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
-
 
 ## 0.2.0
 

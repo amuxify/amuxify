@@ -11,7 +11,6 @@ line and SABnzbd's closing count line); they go to stdout, except under
 `--json`, where they go to stderr so that stdout is still exactly one
 document. `--quiet` prints nothing and leaves only the exit code.
 
-
 This is the report of an `amuxify ingest` run started by the SABnzbd hook
 adapter. It is the file `internal/report/testdata/report-golden.json`, which a
 test compares byte for byte with what the code writes, so what you see here is
@@ -254,7 +253,6 @@ name can therefore not end a line early, forge a verdict line, overwrite the
 line with a terminal escape sequence or hide characters. The hook adapters'
 own lines are treated the same way. The JSON form carries the raw value.
 
-
 ## Doctor
 
 `amuxify doctor --json` writes the same envelope. `command` is `doctor`, each
@@ -323,7 +321,6 @@ on its own.
 | `QUARANTINED` | BLOCK, or WARN when the move failed | scan | The file was moved under `--quarantine`. |
 | `REFUSED` | FAIL or BLOCK | remux, ingest | The scan verdict prevented the remux; the severity is the scan verdict. |
 | `SKIPPED` | PASS or WARN | remux, clean | There was nothing to do for this file; the message says why. |
-
 | `ROUTE` | PASS | ingest | The route taken, `remux`, `clean` or `skip`, and why. |
 | `OUTPUT_EXISTS` | FAIL | remux | The destination already exists; it is never overwritten. |
 | `UNSUPPORTED_INPUT` | FAIL | remux | mkvmerge cannot read this container. |
