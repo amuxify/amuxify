@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -214,6 +217,18 @@ func TestBidiNameBlocks(t *testing.T) {
 		"s⁠ub.srt",        // word joiner
 		"‭safe.mkv",       // left-to-right override
 		"deep‮/inner.nfo", // in a directory name too
+		// The Arabic letter mark is a bidi control outside the U+20xx
+		// block, and the soft hyphen, tag characters, interlinear
+		// annotation anchor, Mongolian vowel separator, invisible
+		// operators and deprecated format characters are format
+		// characters that print as nothing at all.
+		"alm\u061cvkm.mkv",
+		"soft\u00adhyphen.nfo",
+		"tag\U000e0041.mkv",
+		"annot\ufff9ation.nfo",
+		"mongol\u180eian.mkv",
+		"invisible\u2063times.nfo",
+		"deprecated\u206a.nfo",
 	}
 	s := newScanner(t, mustProfile(t, "homelab"), nil)
 	for _, n := range names {
@@ -248,9 +263,46 @@ func TestBidiNameBlocks(t *testing.T) {
 			t.Errorf("%q: scanning continued after BIDI_NAME: %v", r.File.Path, codes(r.File))
 		}
 	}
-	// A name that only looks odd is fine.
-	fr := scanOne(t, s, write(t, filepath.Join(t.TempDir(), "ünïcödé — 日本語.nfo"), "nfo\n", 0o644))
-	expect(t, fr, report.Pass, CodeSidecarOK)
+	// A name that only looks odd is fine: accented letters, an em dash,
+	// CJK, a combining mark, an emoji variation selector and a private
+	// use character are none of them format characters.
+	for _, n := range []string{"ünïcödé — 日本語.nfo", "cafe\u0301.nfo", "star\u2b50\ufe0f.nfo", "private\ue000.nfo"} {
+		fr := scanOne(t, s, write(t, filepath.Join(t.TempDir(), n), "nfo\n", 0o644))
+		expect(t, fr, report.Pass, CodeSidecarOK)
+	}
+}
+
+// TestBidiCharsNamesEveryFormatCharacter walks the whole Unicode range and
+// checks that bidiChars flags exactly the format characters, naming the
+// bidi controls (U+061C among them) as such and every other one as a
+// zero-width character, and never flags anything else.
+func TestBidiCharsNamesEveryFormatCharacter(t *testing.T) {
+	for r := rune(1); r <= unicode.MaxRune; r++ {
+		if !utf8.ValidRune(r) {
+			continue
+		}
+		got := bidiChars("a" + string(r) + "b")
+		var want string
+		switch {
+		case unicode.Is(unicode.Bidi_Control, r):
+			want = fmt.Sprintf("bidi control U+%04X", r)
+		case unicode.Is(unicode.Cf, r):
+			want = fmt.Sprintf("zero-width character U+%04X", r)
+		}
+		if got != want {
+			t.Errorf("bidiChars(%U) = %q, want %q", r, got, want)
+		}
+	}
+	for _, r := range []rune{0x061C, 0x202E, 0x2066} {
+		if !strings.HasPrefix(bidiChars(string(r)), "bidi control") {
+			t.Errorf("%U is not reported as a bidi control", r)
+		}
+	}
+	for _, r := range []rune{0x00AD, 0x180E, 0x2063, 0x206A, 0xFEFF, 0xFFF9, 0xE0001, 0xE0041} {
+		if !strings.HasPrefix(bidiChars(string(r)), "zero-width character") {
+			t.Errorf("%U is not reported as a zero-width character", r)
+		}
+	}
 }
 
 func TestEmptyFileBlocks(t *testing.T) {
@@ -363,7 +415,11 @@ func TestBlockIsNeverLowered(t *testing.T) {
 	}
 }
 
-// Guarantee 2: temp files and Finder droppings are never scanned.
+// Guarantee 2: amuxify's own temp files, named ".amuxify-<name>.tmp" by
+// fsutil.TempName, and Finder droppings are never scanned. The skip is
+// exactly that shape: a hostile file that borrows the prefix but not the
+// suffix, such as ".amuxify-evil.exe", is listed and blocked like any other
+// sidecar.
 func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -378,6 +434,10 @@ func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	write(t, filepath.Join(dir, "amuxify-x.tmp"), "x", 0o644)
 	write(t, filepath.Join(dir, "DS_Store"), "x", 0o644)
 	write(t, filepath.Join(dir, ".amuxify"), "x", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-"), "x", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-evil.exe"), "MZ\x90\x00", 0o644)
+	write(t, filepath.Join(dir, ".amuxify-payload.tmp.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	write(t, filepath.Join(dir, "sub", ".amuxify-evil.sh"), "#!/bin/sh\n", 0o755)
 	s := newScanner(t, mustProfile(t, "homelab"), nil)
 	res, err := s.ScanPath(context.Background(), dir)
 	if err != nil {
@@ -387,9 +447,13 @@ func TestWalkSkipsTempAndDSStore(t *testing.T) {
 	for _, r := range res {
 		rel, _ := filepath.Rel(dir, r.File.Path)
 		got = append(got, filepath.ToSlash(rel))
+		switch rel {
+		case ".amuxify-evil.exe", ".amuxify-payload.tmp.url", filepath.Join("sub", ".amuxify-evil.sh"):
+			expect(t, r.File, report.Block, CodeSidecarBlocked)
+		}
 	}
 	sort.Strings(got)
-	want := []string{".amuxify", "DS_Store", "amuxify-x.tmp", "ok.nfo", "sub/real.nfo"}
+	want := []string{".amuxify", ".amuxify-", ".amuxify-evil.exe", ".amuxify-payload.tmp.url", "DS_Store", "amuxify-x.tmp", "ok.nfo", "sub/.amuxify-evil.sh", "sub/real.nfo"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("scanned %v, want %v", got, want)
 	}
@@ -536,10 +600,38 @@ func TestQuarantineNeverEscapesRoot(t *testing.T) {
 	}
 	for _, p := range placed {
 		rel, err := filepath.Rel(q, p)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			t.Errorf("%s is outside the quarantine root", p)
 		}
 	}
+	// A directory whose name starts with two dots is a normal directory:
+	// its file keeps its mirrored place instead of being flattened to the
+	// quarantine root, where it would collide with a root-level file of
+	// the same name.
+	for _, want := range []string{filepath.Join(q, "..dots", "b.url"), filepath.Join(q, "a.url"), filepath.Join(q, "c.url")} {
+		if _, err := os.Lstat(want); err != nil {
+			t.Errorf("not mirrored at %s: %v (placed: %v)", want, err, placed)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(q, "b.url")); err == nil {
+		t.Errorf("..dots/b.url was flattened to the quarantine root")
+	}
+	// A file that does not sit under the root it is scanned against, or
+	// that is handed as its own root, still lands under its base name.
+	for _, against := range []string{t.TempDir(), filepath.Join(root, "sub")} {
+		outside := write(t, filepath.Join(t.TempDir(), "escape", "f.url"), "x\n", 0o644)
+		r := s.ScanFile(context.Background(), outside, against)
+		requireQuarantineFinding(t, r.File, report.Block, "moved to "+filepath.Join(q, "f.url"))
+		if _, err := os.Lstat(filepath.Join(q, "f.url")); err != nil {
+			t.Errorf("root %s: escaping file not placed under its base name: %v", against, err)
+		}
+		if err := os.Remove(filepath.Join(q, "f.url")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	self := write(t, filepath.Join(t.TempDir(), "self.url"), "x\n", 0o644)
+	r := s.ScanFile(context.Background(), self, self)
+	requireQuarantineFinding(t, r.File, report.Block, "moved to "+filepath.Join(q, "self.url"))
 	// The scan of a single file quarantines under its own base name.
 	single := write(t, filepath.Join(t.TempDir(), "solo.url"), "x\n", 0o644)
 	res, err = s.ScanPath(context.Background(), single)
@@ -1012,7 +1104,7 @@ func TestCorpusVerdicts(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
+		if d.IsDir() || d.Name() == ".DS_Store" || isTempName(d.Name()) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
@@ -1290,6 +1382,56 @@ func TestQuarantineAcrossFilesystems(t *testing.T) {
 	}
 }
 
+// Guarantee 3 during quarantine: the BLOCK file is replaced by a symlink to
+// a victim between the scanner's checks and the move (the quarantine runs
+// after every tool has looked at the file). The move must not turn the
+// symlink into a hard link to the victim inside the quarantine tree: the
+// result is WARN "quarantine failed", nothing sits at the quarantine path,
+// and the victim keeps its bytes and its single link.
+func TestQuarantineRefusesSourceSwappedForSymlink(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	q := filepath.Join(t.TempDir(), "quarantine")
+	victim := write(t, filepath.Join(t.TempDir(), "victim.mkv"), "precious", 0o644)
+	write(t, filepath.Join(root, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	orig := fsutil.Place
+	fsutil.Place = func(s, d string) error {
+		if err := os.Remove(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, s); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return fsutil.PlaceNoClobber(s, d)
+	}
+	t.Cleanup(func() { fsutil.Place = orig })
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	res, err := s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	expect(t, res[0].File, report.Block, CodeSidecarBlocked)
+	requireQuarantineFinding(t, res[0].File, report.Warn, "quarantine failed")
+	dest := filepath.Join(q, "sub", "x.url")
+	if _, err := os.Lstat(dest); err == nil {
+		t.Errorf("an entry was placed at %s", dest)
+	}
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "precious" {
+		t.Errorf("victim changed: %q %v", b, err)
+	}
+	fi, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := fsutil.Nlink(fi); n != 1 {
+		t.Errorf("victim has %d links, want 1", n)
+	}
+}
+
 // Review C18: the skip helper honours AMUXIFY_REQUIRE_TOOLS the way
 // testutil does, including the hostile spellings that must not count.
 func TestSkipOrFailHonoursRequireTools(t *testing.T) {
@@ -1313,4 +1455,258 @@ func TestSkipOrFailHonoursRequireTools(t *testing.T) {
 	// With it set, skipOrFail calls t.Fatalf, which cannot be observed
 	// without failing this test; the predicate it branches on is asserted
 	// above.
+}
+
+// quarantineSpelling is one way a quarantine directory that sits at
+// <tree>/quarantine can be written.
+type quarantineSpelling struct {
+	name  string
+	spell func(t *testing.T, tree string) string
+}
+
+// quarantineSpellings are the ways a quarantine directory that sits at
+// <tree>/quarantine can be written: plain, with a trailing separator,
+// through a ".." component, relative to the working directory, and through
+// a symlink to the tree. Each must name the same directory to the walk and
+// the check. The ".." spelling is built by string concatenation, not
+// filepath.Join, which would clean it away before the code under test saw
+// it, and it passes through a directory that exists (<tree>/sub), so the
+// operating system resolves it as well as the lexical cleaning does.
+func quarantineSpellings() []quarantineSpelling {
+	return []quarantineSpelling{
+		{"plain", func(_ *testing.T, tree string) string { return filepath.Join(tree, "quarantine") }},
+		{"trailing slash", func(_ *testing.T, tree string) string { return filepath.Join(tree, "quarantine") + "/" }},
+		{"dot dot", func(t *testing.T, tree string) string {
+			if err := os.MkdirAll(filepath.Join(tree, "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			q := tree + "/sub/../quarantine"
+			if !strings.Contains(q, "/../") {
+				t.Fatalf("the spelling %q lost its .. component", q)
+			}
+			return q
+		}},
+		{"relative", func(t *testing.T, tree string) string {
+			t.Chdir(tree)
+			return "quarantine"
+		}},
+		{"through a symlink", func(t *testing.T, tree string) string {
+			link := filepath.Join(t.TempDir(), "link")
+			if err := os.Symlink(tree, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return filepath.Join(link, "quarantine")
+		}},
+	}
+}
+
+// caseInsensitive reports whether the filesystem holding dir folds letter
+// case, as APFS and Windows filesystems do by default: a directory created
+// as "case" is then reachable as "CASE" and is the same directory.
+func caseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	lower := filepath.Join(dir, "case")
+	if err := os.Mkdir(lower, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(lower)
+	lfi, err := os.Stat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ufi, err := os.Stat(filepath.Join(dir, "CASE"))
+	return err == nil && os.SameFile(lfi, ufi)
+}
+
+// A quarantine directory inside the scanned tree is never walked: the BLOCK
+// file is moved once, a second run neither lists nor moves it, and every
+// other file is still listed. This holds for every spelling of the
+// directory, so a run cannot push quarantined files one level deeper each
+// time (quarantine/quarantine/...).
+func TestQuarantineInsideTreeIsNotRescanned(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	for _, sp := range quarantineSpellings() {
+		t.Run(sp.name, func(t *testing.T) {
+			tree := filepath.Join(root, sp.name)
+			write(t, filepath.Join(tree, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			write(t, filepath.Join(tree, "sub", "keep.nfo"), "nfo\n", 0o644)
+			write(t, filepath.Join(tree, "ok.nfo"), "nfo\n", 0o644)
+			q := sp.spell(t, tree)
+			s := newScanner(t, mustProfile(t, "homelab"), nil)
+			s.Quarantine = q
+			dest := filepath.Join(tree, "quarantine", "sub", "x.url")
+			listed := func(res []Result) []string {
+				var out []string
+				for _, r := range res {
+					rel, _ := filepath.Rel(tree, r.File.Path)
+					out = append(out, filepath.ToSlash(rel))
+				}
+				sort.Strings(out)
+				return out
+			}
+			res, err := s.ScanPath(context.Background(), tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := listed(res); strings.Join(got, ",") != "ok.nfo,sub/keep.nfo,sub/x.url" {
+				t.Fatalf("first run listed %v", got)
+			}
+			fi, err := os.Lstat(dest)
+			if err != nil {
+				t.Fatalf("not quarantined at %s: %v", dest, err)
+			}
+			res, err = s.ScanPath(context.Background(), tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := listed(res); strings.Join(got, ",") != "ok.nfo,sub/keep.nfo" {
+				t.Fatalf("second run listed %v; the quarantine directory was walked", got)
+			}
+			now, err := os.Lstat(dest)
+			if err != nil || !os.SameFile(fi, now) {
+				t.Errorf("the quarantined file was touched: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(tree, "quarantine", "quarantine")); err == nil {
+				t.Error("a nested quarantine directory was created")
+			}
+		})
+	}
+}
+
+// A scan whose root is the quarantine directory, or lies inside it, is
+// refused before any file is looked at, whatever way either path is
+// written, and nothing inside the quarantine directory moves.
+func TestScanRootInsideQuarantineIsRefused(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	for _, sp := range quarantineSpellings() {
+		t.Run(sp.name, func(t *testing.T) {
+			q := sp.spell(t, root)
+			qAbs := filepath.Join(root, "quarantine")
+			held := write(t, filepath.Join(qAbs, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+			s := newScanner(t, mustProfile(t, "homelab"), nil)
+			s.Quarantine = q
+			var progress int
+			s.Progress = func(Result) { progress++ }
+			for _, tc := range []struct{ root, want string }{
+				{qAbs, "is the quarantine directory"},
+				{qAbs + string(filepath.Separator), "is the quarantine directory"},
+				{qAbs + "/sub/../sub", "lies inside the quarantine directory"},
+				{filepath.Join(qAbs, "sub"), "lies inside the quarantine directory"},
+				{held, "lies inside the quarantine directory"},
+				{q, "is the quarantine directory"},
+			} {
+				res, err := s.ScanPath(context.Background(), tc.root)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("root %s: got %v, want %q", tc.root, err, tc.want)
+				}
+				if len(res) != 0 || progress != 0 {
+					t.Errorf("root %s: %d results, %d progress calls", tc.root, len(res), progress)
+				}
+			}
+			if _, err := os.Lstat(held); err != nil {
+				t.Errorf("a file inside the quarantine directory moved: %v", err)
+			}
+			// The tree beside the quarantine directory is still scanned in
+			// full, and a sibling directory whose name merely starts with
+			// the quarantine directory's name is not excluded.
+			write(t, filepath.Join(root, "quarantine2", "y.nfo"), "nfo\n", 0o644)
+			write(t, filepath.Join(root, "z.nfo"), "nfo\n", 0o644)
+			res, err := s.ScanPath(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range res {
+				rel, _ := filepath.Rel(root, r.File.Path)
+				got = append(got, filepath.ToSlash(rel))
+			}
+			sort.Strings(got)
+			if strings.Join(got, ",") != "quarantine2/y.nfo,z.nfo" {
+				t.Errorf("listed %v", got)
+			}
+			if err := os.RemoveAll(filepath.Join(root, "quarantine2")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(root, "z.nfo")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// Without a quarantine directory nothing is refused or excluded.
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	if err := CheckQuarantineRoot(root, ""); err != nil {
+		t.Error(err)
+	}
+	if got := QuarantineExcludes(""); got != nil {
+		t.Errorf("excludes %v for no quarantine", got)
+	}
+	res, err := s.ScanPath(context.Background(), filepath.Join(root, "quarantine"))
+	if err != nil || len(res) != 1 {
+		t.Errorf("plain scan of the former quarantine directory: %d results, %v", len(res), err)
+	}
+}
+
+// On a case-insensitive filesystem (APFS and Windows by default) a
+// quarantine directory created by an earlier run as "quarantine" and named
+// on a later run as "Quarantine" is the same directory. The walk and the
+// root check compare directories by identity, not by spelling, so the later
+// run neither walks the directory nor nests it, and a root written in
+// another case is still refused. The test is skipped where the filesystem
+// distinguishes case, because the two spellings then name different
+// directories.
+func TestQuarantineCaseFoldedSpelling(t *testing.T) {
+	noTools(t)
+	tree := t.TempDir()
+	if !caseInsensitive(t, tree) {
+		t.Skip("the filesystem distinguishes letter case")
+	}
+	write(t, filepath.Join(tree, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	write(t, filepath.Join(tree, "ok.nfo"), "nfo\n", 0o644)
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = filepath.Join(tree, "quarantine")
+	if _, err := s.ScanPath(context.Background(), tree); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(tree, "quarantine", "sub", "x.url")
+	fi, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatalf("not quarantined: %v", err)
+	}
+	s.Quarantine = filepath.Join(tree, "Quarantine")
+	res, err := s.ScanPath(context.Background(), tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range res {
+		rel, _ := filepath.Rel(tree, r.File.Path)
+		got = append(got, filepath.ToSlash(rel))
+	}
+	if strings.Join(got, ",") != "ok.nfo" {
+		t.Errorf("the run with the other case listed %v; the quarantine directory was walked", got)
+	}
+	if now, err := os.Lstat(dest); err != nil || !os.SameFile(fi, now) {
+		t.Errorf("the quarantined file was touched: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, "quarantine", "quarantine")); err == nil {
+		t.Error("a nested quarantine directory was created")
+	}
+	for _, tc := range []struct{ root, want string }{
+		{filepath.Join(tree, "QUARANTINE"), "is the quarantine directory"},
+		{filepath.Join(tree, "QUARANTINE", "sub"), "lies inside the quarantine directory"},
+		{tree + "/Quarantine/sub/../SUB/x.url", "lies inside the quarantine directory"},
+	} {
+		res, err := s.ScanPath(context.Background(), tc.root)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("root %s: got %v, want %q", tc.root, err, tc.want)
+		}
+		if len(res) != 0 {
+			t.Errorf("root %s: %d results", tc.root, len(res))
+		}
+	}
+	if now, err := os.Lstat(dest); err != nil || !os.SameFile(fi, now) {
+		t.Errorf("a refused run touched the quarantined file: %v", err)
+	}
 }

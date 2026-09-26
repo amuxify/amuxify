@@ -21,22 +21,62 @@ var Place = PlaceNoClobber
 var CopyData = func(dst io.Writer, src io.Reader) (int64, error) { return io.Copy(dst, src) }
 
 // MoveNoClobber moves src to dest without ever replacing an existing file,
-// on the same filesystem or across filesystems. On one filesystem it is
-// PlaceNoClobber. Across filesystems, where link and rename fail with EXDEV,
-// it creates dest with O_CREATE|O_EXCL (so a file or a symlink already at
-// dest is refused and never followed), copies the bytes, fsyncs, reads dest
-// back and compares its SHA-256 with the hash of the bytes copied, checks
-// that src is still the file it opened, and only then removes src. On any
-// failure the partial copy is removed and src is left untouched. The copy
-// is created with mode 0600. It is used by quarantine, whose directory
-// usually sits on another filesystem than the media tree; output placement
-// keeps using PlaceNoClobber and stays on one filesystem (guarantee 2).
+// on the same filesystem or across filesystems. src must be a regular file:
+// it is checked with Lstat first, so a symlink is never followed, whichever
+// way the move runs (guarantee 3). On one filesystem it is PlaceNoClobber,
+// followed by a check that the entry now at dest is the very file src was
+// before the move; link(2) follows a symlink source on some systems, so a
+// symlink swapped into src between the check and the link would otherwise
+// leave a hard link to the link's target at dest. When the check fails an
+// error is returned, and the entry at dest is removed only when removing it
+// cannot delete the last name of any file: when it is a symlink, or a
+// regular file that still has another name, which is what a hard link to a
+// symlink's target is. A regular file whose only name is dest is left in
+// place, because on a filesystem whose inode numbers are not stable across
+// a rename (some FUSE, CIFS and union mounts) the rename fallback of
+// PlaceNoClobber lands the original file at dest under a new number, and
+// removing it would delete the only copy of the media. Across filesystems,
+// where link and rename fail with EXDEV, it creates dest with
+// O_CREATE|O_EXCL (so a file or a symlink already at dest is refused and
+// never followed), copies the bytes, fsyncs, reads dest back and compares
+// its SHA-256 with the hash of the bytes copied, checks that src is still
+// the file it opened, and only then removes src. On any failure the partial
+// copy is removed and src is left untouched. The copy is created with mode
+// 0600. It is used by quarantine, whose directory usually sits on another
+// filesystem than the media tree; output placement keeps using
+// PlaceNoClobber and stays on one filesystem (guarantee 2).
 func MoveNoClobber(src, dest string) error {
-	err := Place(src, dest)
-	if err == nil || !errors.Is(err, syscall.EXDEV) {
+	lfi, err := os.Lstat(src)
+	if err != nil {
 		return err
 	}
-	return copyThenRemove(src, dest)
+	if !lfi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file; not moved", src)
+	}
+	err = Place(src, dest)
+	if err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			return copyThenRemove(src, dest)
+		}
+		return err
+	}
+	now, err := os.Lstat(dest)
+	if err != nil {
+		return fmt.Errorf("%s changed during the move: %v", src, err)
+	}
+	if now.Mode().IsRegular() && os.SameFile(lfi, now) {
+		return nil
+	}
+	// The entry at dest is not the file that was checked. A symlink is
+	// removed (only the link itself goes), and so is a regular file that
+	// still has another name, since dest then holds a hard link to a file
+	// that keeps its own name. A regular file with a single name and
+	// anything else, such as a directory, is left where it is.
+	if now.Mode()&os.ModeSymlink != 0 || (now.Mode().IsRegular() && Nlink(now) >= 2) {
+		_ = os.Remove(dest)
+		return fmt.Errorf("%s changed during the move; the entry placed at %s was discarded", src, dest)
+	}
+	return fmt.Errorf("%s changed during the move; the entry placed at %s was left in place", src, dest)
 }
 
 // identity is the device and inode pair that names a file independently of

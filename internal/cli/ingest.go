@@ -49,6 +49,21 @@ func validateIngestOpts(o *ingestOpts, cmd string, args []string) string {
 	return ""
 }
 
+// checkQuarantineRoots refuses a run whose quarantine directory is one of
+// the roots or holds one, before any tool runs; the message is a usage
+// error. It returns "" when fine, and always when quarantine is empty.
+func checkQuarantineRoots(cmd, quarantine string, paths []string) string {
+	if quarantine == "" {
+		return ""
+	}
+	for _, p := range paths {
+		if err := scan.CheckQuarantineRoot(p, quarantine); err != nil {
+			return cmd + ": " + report.Sanitize(err.Error())
+		}
+	}
+	return ""
+}
+
 // validateIngestEnums checks the --verify and --hardlinks values; hook uses
 // it on its own because its paths come from the environment, not argv.
 func validateIngestEnums(o *ingestOpts, cmd string) string {
@@ -118,6 +133,11 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 	}
 	if msg := validateIngestOpts(&o, "ingest", fs.Args()); msg != "" {
 		return g.usageErr("%s", msg)
+	}
+	if !g.DryRun {
+		if msg := checkQuarantineRoots("ingest", o.quarantine.resolve(g.StateDir), fs.Args()); msg != "" {
+			return g.usageErr("%s", msg)
+		}
 	}
 	t, err := g.setup(!g.DryRun)
 	if err != nil {

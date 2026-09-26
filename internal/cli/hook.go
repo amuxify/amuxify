@@ -91,6 +91,11 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 		fmt.Fprintf(logw, "amuxify hook %s: skipping, %s\n", a, report.Sanitize(job.Skip))
 		return hook.ExitCode(a, report.Pass, failOn, hook.Skipped)
 	}
+	if !g.DryRun {
+		if msg := checkQuarantineRoots("hook "+string(a), o.quarantine.resolve(g.StateDir), job.Paths); msg != "" {
+			return usage("%s", msg)
+		}
+	}
 	t, err := g.setup(!g.DryRun)
 	if err != nil {
 		return usage("%v", err)
