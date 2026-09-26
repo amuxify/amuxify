@@ -80,6 +80,57 @@ cp clean.mkv hard_a.mkv; ln hard_a.mkv hard_b.mkv
 ln -s clean.mkv link.mkv
 # 16. Double extension.
 cp clean.mkv "double.mkv.exe"
+# 17. Conforming Matroska: clean.mkv with tags, provenance and title removed, so
+#     ingest's clean route reports NOTHING_TO_CLEAN.
+cp clean.mkv conforming.mkv
+mkvpropedit -q conforming.mkv --tags all: --edit info --set muxing-application= --set writing-application= --delete date --delete title >/dev/null || true
+# 18. Audio-only and subtitle-only Matroska, and an MP3, for the clean route.
+mkvmerge -q -o audio.mka --language 0:eng audio_eng.m4a >/dev/null || true
+mkvmerge -q -o subs.mks --language 0:eng subs_clean.srt >/dev/null || true
+ff -f lavfi -i sine=frequency=440:sample_rate=48000 -t 4 -c:a mp3 -metadata title="Tone" sample.mp3
+# 19. Nested tree for mirroring under --hardlinks copy and --quarantine.
+mkdir -p nested/deep
+cp clean.mkv nested/deep/clean.mkv
+# 20. Kodi NFO files.
+mkdir -p kodi scene
+cat > kodi/movie.nfo <<'EOF'
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<movie>
+  <title>Sample Movie</title>
+  <plot>A short test film with no links in the text.</plot>
+  <uniqueid type="imdb" default="true">tt0120616</uniqueid>
+  <thumb aspect="poster" preview="https://image.tmdb.org/t/p/w500/poster.jpg">https://image.tmdb.org/t/p/original/poster.jpg</thumb>
+  <fanart><thumb preview="https://image.tmdb.org/t/p/w780/fanart.jpg">https://image.tmdb.org/t/p/original/fanart.jpg</thumb></fanart>
+  <trailer>plugin://plugin.video.youtube/?action=play_video&amp;videoid=abc123</trailer>
+  <actor><name>Some Actor</name><role>Lead</role><thumb>https://image.tmdb.org/t/p/w500/actor.jpg</thumb></actor>
+</movie>
+EOF
+cat > kodi/tvshow.nfo <<'EOF'
+<tvshow>
+  <title>Sample Show</title>
+  <plot>Episodes about testing.</plot>
+  <thumb aspect="poster" season="1" type="season">https://artworks.thetvdb.com/banners/seasons/1-1.jpg</thumb>
+  <episodeguide>{"tvdb":"121361","tmdb":"1399"}</episodeguide>
+</tvshow>
+EOF
+cat > kodi/episode.nfo <<'EOF'
+<episodedetails>
+  <title>Pilot</title>
+  <season>1</season>
+  <episode>1</episode>
+  <thumb>https://artworks.thetvdb.com/banners/episodes/121361/1.jpg</thumb>
+</episodedetails>
+EOF
+printf 'https://www.themoviedb.org/movie/11-star-wars\n' > kodi/url.nfo
+printf '<movie><title>Mixed</title><plot>Plain plot.</plot></movie>\nhttps://www.themoviedb.org/movie/11\n' > kodi/mixed.nfo
+printf '<movie><title>Bad Plot</title><plot>Get more at http://tracker.example/x</plot></movie>\n' > kodi/badplot.nfo
+printf '<movie><title>Broken</title><plot>unterminated\n' > kodi/broken.nfo
+# 21. Scene NFO files: CRLF, CP437 box drawing bytes, release notes.
+printf '\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\r\n\xb0\xb1\xb2 SAMPLE.GROUP \xb2\xb1\xb0\r\n\r\nRelease notes: 1080p, x264, 5.1 audio.\r\nGreets to everyone.\r\n' > scene/plain.nfo
+printf '\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\r\n\xb0\xb1\xb2 SAMPLE.GROUP \xb2\xb1\xb0\r\n\r\nVisit www.example-group.to for more.\r\n' > scene/links.nfo
+printf '\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\r\n\xb0\xb1\xb2 SAMPLE.GROUP \xb2\xb1\xb0\r\n\r\nhttps://www.imdb.com/title/tt0120616/\r\n' > scene/imdb.nfo
+# 22. Text sidecar with links (LINK_IN_SIDECAR is NFO-only in 0.3; this stays SIDECAR_OK).
+printf 'see https://example.com/a and http://example.org/b\n' > links.txt
 
 rm -f video.h264 audio_*.m4a subs_*.srt chapters.txt tags.xml fake.ttf payload.bin real.ttf
 echo "fixtures written to $out"
