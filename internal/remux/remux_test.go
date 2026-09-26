@@ -1861,6 +1861,38 @@ func TestReplacedOwnLeavesTheEntry(t *testing.T) {
 	}
 }
 
+// When the source could not be examined when the remux began, the check
+// says so instead of claiming the file was replaced, and a file that really
+// was replaced keeps its own message.
+func TestSourceUnchangedNilInfoMessage(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.mkv")
+	if err := os.WriteFile(p, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := sourceUnchanged(p, nil)
+	if err == nil {
+		t.Fatal("a nil FileInfo was accepted")
+	}
+	if want := p + " could not be examined when the remux began; nothing was placed"; err.Error() != want {
+		t.Fatalf("message %q, want %q", err.Error(), want)
+	}
+	was, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceUnchanged(p, was); err != nil {
+		t.Fatalf("unchanged file refused: %v", err)
+	}
+	if err := os.WriteFile(p, []byte("ab"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = sourceUnchanged(p, was)
+	if err == nil || !strings.Contains(err.Error(), "was replaced while it was being rebuilt") || strings.Contains(err.Error(), "could not be examined") {
+		t.Fatalf("replaced file: %v", err)
+	}
+}
+
 // finding returns the first finding of fr with the given code.
 func finding(fr report.FileResult, code string) (report.Finding, bool) {
 	for _, f := range fr.Findings {
