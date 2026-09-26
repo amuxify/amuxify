@@ -208,6 +208,35 @@ func TestMoveNoClobberCrossDeviceCopyFailureRemovesPartial(t *testing.T) {
 	}
 }
 
+// A copy that writes the right number of bytes but not the right bytes is
+// caught by the hash comparison: the seam reads all of src, so the hasher
+// sees the true content, and writes a same-length corruption to dst.
+func TestMoveNoClobberCrossDeviceCorruptCopyIsRefused(t *testing.T) {
+	forceCrossDevice(t)
+	orig := CopyData
+	CopyData = func(dst io.Writer, src io.Reader) (int64, error) {
+		b, err := io.ReadAll(src)
+		if err != nil {
+			return 0, err
+		}
+		bad := []byte(strings.Repeat("x", len(b)))
+		n, err := dst.Write(bad)
+		return int64(n), err
+	}
+	t.Cleanup(func() { CopyData = orig })
+	from, to := t.TempDir(), t.TempDir()
+	src := filepath.Join(from, "src.mkv")
+	dest := filepath.Join(to, "dest.mkv")
+	writeFile(t, src, "payload", 0o644)
+	err := MoveNoClobber(src, dest)
+	if err == nil || !strings.Contains(err.Error(), "does not hash") {
+		t.Fatalf("a corrupt copy was accepted: %v", err)
+	}
+	if exists(dest) || readFile(t, src) != "payload" {
+		t.Error("corrupt copy left behind or source changed")
+	}
+}
+
 // A short copy that reports no error is still caught by the size check.
 func TestMoveNoClobberCrossDeviceShortCopyIsRefused(t *testing.T) {
 	forceCrossDevice(t)

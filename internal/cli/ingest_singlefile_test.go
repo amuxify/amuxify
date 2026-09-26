@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/amuxify/amuxify/internal/fsutil"
+	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/testutil"
 )
 
@@ -27,7 +28,9 @@ func TestIngestSingleFileQuarantine(t *testing.T) {
 	}
 	check := func(t *testing.T, code int, out, errb, src, dest string) {
 		t.Helper()
-		if !strings.Contains(out, "QUARANTINED") || !strings.Contains(out, "moved to "+dest) || strings.Contains(out, "quarantine failed") {
+		// The human report escapes the bidi character in the name, so the
+		// expected path goes through the same sanitiser.
+		if !strings.Contains(out, "QUARANTINED") || !strings.Contains(out, "moved to "+report.Sanitize(dest)) || strings.Contains(out, "quarantine failed") {
 			t.Errorf("exit %d\n%s%s", code, out, errb)
 		}
 		if _, err := os.Lstat(dest); err != nil {
@@ -144,6 +147,16 @@ func TestUnreadableDirectoryFailsTheRun(t *testing.T) {
 			t.Errorf("exit %d, want 3\n%s%s", code, out, errb)
 		}
 	})
+	t.Run("remux dry run keeps the readable files", func(t *testing.T) {
+		root, locked := mk(t, true)
+		code, out, errb := run(t, "--dry-run", "remux", root)
+		if code != 3 || !strings.Contains(out, "ERROR "+root+": cannot read "+locked) {
+			t.Errorf("exit %d, want 3 with an ERROR line naming %s\n%s%s", code, locked, out, errb)
+		}
+		if !strings.Contains(out, filepath.Join(root, "a", "ok.nfo")) {
+			t.Errorf("readable file dropped:\n%s", out)
+		}
+	})
 	t.Run("unreadable root", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "job")
 		write(t, filepath.Join(root, "payload.url"), "x")
@@ -199,7 +212,7 @@ func TestHookQuarantineAcrossFilesystems(t *testing.T) {
 	dest := filepath.Join(state, "quarantine", "x.url")
 	hookEnv(t, jobEnv("sonarr", src)...)
 	code, out, errb := run(t, "--state-dir", state, "hook", "sonarr", "--quarantine")
-	if code != 1 || !strings.Contains(out, "moved to "+dest) {
+	if code != 1 || !strings.Contains(out, "moved to "+report.Sanitize(dest)) {
 		t.Fatalf("exit %d\n%s%s", code, out, errb)
 	}
 	if b, err := os.ReadFile(dest); err != nil || string(b) != body {
