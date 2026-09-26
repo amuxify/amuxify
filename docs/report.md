@@ -322,5 +322,5 @@ on its own.
 | `XATTR` | PASS, or WARN when an attribute could not be removed | clean | Extended attributes were removed. |
 | `NOTHING_TO_CLEAN` | PASS | clean | The file was already clean or carries no writable metadata. |
 | `CLEAN_FAIL` | FAIL | clean | A cleaning step failed; the source is untouched. |
-| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
+| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
 | `TRACK`, `ATTACHMENT` | reserved | remux | Declared, never emitted. |
