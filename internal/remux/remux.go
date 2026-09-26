@@ -116,9 +116,12 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	if r.tier() == "none" && r.InPlace {
 		return nil, fmt.Errorf("refusing --in-place together with verify tier none")
 	}
-	results, err := r.Scanner.ScanPath(ctx, abs)
-	if err != nil {
-		return nil, err
+	// A tree with an unreadable corner still yields every readable file;
+	// the scan error naming the corner is returned after them so the run is
+	// reported as FAIL at run level, the same as scan, clean and ingest do.
+	results, scanErr := r.Scanner.ScanPath(ctx, abs)
+	if scanErr != nil && len(results) == 0 {
+		return nil, scanErr
 	}
 	var out []report.FileResult
 	for _, sc := range results {
@@ -131,7 +134,7 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, scanErr
 }
 
 // RemuxScanned remuxes one already scanned file. r.Scanner may be nil.
