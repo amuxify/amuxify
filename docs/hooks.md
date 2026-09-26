@@ -14,8 +14,9 @@ count line) move to stderr. The hook adapters add `--json-out <file>`, which
 writes the JSON report to a file while stdout keeps the lines the caller logs.
 A skipped run (a status that is not successful, an event that carries no
 files, or a category that does not match `--category`) never starts ingest:
-it writes only the skipping line to stderr, exits 0 (95 for NZBGet), and
-produces no JSON document and no `--json-out` file.
+it writes only the skipping line, to stdout normally and to stderr under
+`--json`, exits 0 (95 for NZBGet), and produces no JSON document and no
+`--json-out` file either way.
 
 ## The adapters
 
