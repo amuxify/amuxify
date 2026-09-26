@@ -38,16 +38,25 @@ func validateIngestOpts(o *ingestOpts, cmd string, args []string) string {
 	if len(args) == 0 {
 		return cmd + ": at least one path is required"
 	}
-	if o.tier != "" && o.tier != "quick" && o.tier != "full" && o.tier != "none" {
-		return cmd + ": --verify must be quick, full or none"
-	}
-	if o.hardlinks != "" && o.hardlinks != "skip" && o.hardlinks != "break" && o.hardlinks != "copy" {
-		return cmd + ": --hardlinks must be skip, break or copy"
+	if msg := validateIngestEnums(o, cmd); msg != "" {
+		return msg
 	}
 	if o.quarantine.set && o.quarantine.dir == "" {
 		if _, err := os.Lstat(args[0]); err != nil {
 			return fmt.Sprintf("%s: %q does not exist; if it was meant as the quarantine directory write --quarantine=%s", cmd, args[0], args[0])
 		}
+	}
+	return ""
+}
+
+// validateIngestEnums checks the --verify and --hardlinks values; hook uses
+// it on its own because its paths come from the environment, not argv.
+func validateIngestEnums(o *ingestOpts, cmd string) string {
+	if o.tier != "" && o.tier != "quick" && o.tier != "full" && o.tier != "none" {
+		return cmd + ": --verify must be quick, full or none"
+	}
+	if o.hardlinks != "" && o.hardlinks != "skip" && o.hardlinks != "break" && o.hardlinks != "copy" {
+		return cmd + ": --hardlinks must be skip, break or copy"
 	}
 	return ""
 }
@@ -119,9 +128,4 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 		return g.usageErr("%v", err)
 	}
 	return g.emit(g.runIngest(ctx, in, fs.Args()))
-}
-
-// hook is a placeholder until the hook adapters are built.
-func (g *Global) hook(ctx context.Context, args []string) int {
-	return g.usageErr("hook: not available in this build")
 }

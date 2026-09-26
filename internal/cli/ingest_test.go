@@ -107,8 +107,8 @@ func TestIngestUsage(t *testing.T) {
 		{"verify none flag", []string{"ingest", "--verify", "none", "--remove-blocked-sidecars", dir}, "ingest: in-place writes require verification; verify tier none is refused (from --verify)"},
 		{"verify none profile", []string{"--profile", noneProfile, "ingest", "--remove-blocked-sidecars", dir}, "ingest: in-place writes require verification; verify tier none is refused (from profile " + noneProfile + ")"},
 		{"quarantine dir as positional", []string{"ingest", "--quarantine", missing, dir}, fmt.Sprintf("ingest: %q does not exist; if it was meant as the quarantine directory write --quarantine=%s", missing, missing)},
-		{"hook stub", []string{"hook", "sabnzbd", dir}, "hook: not available in this build"},
-		{"hook stub no args", []string{"hook"}, "hook: not available in this build"},
+		{"hook without its environment", []string{"hook", "sabnzbd"}, "hook sabnzbd: not started by SABnzbd"},
+		{"hook without an adapter", []string{"hook"}, "hook: adapter required"},
 		{"unknown flag", []string{"ingest", "--no-such-flag", dir}, "flag provided but not defined"},
 	}
 	for _, tc := range cases {
