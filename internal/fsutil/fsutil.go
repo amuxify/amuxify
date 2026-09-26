@@ -158,8 +158,37 @@ func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dest)
+	if beforeRename != nil {
+		beforeRename(tmp, dest)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	if created == nil {
+		return nil
+	}
+	// The rename used the temp name once more after the descriptor was
+	// closed, so an entry swapped onto that name in between is what now
+	// sits at dest. The window needs write access to the directory and is
+	// not closable without an exchange rename, which is not portable, so
+	// the outcome is checked afterwards instead: the entry at dest must be
+	// the file this run created. A foreign entry is reported and left where
+	// it is, because the file it replaced is already gone and removing the
+	// entry could delete the only name of some other file.
+	now, err := os.Lstat(dest)
+	if err != nil {
+		return fmt.Errorf("%s after the rename: %v", dest, err)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+		return fmt.Errorf("the entry now at %s is not the file this run created; the file it replaced is gone and the entry was left in place", dest)
+	}
+	return nil
 }
+
+// beforeRename, when set by a test, runs after the descriptor of tmp is
+// closed and before the rename, which is the one window in which the temp
+// name is used again by ReplaceInPlaceOwn. It is nil in production.
+var beforeRename func(tmp, dest string)
 
 // Fsync flushes a written file to stable storage.
 func Fsync(path string) error {
