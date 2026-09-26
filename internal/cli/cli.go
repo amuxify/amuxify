@@ -207,6 +207,18 @@ func (g *Global) setup(requireWriter bool) (*tools, error) {
 	}, nil
 }
 
+// streaming reports whether per-file lines go out as files finish.
+func (g *Global) streaming() bool { return !g.JSON && !g.Quiet }
+
+// progress prints one result immediately in human mode.
+func (g *Global) progress(fr report.FileResult) {
+	if g.streaming() {
+		fr.WriteHuman(g.stdout, g.Verbose)
+	}
+}
+
+// emit finishes the run: the whole JSON document, or just the summary line
+// because the per-file lines were already streamed.
 func (g *Global) emit(s *report.Summary) int {
 	s.Close()
 	if g.JSON {
@@ -214,7 +226,7 @@ func (g *Global) emit(s *report.Summary) int {
 			fmt.Fprintln(g.stderr, "amuxify:", err)
 		}
 	} else if !g.Quiet {
-		s.WriteHuman(g.stdout, g.Verbose)
+		s.WriteHumanTail(g.stdout)
 	}
 	return report.ExitCode(s.Verdict)
 }
@@ -313,6 +325,7 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 		sc.Quarantine = ""
 	}
 	s := report.NewSummary("amuxify", Version, "scan", t.profile.Name)
+	sc.Progress = func(r scan.Result) { g.progress(r.File) }
 	for _, p := range fs.Args() {
 		res, err := sc.ScanPath(ctx, p)
 		for _, r := range res {
@@ -365,7 +378,7 @@ func (g *Global) remux(ctx context.Context, args []string) int {
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile, VerifyTier: "none"}
 	rm := &remux.Remuxer{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Scanner: sc, Profile: t.profile,
 		OutputRoot: *output, InPlace: *inPlace, Hardlinks: *hardlinks, VerifyTier: *tier, Force: *force,
-		DryRun: g.DryRun, Original: *original, Timeout: g.Timeout}
+		DryRun: g.DryRun, Original: *original, Timeout: g.Timeout, Progress: g.progress}
 	s := report.NewSummary("amuxify", Version, "remux", t.profile.Name)
 	for _, p := range fs.Args() {
 		res, err := rm.RemuxPath(ctx, p)
@@ -401,7 +414,7 @@ func (g *Global) clean(ctx context.Context, args []string) int {
 		return g.usageErr("mkvpropedit not found; run 'amuxify doctor'")
 	}
 	cl := &clean.Cleaner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		DryRun: g.DryRun, RemoveBlockedSidecars: *removeSidecars, StripAudioTags: *audioTags, Hardlinks: *hardlinks, Timeout: g.Timeout}
+		DryRun: g.DryRun, RemoveBlockedSidecars: *removeSidecars, StripAudioTags: *audioTags, Hardlinks: *hardlinks, Timeout: g.Timeout, Progress: g.progress}
 	s := report.NewSummary("amuxify", Version, "clean", t.profile.Name)
 	for _, p := range fs.Args() {
 		res, err := cl.CleanPath(ctx, p)

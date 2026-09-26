@@ -57,6 +57,8 @@ type Remuxer struct {
 	DryRun     bool
 	Original   string // original language hint for default-audio selection
 	Timeout    time.Duration
+	// Progress, when set, receives each result as soon as the file is done.
+	Progress func(report.FileResult)
 }
 
 func (r *Remuxer) hardlinks() string {
@@ -115,7 +117,11 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		out = append(out, r.remuxScanned(ctx, sc, inputRoot, outRoot))
+		fr := r.remuxScanned(ctx, sc, inputRoot, outRoot)
+		if r.Progress != nil {
+			r.Progress(fr)
+		}
+		out = append(out, fr)
 	}
 	return out, nil
 }
