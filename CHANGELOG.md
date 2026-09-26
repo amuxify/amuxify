@@ -66,15 +66,16 @@ All notable changes to amuxify will be documented in this file.
   A quarantine move on the same filesystem now refuses a source that is not
   a regular file and checks that the entry it placed is the very file it
   started with, so a symlink swapped in during the move can never leave a
-  hard link to its target in the quarantine tree. A quarantine directory
-  that sits inside the scanned tree is skipped by the walk, and a path that
-  is the quarantine directory or lies inside it is refused as a usage error
-  before anything runs, so a file is quarantined once rather than moved a
-  level deeper on every run; both checks compare directories by identity,
-  so another spelling or letter case of the same directory does not defeat
-  them. The human report sanitiser and the `BIDI_NAME`
-  check now cover every Unicode format character, including U+061C and the
-  tag characters, rather than a fixed list of code points.
+  hard link to its target in the quarantine tree; an entry that fails that
+  check is removed only when it is not the last name of a file. A
+  quarantine directory that sits inside the scanned tree is skipped by the
+  walk, and a path that is the quarantine directory or lies inside it is
+  refused as a usage error before anything runs, so a file is quarantined
+  once rather than moved a level deeper on every run; both checks compare
+  directories by identity, so another spelling or letter case of the same
+  directory does not defeat them. The human report sanitiser and the
+  `BIDI_NAME` check now cover every Unicode format character, including
+  U+061C and the tag characters, rather than a fixed list of code points.
 
 ## 0.2.0
 

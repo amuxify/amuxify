@@ -277,9 +277,12 @@ func TestMoveNoClobberSourceSwappedForSymlinkBeforeLink(t *testing.T) {
 	onlyFiles(t, to)
 }
 
-// The same race with a different regular file swapped into src: the entry
-// placed at dest is not the file that was checked, so it is discarded and
-// the move is reported as failed rather than quietly moving the wrong file.
+// The same race with a different regular file renamed onto src, as someone
+// who can already rename a victim onto the path might do: the entry placed
+// at dest is not the file that was checked, so the move is reported as
+// failed rather than quietly accepted. After the link and the unlink of
+// src, dest is that file's only name, so it is kept rather than removed:
+// the discard must never turn a failed move into a delete.
 func TestMoveNoClobberSourceSwappedForOtherFileBeforeLink(t *testing.T) {
 	from, to := t.TempDir(), t.TempDir()
 	src := filepath.Join(from, "src.mkv")
@@ -287,22 +290,56 @@ func TestMoveNoClobberSourceSwappedForOtherFileBeforeLink(t *testing.T) {
 	writeFile(t, src, "payload", 0o644)
 	orig := Place
 	Place = func(s, d string) error {
-		other := filepath.Join(from, "other.mkv")
-		writeFile(t, other, "swapped in", 0o644)
-		if err := os.Rename(other, s); err != nil {
+		victim := filepath.Join(from, "victim.mkv")
+		writeFile(t, victim, "renamed onto src", 0o644)
+		if err := os.Rename(victim, s); err != nil {
 			t.Fatal(err)
 		}
 		return PlaceNoClobber(s, d)
 	}
 	t.Cleanup(func() { Place = orig })
 	err := MoveNoClobber(src, dest)
-	if err == nil || !strings.Contains(err.Error(), "changed during the move") {
-		t.Fatalf("got %v, want a refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "changed during the move") || !strings.Contains(err.Error(), "left in place") {
+		t.Fatalf("got %v, want a refusal that keeps the entry", err)
 	}
-	if exists(dest) {
-		t.Error("the swapped-in file was accepted at dest")
+	if !exists(dest) || readFile(t, dest) != "renamed onto src" {
+		t.Error("the only name of the renamed file was removed")
 	}
-	onlyFiles(t, to)
+	if n := nlink(t, dest); n != 1 {
+		t.Errorf("dest has %d links, want 1", n)
+	}
+	onlyFiles(t, to, "dest.mkv")
+}
+
+// PlaceNoClobber falls back to rename where link is refused, and on a
+// filesystem whose inode numbers are not stable across a rename (a union or
+// network mount that derives them from the path) the file then sits at dest
+// under a new identity. The move is reported as failed, but the file, whose
+// only name is now dest, must be left there: amuxify does not delete media.
+// The Place seam models such a filesystem by giving the file a new identity
+// on its way to dest.
+func TestMoveNoClobberKeepsSoleNameWhenIdentityChanges(t *testing.T) {
+	from, to := t.TempDir(), t.TempDir()
+	src := filepath.Join(from, "src.mkv")
+	dest := filepath.Join(to, "dest.mkv")
+	writeFile(t, src, "payload", 0o644)
+	orig := Place
+	Place = func(s, d string) error {
+		writeFile(t, d, readFile(t, s), 0o644)
+		return os.Remove(s)
+	}
+	t.Cleanup(func() { Place = orig })
+	err := MoveNoClobber(src, dest)
+	if err == nil || !strings.Contains(err.Error(), "changed during the move") || !strings.Contains(err.Error(), "left in place") {
+		t.Fatalf("got %v, want a refusal that keeps the entry", err)
+	}
+	if !exists(dest) || readFile(t, dest) != "payload" {
+		t.Fatal("the moved file was deleted")
+	}
+	if exists(src) {
+		t.Error("source still present")
+	}
+	onlyFiles(t, to, "dest.mkv")
 }
 
 // A Place that reports success but leaves nothing at dest, or leaves a
