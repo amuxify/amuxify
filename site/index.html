@@ -80,7 +80,7 @@ that are a valid video and a valid ZIP, PE, ELF or script at the same time.</li>
 <li><strong>Purchase identifiers</strong> in MP4 and M4V metadata atoms (account name, purchase date, store IDs) and XMP blocks.</li>
 <li><strong>Dangerous sidecars</strong> next to the video: <code>.lnk</code>, <code>.url</code>, <code>.exe</code>, <code>.scr</code>, <code>.bat</code>, <code>.ps1</code> and friends.</li>
 <li><strong>Mislabeled and broken files</strong>: the extension does not match the content, the container is
-truncated, the duration is wrong, or the file does not decode.</li>
+truncated, it reports no duration, or it does not decode.</li>
 <li><strong>Filenames</strong> with right-to-left override or zero-width characters, and double extensions.</li>
 </ul>
 <p>Then it fixes what a policy allows it to fix: strips metadata and extended attributes, drops commentary
@@ -182,8 +182,8 @@ before the library:</p>
 <ul>
 <li><strong>Download clients:</strong> SABnzbd, NZBGet, qBittorrent, Transmission, Deluge. Call amuxify from
 the post-processing script and use the exit code to fail the job.</li>
-<li><strong>Managers:</strong> Sonarr, Radarr, Lidarr-style custom scripts. Run on import and reject files
-that <code>FAIL</code> or <code>BLOCK</code>.</li>
+<li><strong>Managers:</strong> Sonarr and Radarr custom scripts. Run on import and reject files that
+<code>FAIL</code> or <code>BLOCK</code>.</li>
 <li><strong>Media servers:</strong> Plex, Jellyfin, Emby, Kodi. They only ever see files that passed.</li>
 <li><strong>Storage:</strong> TrueNAS, Unraid, Synology and any NFS or SMB share. Ownership, mode and mtime
 are preserved in place, hardlinked files are skipped instead of broken, and the tool refuses to run as root
