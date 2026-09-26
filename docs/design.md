@@ -42,6 +42,9 @@ are not carried in this tree; they are in the `v0.1.1` tag.
 - `internal/policy` profiles and the pure `Decide()` function.
 - `internal/verify` stream hashes and decode checks.
 - `internal/scan`, `internal/remux`, `internal/clean`, `internal/doctor`.
+- `internal/ingest` composes scan, remux and clean into one in-place pass with one result per file; the routing decision is a pure function.
+- `internal/hook` maps a download client's or media manager's environment to an ingest job and a run verdict to that caller's exit code; it runs no tools.
+- `internal/testutil` locates tools and fixtures for tests and skips cleanly when they are missing.
 
 ## Decision flow for remux
 
@@ -53,6 +56,34 @@ equality (packet hash, or decoded-frame hash across container families) → head
 and tail decode (or full) → fsync → place without clobber, or replace in place
 preserving identity.
 
+## Decision flow for ingest
+
+ingest is scan plus one of remux or clean, never both on the same file, and a
+hard-linked file is never edited in place. After scan, a media file that is not
+BLOCK (and not FAIL unless `--force` is given) goes through `policy.Decide` and
+then the routing rules below, checked in this order. The first matching rule
+wins; the route and its reasons are recorded as the `ROUTE` finding.
+
+| # | Condition | Route | Findings added | Reason text |
+|---|---|---|---|---|
+| 1 | the decision contains a finding of severity FAIL or worse (`NO_VIDEO`) and no `--force` | skip | the decision's findings | `decision failed` |
+| 2 | the scan verdict is FAIL and `--force` is given | remux | none here; remux adds them | `scan verdict FAIL; rebuilt because --force was given` |
+| 3 | more than one hard link and the file is audio or subtitle | skip | `HARDLINKED` WARN plus the decision's findings | `hard-linked audio or subtitle file` |
+| 4 | more than one hard link and the hard-link mode is `skip` | skip | `HARDLINKED` WARN plus the decision's findings | `hard-linked` |
+| 5 | more than one hard link and the mode is `break` or `copy` | remux | none | `hard-linked; rebuilt rather than edited in place (safety.hardlinks = <mode>)` |
+| 6 | the file is audio or subtitle | clean | the decision's findings | `audio or subtitle container; metadata only` |
+| 7 | the extension is not `mkv` or the container is not Matroska | remux | none | `container <name> is rebuilt as Matroska` |
+| 8 | scan reported `MKV_WARNING` | remux | none | `mkvmerge reported warnings; rebuilding` |
+| 9 | tracks, flags, languages, attachments or chapters differ from the decision | remux | none | the list of differences |
+| 10 | otherwise | clean | the decision's findings | `tracks, flags, attachments and chapters already match the profile` |
+
+The clean route decodes the file first (head and tail for `quick`, everything for
+`full`) because mkvpropedit edits headers in place; a file that does not decode is
+`DECODE_FAIL` and left untouched. The remux route does not decode the input twice:
+the scanner runs without a verify tier and the remuxer verifies its output. The
+same file can take different routes under different profiles; `multi.mkv` in the
+fixture corpus is cleaned under `homelab` and rebuilt under `archive`.
+
 ## Why not ffmpeg for Matroska
 
 ffmpeg's Matroska muxer drops IETF language tags, reorders and sometimes drops
@@ -63,6 +94,8 @@ implementation. ffmpeg still does the MP4, MOV and AVI metadata rewrite for
 
 ## Roadmap
 
-0.3: `ingest` (scan + remux + clean in one call), hook adapters for SABnzbd,
-NZBGet, Sonarr and Radarr, frozen JSON schema. 0.4: Windows, macOS
-notarization, parallel full verification. 1.0: fixture matrix complete.
+0.3 (this release): `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and
+Radarr, frozen report schema `amuxify.report/1`, Kodi NFO awareness, a test for
+every guarantee. 0.4: Windows, macOS notarization, parallel full verification, a
+watch mode for set-ups where the hook cannot run inside the client container.
+1.0: fixture matrix complete.

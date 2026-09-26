@@ -32,11 +32,25 @@ source before the output is placed.
 | `amuxify scan <path>...` | Inspect files and sidecars, report findings, verdict per file | nothing (unless `--quarantine`) |
 | `amuxify remux <path>...` | Rebuild any supported container into a sanitized MKV with mkvmerge, verify, place | `<root>__remuxed/` or `--output`, or `--in-place` |
 | `amuxify clean <path>...` | Strip metadata, provenance atoms and extended attributes in place, tracks untouched | the file, after stream-hash verification |
+| `amuxify ingest <path>...` | Scan, then rebuild into a verified MKV or clean in place, one pass per file | the file in place, after verification |
+| `amuxify hook sabnzbd\|nzbget\|sonarr\|radarr` | Run ingest from a download client or media manager script and exit the way that caller expects | as ingest |
 | `amuxify doctor` | Check tools, version floors, profile and environment | nothing |
 | `amuxify profile [show <name>]` | List or print built-in profiles | nothing |
 
 Input containers: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV.
 Output is always Matroska written by mkvmerge. ffmpeg never writes an MKV.
+
+## Ingest
+
+`amuxify [global flags] ingest [flags] <path>...` is scan, then remux or clean, in one
+pass per file, in place. Every file under each path is scanned first. A video file that
+is already a Matroska file whose tracks, flags, attachments and chapters match the
+profile is cleaned in place with mkvpropedit; any other video file is rebuilt into a
+verified MKV that replaces the original. Audio and subtitle files are cleaned in place.
+Sidecars are scanned; with `--remove-blocked-sidecars` blocked ones are deleted. Files
+that scan as FAIL or BLOCK are never modified. There is no `--output` and no
+`--in-place` flag: ingest is in place by definition; `remux --output` is the
+non-destructive path and `--dry-run` shows the plan.
 
 ## Verdicts and exit status
 
@@ -107,15 +121,22 @@ amuxify drives external tools: **MKVToolNix 50+** (mkvmerge, mkvpropedit) and
 9. `BLOCK` cannot be overridden by any flag.
 10. Refuses to modify files as root unless `--allow-root`.
 
-Each guarantee has a test. Details in [docs/safety.md](docs/safety.md).
+Each guarantee has a test; [docs/safety.md](docs/safety.md) names the test next to each one.
 
 ## Unattended use
 
 amuxify never prompts. Untagged-language tracks follow `languages.und` in the
-profile (`keep`, `drop`, or `assume:<lang>`). Hook adapters for SABnzbd, NZBGet,
-Sonarr and Radarr arrive in 0.3; until then call `amuxify scan` or
-`amuxify remux --in-place` from your post-processing script and branch on the
-exit code. Examples in [docs/hooks.md](docs/hooks.md).
+profile (`keep`, `drop`, or `assume:<lang>`). `amuxify hook sabnzbd`, `nzbget`,
+`sonarr` and `radarr` read the caller's environment, run `ingest` on the finished
+download and exit the way that caller expects. Wrapper scripts, the `--fail-on`
+option and Docker notes are in [docs/hooks.md](docs/hooks.md).
+
+### Upgrading from 0.2.0
+
+The JSON report gains `schema` (`amuxify.report/1`) and, for hook runs, `hook`;
+`started` and `finished` are UTC with whole seconds; `files`, `findings` and
+`errors` are always arrays; `profile` is always present. New finding codes:
+`ROUTE`, `NFO_KODI`, `NFO_TEXT`, `LINK_IN_SIDECAR`. No flag or code was removed.
 
 ## Upgrading from 0.1.x
 
