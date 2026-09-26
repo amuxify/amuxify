@@ -138,7 +138,10 @@ stderr line with `[ERROR] `, so the per-file verdict lines land in the NZBGet
 log at the level you expect. Two consequences: `--json` is a usage error for
 this adapter (the message says to use `--json-out <file>`), and `--trace` lines
 would appear as `[ERROR]` lines in the log, so run `amuxify ingest --trace` by
-hand when you need to see the tool command lines.
+hand when you need to see the tool command lines. A stdout line that would
+begin with `[NZB]` for any other reason, for example a file name that contains
+a newline, is written as `[INFO] (not a command) [NZB] ...`, so only the
+adapter itself can hand NZBGet a command.
 
 When the run verdict is BLOCK the adapter prints `[NZB] MARK=BAD` as its last
 stdout line, whatever `--fail-on` says. NZBGet then marks the download as bad,
@@ -148,8 +151,9 @@ so a file that is merely damaged or noisy fails the job without making the arr
 re-grab the release; a BLOCK, which means an executable payload, a polyglot or
 a blocked sidecar, is exactly the case where a replacement is wanted.
 
-To keep a JSON report of each run, add `--json-out /path/to/report.json` to the
-`exec` line; the log lines are unaffected.
+To keep a JSON report of each run, add `--json-out` with a path that is new for
+each run, for example `--json-out "/reports/$NZBPP_NZBID.json"`, to the `exec`
+line; the log lines are unaffected. An existing file is never overwritten.
 
 ## Sonarr and Radarr
 
@@ -241,9 +245,11 @@ tree and leaves the original alone.
 matches; the match is case-insensitive and uses `path.Match` patterns. Sonarr
 and Radarr do not pass a category, so the flag is ignored for them.
 
-`--json-out <file>` writes the JSON report to the file in addition to whatever
-the global flags print. A write failure is reported on stderr as
-`amuxify: json-out: <error>` and does not change the exit code.
+`--json-out <file>` writes the JSON report to a new file in addition to whatever
+the global flags print. The file must not exist yet: amuxify never overwrites
+it and never follows a symlink in its place, so give each run its own path. A
+write failure is reported on stderr as `amuxify: json-out: <error>` and does
+not change the exit code.
 
 The global flags apply before the subcommand as everywhere: `--profile`,
 `--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`, `--state-dir`,
