@@ -35,11 +35,6 @@ type Ingester struct {
 	RemoveBlockedSidecars bool
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
-
-	// planned holds the destinations earlier files of a dry run would
-	// write, so a later file that maps to the same path is reported with
-	// the OUTPUT_EXISTS the live run would produce (review C33).
-	planned map[string]bool
 }
 
 // ErrVerifyNone is returned by IngestPath when the effective verify tier is none.
@@ -96,7 +91,6 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 	// which raises the run verdict to FAIL. A quarantine directory inside
 	// the tree is not entered.
 	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(in.Scanner.Quarantine)...)
-	in.planned = map[string]bool{}
 	var out []report.FileResult
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -179,11 +173,13 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 		switch route {
 		case RouteRemux:
 			sc.File = fr
+			// A dry run's collision with an earlier file of the same run
+			// (sample.mp4 and sample.avi both becoming sample.mkv) is
+			// predicted by the remuxer, which remembers what it planned.
 			fr = in.Remuxer.RemuxScanned(ctx, sc, inputRoot, outRoot)
 			if fr.Info == nil {
 				fr.Info = map[string]string{}
 			}
-			fr = in.planDestination(sc, fr)
 		case RouteClean:
 			if err := in.decode(ctx, path, sc.Info); err != nil {
 				fr.Addf(scan.CodeDecodeFail, report.Fail, "%v", err)
@@ -198,42 +194,6 @@ func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, o
 	fr.Addf(CodeRoute, report.Pass, "%s: %s", route, strings.Join(reasons, "; "))
 	fr.Info["route"] = string(route)
 	return fr
-}
-
-// planDestination makes a dry run predict the OUTPUT_EXISTS collision a live
-// run hits when two files of one run rebuild to the same destination, such as
-// sample.mp4 and sample.avi both becoming sample.mkv. The remuxer only checks
-// the disk, which a dry run never changes, so the destinations it promised
-// earlier in this run are remembered here. A later file that maps to one of
-// them gets the same result the live run gives: the scan findings, the
-// hard-link note if any, and OUTPUT_EXISTS FAIL instead of the dry-run plan.
-func (in *Ingester) planDestination(sc scan.Result, fr report.FileResult) report.FileResult {
-	if !in.Remuxer.DryRun || fr.Output == "" || !fr.Has(remux.CodeDryRun) {
-		return fr
-	}
-	if in.planned == nil {
-		in.planned = map[string]bool{}
-	}
-	dest := fr.Output
-	if !in.planned[dest] {
-		in.planned[dest] = true
-		return fr
-	}
-	out := sc.File
-	// fr was built from sc.File by appending, so the two may share one
-	// backing array; give out its own copy before adding to it.
-	out.Findings = append([]report.Finding(nil), sc.File.Findings...)
-	if out.Info == nil {
-		out.Info = map[string]string{}
-	}
-	out.Output = ""
-	for _, f := range fr.Findings {
-		if f.Code == remux.CodeHardlinked {
-			out.Add(f)
-		}
-	}
-	out.Addf(remux.CodeOutputExists, report.Fail, "%s already exists", dest)
-	return out
 }
 
 // quarantined reports whether scan moved a BLOCK file away. The scanner

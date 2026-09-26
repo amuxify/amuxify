@@ -357,8 +357,21 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		fr.Addf(CodeDryRun, report.Pass, "would rewrite without %s", strings.Join(what, ", "))
 		return
 	}
+	// The temp file is created here, empty and exclusively, before its name
+	// is handed to ffmpeg, and the identity recorded is what the replacement
+	// below requires of the file it opens: the source's mode, ownership and
+	// time are written through that descriptor, never through the name, so
+	// a symlink swapped onto the temp name cannot have its target's identity
+	// rewritten (guarantee 3). ffmpeg writes into the existing file rather
+	// than unlinking and recreating it, so the identity survives the
+	// rewrite. os.Remove never follows a link, so the cleanup on every
+	// failure removes a planted link and leaves its target alone.
 	tmp := fsutil.TempName(info.Path)
-	_ = os.Remove(tmp)
+	created, err := fsutil.CreateTemp(tmp)
+	if err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "temp file: %v", err)
+		return
+	}
 	args := []string{"-v", "error", "-i", info.Path, "-map", "0", "-c", "copy", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags", "+bitexact"}
 	if c.Profile.Chapters.Keep {
 		args = append(args, "-map_chapters", "0")
@@ -416,8 +429,12 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 			}
 		}
 	}
-	if err := fsutil.Fsync(tmp); err == nil {
-		err = fsutil.ReplaceInPlace(tmp, info.Path)
+	// The replacement's error is assigned to the function-level err on
+	// purpose: an if-scoped err here would be discarded and a failed
+	// replacement reported as a successful rewrite.
+	err = fsutil.Fsync(tmp)
+	if err == nil {
+		err = fsutil.ReplaceInPlaceOwn(tmp, info.Path, created)
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
