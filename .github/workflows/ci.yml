@@ -21,12 +21,18 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg mkvtoolnix exiftool
       - run: make fmt
-      - run: make test
+      - run: make test-required
       - run: make build
       - run: ./bin/amuxify doctor
+      # enabled by WP1
+      # - run: ./bin/amuxify ingest --dry-run testdata/out
+      # enabled by WP2
+      # - run: sonarr_eventtype=Test ./bin/amuxify hook sonarr
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: docker build --build-arg VERSION=ci -t amuxify:ci .
       - run: docker run --rm -u 1000:1000 amuxify:ci doctor
+      # enabled by WP2
+      # - run: docker run --rm -u 1000:1000 -e sonarr_eventtype=Test amuxify:ci hook sonarr
