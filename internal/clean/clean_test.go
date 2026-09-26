@@ -726,3 +726,73 @@ func TestAudioTagsAdviceFollowsTheCommand(t *testing.T) {
 		}
 	}
 }
+
+// Review C17, guarantee 7: the attribute-name predicate is tested on every
+// platform with hostile names, including the namespaces the filesystem test
+// above cannot set without privileges.
+func TestInNamespaceHostileNames(t *testing.T) {
+	user := []string{"user."}
+	apple := []string{"com.apple."}
+	both := []string{"user.", "com.apple."}
+	cases := []struct {
+		name     string
+		prefixes []string
+		want     bool
+	}{
+		{"", both, false},
+		{"user", user, false},
+		{"user.", user, false},
+		{"user.x", user, true},
+		{"user.x", apple, false},
+		{"USER.x", user, false},
+		{"User.x", user, false},
+		{" user.x", user, false},
+		{"trusted.user.x", user, false},
+		{"trusted.x", both, false},
+		{"security.selinux", both, false},
+		{"security.capability", both, false},
+		{"system.posix_acl_access", both, false},
+		{"com.apple.quarantine", apple, true},
+		{"com.apple.quarantine", user, false},
+		{"com.apple.", apple, false},
+		{"com.apple", apple, false},
+		{"com.applex.y", apple, false},
+		{"COM.APPLE.quarantine", apple, false},
+		{"local.com.apple.x", apple, false},
+		{"user\x00.x", user, false},
+		{"\x00user.x", user, false},
+		{"\nuser.x", user, false},
+		{"user.x\n", user, true},
+		{"user.\x00", user, true},
+		{"user.x", nil, false},
+		{"user.x", []string{""}, false},
+		{"", []string{""}, false},
+	}
+	for _, tc := range cases {
+		if got := inNamespace(tc.name, tc.prefixes); got != tc.want {
+			t.Errorf("inNamespace(%q, %q) = %v, want %v", tc.name, tc.prefixes, got, tc.want)
+		}
+	}
+	// The live prefixes: security labels and the trusted namespace are
+	// outside on every platform, and nothing matches where amuxify strips
+	// no attributes at all.
+	for _, n := range []string{"security.selinux", "trusted.amuxifytest", "system.nfs4_acl", "", "user", "com.apple"} {
+		if inNamespace(n, xattrPrefixes()) {
+			t.Errorf("%q counted as removable on %s", n, runtime.GOOS)
+		}
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		if !inNamespace("com.apple.quarantine", xattrPrefixes()) || inNamespace("user.x", xattrPrefixes()) {
+			t.Error("darwin prefixes wrong")
+		}
+	case "linux", "freebsd":
+		if !inNamespace("user.x", xattrPrefixes()) || inNamespace("com.apple.quarantine", xattrPrefixes()) {
+			t.Error("linux prefixes wrong")
+		}
+	default:
+		if xattrPrefixes() != nil {
+			t.Errorf("unexpected prefixes on %s", runtime.GOOS)
+		}
+	}
+}

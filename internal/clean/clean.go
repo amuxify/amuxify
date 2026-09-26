@@ -449,6 +449,20 @@ func xattrPrefixes() []string {
 	return nil
 }
 
+// inNamespace reports whether the attribute name lies in one of the
+// namespaces amuxify may remove: an exact, case-sensitive prefix match with
+// a non-empty attribute name after it. "user." alone, "USER.x",
+// "trusted.user.x", "com.applex.y" and a name that merely contains a prefix
+// somewhere after its start are all outside (guarantee 7).
+func inNamespace(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && len(name) > len(p) && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
 	prefixes := xattrPrefixes()
 	if prefixes == nil {
@@ -460,13 +474,7 @@ func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
 	}
 	var removed, failed []string
 	for _, n := range names {
-		match := false
-		for _, p := range prefixes {
-			if strings.HasPrefix(n, p) {
-				match = true
-			}
-		}
-		if !match {
+		if !inNamespace(n, prefixes) {
 			continue
 		}
 		if c.DryRun {
