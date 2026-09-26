@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	osexec "os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -62,7 +63,7 @@ func (r *Runner) Path(tool string) (string, error) {
 	}
 	env := "AMUXIFY_" + strings.ToUpper(tool)
 	if p := os.Getenv(env); p != "" {
-		if _, err := os.Stat(p); err != nil {
+		if err := checkExecutable(p); err != nil {
 			return "", fmt.Errorf("%s=%s: %w", env, p, err)
 		}
 		r.paths[tool] = p
@@ -74,6 +75,25 @@ func (r *Runner) Path(tool string) (string, error) {
 	}
 	r.paths[tool] = p
 	return p, nil
+}
+
+// checkExecutable accepts only a regular file that the caller can run. An
+// override that names a directory, a socket or a file without the
+// executable bit would otherwise be reported as present by Have and only
+// fail later when the tool is run. On Windows the executable bit carries no
+// meaning, so only the regular-file check applies there.
+func checkExecutable(p string) error {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("not executable")
+	}
+	return nil
 }
 
 // Have reports whether a tool is available.
@@ -122,6 +142,18 @@ func (r *Runner) RunWithTimeout(ctx context.Context, timeout time.Duration, tool
 		res.TimedOut = true
 		return res, fmt.Errorf("%s: timed out after %s", tool, timeout)
 	}
+	if ctx.Err() != nil {
+		// The caller's context was cancelled and the child was killed. That
+		// is never a completed run, whatever exit status the kill left, so
+		// it is reported as an error rather than as an exit code.
+		if res.ExitCode = -1; runErr != nil {
+			var ee *osexec.ExitError
+			if errors.As(runErr, &ee) {
+				res.ExitCode = ee.ExitCode()
+			}
+		}
+		return res, fmt.Errorf("%s: %w", tool, ctx.Err())
+	}
 	if runErr != nil {
 		var ee *osexec.ExitError
 		if errors.As(runErr, &ee) {
@@ -146,7 +178,10 @@ func ffGuard(tool string, args []string) []string {
 // are dropped, and locale is pinned so output parsing is stable.
 func cleanEnv() []string {
 	keep := []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "USERPROFILE"}
-	env := []string{"LC_ALL=C", "LANG=C"}
+	// The locale is pinned so tool output parses the same everywhere, but
+	// it must be a UTF-8 locale: under plain "C" mkvmerge treats its
+	// arguments as ASCII and truncates a path at the first non-ASCII byte.
+	env := []string{"LC_ALL=C.UTF-8", "LANG=C.UTF-8"}
 	for _, k := range keep {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)

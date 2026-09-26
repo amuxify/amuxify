@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -146,8 +147,10 @@ func TestCleanEnvDropsLDPreload(t *testing.T) {
 			t.Errorf("%s leaked into the tool environment", bad)
 		}
 	}
-	if keys["LC_ALL"] != "C" || keys["LANG"] != "C" {
-		t.Errorf("locale not pinned: %v", env)
+	// The locale is pinned to a UTF-8 variant: plain "C" makes mkvmerge
+	// truncate a path at the first non-ASCII byte.
+	if keys["LC_ALL"] != "C.UTF-8" || keys["LANG"] != "C.UTF-8" {
+		t.Errorf("locale not pinned to C.UTF-8: %v", env)
 	}
 	if keys["PATH"] != "/usr/bin" {
 		t.Errorf("PATH not forwarded: %v", env)
@@ -177,8 +180,76 @@ func TestRunUsesCleanEnv(t *testing.T) {
 			t.Errorf("child environment contains %s:\n%s", bad, out)
 		}
 	}
-	if !strings.Contains(out, "LC_ALL=C\n") {
-		t.Errorf("child environment lacks LC_ALL=C:\n%s", out)
+	if !strings.Contains(out, "LC_ALL=C.UTF-8\n") || !strings.Contains(out, "LANG=C.UTF-8\n") {
+		t.Errorf("child environment lacks the C.UTF-8 locale:\n%s", out)
+	}
+}
+
+// needTool mirrors testutil.Need for this package, which testutil imports:
+// the test skips when the tool is missing and fails under
+// AMUXIFY_REQUIRE_TOOLS=1.
+func needTool(t *testing.T, tool string) *Runner {
+	t.Helper()
+	r := &Runner{}
+	if !r.Have(tool) {
+		if os.Getenv("AMUXIFY_REQUIRE_TOOLS") == "1" {
+			t.Fatalf("%s is required (AMUXIFY_REQUIRE_TOOLS=1)", tool)
+		}
+		t.Skipf("skipping: %s not installed", tool)
+	}
+	return r
+}
+
+// fixture returns the path of a generated corpus file. The corpus is found
+// through AMUXIFY_FIXTURES, as testutil.Fixtures does; without it the test
+// skips, or fails when tools are required.
+func fixture(t *testing.T, name string) string {
+	t.Helper()
+	dir := os.Getenv("AMUXIFY_FIXTURES")
+	if dir == "" {
+		if os.Getenv("AMUXIFY_REQUIRE_TOOLS") == "1" {
+			t.Fatal("AMUXIFY_FIXTURES must point at the generated corpus (make fixtures)")
+		}
+		t.Skip("skipping: AMUXIFY_FIXTURES unset")
+	}
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("fixture %s: %v", name, err)
+	}
+	return p
+}
+
+// mkvmerge must see the whole path when it lies under a directory whose name
+// holds non-ASCII bytes, including bidi and zero-width characters. Under the
+// plain "C" locale mkvmerge truncates the argument at the first non-ASCII
+// byte and reports the file as missing; the pinned C.UTF-8 locale keeps it
+// whole.
+func TestRunPassesNonASCIIPathsToMkvmerge(t *testing.T) {
+	r := needTool(t, MKVMerge)
+	src := fixture(t, "clean.mkv")
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dirName := range []string{"Épisode 1 – 日本語", "\u202e\u200bbidi zero\u200cwidth", "émoji 🎬 folder"} {
+		dir := filepath.Join(t.TempDir(), dirName)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "clean ünicode.mkv")
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := r.RunWithTimeout(context.Background(), time.Minute, MKVMerge, "-J", path)
+		if err != nil {
+			t.Fatalf("%q: %v", dirName, err)
+		}
+		if res.ExitCode != 0 {
+			t.Fatalf("%q: mkvmerge -J exit %d\nstdout: %s\nstderr: %s", dirName, res.ExitCode, res.Stdout, res.Stderr)
+		}
+		if !strings.Contains(string(res.Stdout), `"recognized": true`) && !strings.Contains(string(res.Stdout), `"recognized":true`) {
+			t.Fatalf("%q: container not recognized:\n%s", dirName, res.Stdout)
+		}
 	}
 }
 
@@ -198,6 +269,24 @@ func TestPathHonoursOverride(t *testing.T) {
 		t.Fatal("Have false with a valid override")
 	}
 
+	// A copy of the running test binary is a real executable and resolves.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfBytes, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "real-tool")
+	if err := os.WriteFile(real, selfBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_FFMPEG", real)
+	if got, err := (&Runner{}).Path(FFmpeg); err != nil || got != real {
+		t.Fatalf("copy of the test binary: got %q, %v", got, err)
+	}
+
 	r2 := &Runner{}
 	missing := filepath.Join(dir, "does-not-exist")
 	t.Setenv("AMUXIFY_FFMPEG", missing)
@@ -208,6 +297,53 @@ func TestPathHonoursOverride(t *testing.T) {
 	}
 	if r2.Have(FFmpeg) {
 		t.Fatal("Have true with a missing override")
+	}
+}
+
+// An override that names something other than an executable regular file
+// is refused up front, so doctor and Have never report a tool as present
+// that could not actually be run.
+func TestPathOverrideMustBeExecutableFile(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "a-directory")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(dir, "plain-file")
+	if err := os.WriteFile(plain, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, path, want string
+	}{
+		{"directory", sub, "not a regular file"},
+		{"non-executable file", plain, "not executable"},
+		{"missing path", filepath.Join(dir, "missing"), "no such file"},
+	}
+	for _, tc := range cases {
+		if tc.name == "non-executable file" && runtime.GOOS == "windows" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AMUXIFY_FFPROBE", tc.path)
+			r := &Runner{}
+			got, err := r.Path(FFprobe)
+			if err == nil {
+				t.Fatalf("override %s resolved to %q", tc.path, got)
+			}
+			if !strings.Contains(err.Error(), "AMUXIFY_FFPROBE="+tc.path) {
+				t.Errorf("error does not name the override: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+			if r.Have(FFprobe) {
+				t.Error("Have true for an unusable override")
+			}
+			if _, err := r.RunWithTimeout(context.Background(), time.Second, FFprobe, "-version"); err == nil {
+				t.Error("RunWithTimeout ran an unusable override")
+			}
+		})
 	}
 }
 
@@ -282,10 +418,19 @@ func TestRunHonoursContextCancel(t *testing.T) {
 	if time.Since(start) > 4*time.Second {
 		t.Fatalf("waited %v after cancel", time.Since(start))
 	}
-	// A killed child is reported either as an error or as a non-zero exit;
-	// it is never reported as a clean run.
-	if err == nil && (res == nil || res.ExitCode == 0) {
-		t.Fatalf("cancelled run reported success: %+v", res)
+	// A killed child is an error, never a completed run with an exit code
+	// that a caller might read as a verdict.
+	if err == nil {
+		t.Fatalf("cancelled run reported no error: %+v", res)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v does not wrap context.Canceled", err)
+	}
+	if res == nil || res.ExitCode == 0 {
+		t.Fatalf("cancelled run carries a success exit code: %+v", res)
+	}
+	if res.TimedOut {
+		t.Fatal("cancellation reported as a timeout")
 	}
 }
 
