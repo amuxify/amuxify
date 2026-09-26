@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/amuxify/amuxify/internal/probe"
@@ -197,5 +198,161 @@ func TestSDHDuplicates(t *testing.T) {
 	}
 	if !eq(keptIdx(d, "subtitle"), []int{5, 6, 7}) {
 		t.Fatalf("got %v", keptIdx(d, "subtitle"))
+	}
+}
+
+// Hook language: every spelling a Sonarr or Radarr hook may hand over maps to
+// the 639-2/B form the aliases table defines.
+func TestCanonicalAcceptsThreeLetterCodes(t *testing.T) {
+	cases := map[string]string{
+		"eng":   "eng",
+		"jpn":   "jpn",
+		"ger":   "ger",
+		"deu":   "ger",
+		"en-US": "eng",
+		"en":    "eng",
+		"EN":    "eng",
+		"ENG":   "eng",
+		"pt-BR": "por",
+		"pt_BR": "por",
+		"zh":    "chi",
+		"zho":   "chi",
+		"ja":    "jpn",
+		"de":    "ger",
+		" en ":  "eng",
+		"":      "und",
+		"und":   "und",
+	}
+	for in, want := range cases {
+		if got := Canonical(in); got != want {
+			t.Errorf("Canonical(%q) = %q want %q", in, got, want)
+		}
+	}
+}
+
+// Hostile language strings from a hook never panic and never widen to a
+// language the string does not spell. A value that is not a known code comes
+// back lower-cased and unmatched, so it selects nothing.
+func TestCanonicalRejectsHostileInput(t *testing.T) {
+	cases := map[string]string{
+		"-eng":             "-eng",
+		"_eng":             "_eng",
+		"eng;rm -rf /":     "eng;rm ", // cut at the first separator, still no match
+		"$(id)":            "$(id)",
+		"`id`":             "`id`",
+		"eng\x00":          "eng\x00",
+		"\u202eeng":        "\u202eeng",
+		"e":                "e",
+		"--":               "--",
+		"../../etc/passwd": "../../etc/passwd",
+		"eng\n":            "eng", // surrounding whitespace is the one thing trimmed
+		"en-\x00":          "eng", // primary subtag "en" before the separator
+	}
+	for in, want := range cases {
+		if got := Canonical(in); got != want {
+			t.Errorf("Canonical(%q) = %q want %q", in, got, want)
+		}
+	}
+	long := strings.Repeat("a", 100000)
+	if got := Canonical(long); got != long {
+		t.Errorf("long input altered")
+	}
+	// None of the unmatched forms may satisfy a keep list of eng.
+	p := mustLoad(t, "archive")
+	for _, in := range []string{"-eng", "_eng", "eng;rm -rf /", "eng\x00", "\u202eeng", "e"} {
+		if p.LanguageMatches(in, "") {
+			t.Errorf("%q matched the archive keep list", in)
+		}
+	}
+}
+
+// Exactly one kept audio track carries the default flag, whatever the input
+// flags say and whatever the hook says the original language is.
+func TestDecideAudioDefaultIsUnique(t *testing.T) {
+	defaults := func(d *Decision) []int {
+		var out []int
+		for _, a := range d.KeptOf("audio") {
+			if a.Default {
+				out = append(out, a.Stream.Index)
+			}
+		}
+		return out
+	}
+	for _, name := range Names() {
+		p := mustLoad(t, name)
+		for _, orig := range []string{"", "en", "eng", "jpn", "ger", "xx", "$(id)", "‮"} {
+			// Every audio track flagged default.
+			m := sample()
+			for i := range m.Streams {
+				if m.Streams[i].Type == "audio" {
+					m.Streams[i].Default = true
+				}
+			}
+			if got := defaults(p.Decide(m, Options{OriginalLanguage: orig})); len(got) != 1 {
+				t.Errorf("%s orig=%q all-default input: defaults on %v", name, orig, got)
+			}
+			// No audio track flagged default.
+			m = sample()
+			for i := range m.Streams {
+				m.Streams[i].Default = false
+			}
+			if got := defaults(p.Decide(m, Options{OriginalLanguage: orig})); len(got) != 1 {
+				t.Errorf("%s orig=%q no-default input: defaults on %v", name, orig, got)
+			}
+			// Two eng tracks where only the commentary is flagged default.
+			m = sample()
+			for i := range m.Streams {
+				m.Streams[i].Default = m.Streams[i].Index == 3
+			}
+			d := p.Decide(m, Options{OriginalLanguage: orig})
+			if got := defaults(d); len(got) != 1 {
+				t.Errorf("%s orig=%q commentary-default input: defaults on %v", name, orig, got)
+			}
+		}
+	}
+	// The hook's original language wins when a kept track carries it.
+	d := mustLoad(t, "homelab").Decide(sample(), Options{OriginalLanguage: "deu"})
+	if got := defaults(d); len(got) != 1 || got[0] != 1 {
+		// No German audio in the sample, so the existing jpn default stays.
+		t.Errorf("no matching audio: defaults on %v, want [1]", got)
+	}
+	d = mustLoad(t, "homelab").Decide(sample(), Options{OriginalLanguage: "en-US"})
+	if got := defaults(d); len(got) != 1 || got[0] != 2 {
+		t.Errorf("en-US: defaults on %v, want [2]", got)
+	}
+}
+
+// A profile overlay is data: unknown keys, wrong types and hostile values are
+// rejected rather than silently accepted.
+func TestParseRejectsHostileOverlays(t *testing.T) {
+	bad := []string{
+		"[bogus]\nx=1\n",
+		"[languages]\nkeep=1\n",
+		"[safety]\nhardlinks=\"$(rm -rf /)\"\n",
+		"[safety]\nexec_permissions=\"ignore-me\"\n",
+		"[verify]\ntier=\"nonexistent\"\n",
+		"[safety]\nclamav=\"yes please\"\n",
+		"not toml at all = = =\n",
+		"[languages]\nkeep=[\"eng\"\n",
+	}
+	for _, raw := range bad {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Errorf("overlay accepted: %q", raw)
+		}
+	}
+	// Large but valid input is fine and does not hang.
+	big := "[languages]\nkeep=[" + strings.Repeat("\"eng\",", 5000) + "\"jpn\"]\n"
+	if _, err := Parse([]byte(big)); err != nil {
+		t.Errorf("large overlay rejected: %v", err)
+	}
+}
+
+// Loading a profile by path never follows the name into the built-ins and a
+// missing path is an error, not a silent fallback to homelab.
+func TestLoadMissingPathIsAnError(t *testing.T) {
+	for _, name := range []string{"/nonexistent/profile.toml", "./no-such-profile.toml", "../../../etc/passwd", "homelab.toml.bak"} {
+		if _, err := Load(name); err == nil {
+			t.Errorf("Load(%q) succeeded", name)
+		}
 	}
 }
