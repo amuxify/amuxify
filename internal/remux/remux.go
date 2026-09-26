@@ -82,6 +82,20 @@ func (r *Remuxer) timeout() time.Duration {
 	return r.Timeout
 }
 
+// Roots returns the tree relative paths are computed against and the output
+// tree used by output mode and by the copy hard-link mode.
+func (r *Remuxer) Roots(abs string, isDir bool) (inputRoot, outRoot string) {
+	inputRoot = abs
+	if !isDir {
+		inputRoot = filepath.Dir(abs)
+	}
+	outRoot = r.OutputRoot
+	if outRoot == "" {
+		outRoot = filepath.Join(filepath.Dir(inputRoot), filepath.Base(inputRoot)+"__remuxed")
+	}
+	return inputRoot, outRoot
+}
+
 // RemuxPath processes a file or a directory tree.
 func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResult, error) {
 	abs, err := fsutil.Abs(root)
@@ -92,14 +106,7 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	inputRoot := abs
-	if !fi.IsDir() {
-		inputRoot = filepath.Dir(abs)
-	}
-	outRoot := r.OutputRoot
-	if outRoot == "" {
-		outRoot = filepath.Join(filepath.Dir(inputRoot), filepath.Base(inputRoot)+"__remuxed")
-	}
+	inputRoot, outRoot := r.Roots(abs, fi.IsDir())
 	if !r.InPlace && !r.DryRun {
 		if err := os.MkdirAll(outRoot, 0o755); err != nil {
 			return nil, err
@@ -117,7 +124,7 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		fr := r.remuxScanned(ctx, sc, inputRoot, outRoot)
+		fr := r.RemuxScanned(ctx, sc, inputRoot, outRoot)
 		if r.Progress != nil {
 			r.Progress(fr)
 		}
@@ -126,7 +133,8 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	return out, nil
 }
 
-func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, outRoot string) report.FileResult {
+// RemuxScanned remuxes one already scanned file. r.Scanner may be nil.
+func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, outRoot string) report.FileResult {
 	start := time.Now()
 	fr := sc.File
 	defer func() { fr.Duration = time.Since(start) }()
@@ -505,8 +513,8 @@ func orNone(s string) string {
 // sameStream compares packet hashes first and falls back to decoded hashes
 // when the source container frames packets differently from Matroska.
 func (r *Remuxer) sameStream(ctx context.Context, src *probe.MediaInfo, s probe.Stream, out *probe.MediaInfo, o probe.Stream) (bool, string, error) {
-	h1, err1 := r.Verifier.StreamHash(ctx, src.Path, s.Index)
-	h2, err2 := r.Verifier.StreamHash(ctx, out.Path, o.Index)
+	h1, err1 := streamHash(ctx, r.Verifier, src.Path, s.Index)
+	h2, err2 := streamHash(ctx, r.Verifier, out.Path, o.Index)
 	if err1 == nil && err2 == nil && h1 != "" && h1 == h2 {
 		return true, "packet", nil
 	}
@@ -514,11 +522,11 @@ func (r *Remuxer) sameStream(ctx context.Context, src *probe.MediaInfo, s probe.
 		return false, "packet", nil
 	}
 	// Different framing is expected across containers; compare samples.
-	d1, err := r.Verifier.DecodedHash(ctx, src.Path, s)
+	d1, err := decodedHash(ctx, r.Verifier, src.Path, s)
 	if err != nil {
 		return false, "", err
 	}
-	d2, err := r.Verifier.DecodedHash(ctx, out.Path, o)
+	d2, err := decodedHash(ctx, r.Verifier, out.Path, o)
 	if err != nil {
 		return false, "", err
 	}

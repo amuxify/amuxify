@@ -65,7 +65,7 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&g.DryRun, "dry-run", g.DryRun, "decide and report, change nothing")
 	fs.BoolVar(&g.Verbose, "verbose", g.Verbose, "show PASS-level findings and per-track actions")
 	fs.BoolVar(&g.Quiet, "quiet", g.Quiet, "suppress the human report; exit code only")
-	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 1h probe/verify, 6h remux)")
+	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean)")
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "directory for quarantine and run logs")
 	fs.BoolVar(&g.AllowRoot, "allow-root", g.AllowRoot, "run even as root (files would be root-owned)")
 	fs.BoolVar(&g.Trace, "trace", g.Trace, "print every external command line to stderr")
@@ -94,6 +94,8 @@ Commands:
   scan      verify and inspect files, change nothing (default verify: quick)
   remux     rebuild into a sanitized MKV with mkvmerge, then prove it
   clean     strip metadata and extended attributes in place, tracks untouched
+  ingest    scan, then rebuild into a verified MKV or clean in place, in one pass
+  hook      run ingest for sabnzbd | nzbget | sonarr | radarr and exit the way they expect
   doctor    check tools, versions, profile, and environment
   profile   list built-in profiles or print one:  amuxify profile show homelab
   version   print the version
@@ -151,6 +153,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		code = g.remux(ctx, rest)
 	case "clean":
 		code = g.clean(ctx, rest)
+	case "ingest":
+		code = g.ingest(ctx, rest)
+	case "hook":
+		code = g.hook(ctx, rest)
 	default:
 		fmt.Fprintf(stderr, "amuxify: unknown command %q\n\n", cmd)
 		fs.Usage()

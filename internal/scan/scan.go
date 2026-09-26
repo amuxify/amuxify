@@ -79,37 +79,20 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	scanRoot := abs
 	if !fi.IsDir() {
-		r := s.ScanFile(ctx, abs, filepath.Dir(abs))
-		if s.Progress != nil {
-			s.Progress(r)
-		}
-		return []Result{r}, nil
+		scanRoot = filepath.Dir(abs)
 	}
-	var paths []string
-	walkErr := filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
-			return nil
-		}
-		paths = append(paths, p)
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
+	paths, err := Walk(abs)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(paths)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		r := s.ScanFile(ctx, p, abs)
+		r := s.ScanFile(ctx, p, scanRoot)
 		if s.Progress != nil {
 			s.Progress(r)
 		}
