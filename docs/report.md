@@ -5,8 +5,12 @@ printed for a terminal, one line per file as soon as that file is finished,
 followed by the run-level errors and a count line. With `--json` nothing is
 printed until the run is over and then exactly one JSON object followed by a
 newline is written to stdout. Errors and diagnostics go to stderr in both
-modes, so stdout can be piped straight into a parser. `--quiet` prints nothing
-and leaves only the exit code.
+modes, so stdout can be piped straight into a parser. The hook adapters print
+a few lines of their own for the caller's log (the start line, the skipping
+line and SABnzbd's closing count line); they go to stdout, except under
+`--json`, where they go to stderr so that stdout is still exactly one
+document. `--quiet` prints nothing and leaves only the exit code.
+
 
 This is the report of an `amuxify ingest` run started by the SABnzbd hook
 adapter. It is the file `internal/report/testdata/report-golden.json`, which a
@@ -63,7 +67,7 @@ exactly what a script receives.
           "message": "remux: #1 default flag false -\u003e true"
         }
       ],
-      "output": "/srv/incoming__remuxed/movie.mkv",
+      "output": "/srv/incoming/movie.mkv",
       "actions": [
         "keep #0 video h264 und: primary video",
         "keep #1 audio aac eng default: language eng"
@@ -240,6 +244,17 @@ byte from the JSON report; the terminal form writes the name's raw bytes. Map
 keys in `counts` and `info` are sorted, so the same run always produces the
 same bytes.
 
+The terminal form is written for a terminal and a log file, not for a parser,
+so it is the one place where amuxify changes what it saw. In every path,
+message, detail, output path, action and error it writes a control character
+other than tab (including the escape character, carriage return, newline, NUL
+and the C1 range) as `\xNN`, and a Unicode bidirectional control, zero-width
+character, line or paragraph separator or byte order mark as `\uNNNN`. A file
+name can therefore not end a line early, forge a verdict line, overwrite the
+line with a terminal escape sequence or hide characters. The hook adapters'
+own lines are treated the same way. The JSON form carries the raw value.
+
+
 ## Doctor
 
 `amuxify doctor --json` writes the same envelope. `command` is `doctor`, each
@@ -307,7 +322,8 @@ on its own.
 | `HDR_LOST` | FAIL | remux | The output lost HDR or Dolby Vision signalling. |
 | `QUARANTINED` | BLOCK, or WARN when the move failed | scan | The file was moved under `--quarantine`. |
 | `REFUSED` | FAIL or BLOCK | remux, ingest | The scan verdict prevented the remux; the severity is the scan verdict. |
-| `SKIPPED` | PASS or WARN | remux, clean, ingest | There was nothing to do for this file; the message says why. |
+| `SKIPPED` | PASS or WARN | remux, clean | There was nothing to do for this file; the message says why. |
+
 | `ROUTE` | PASS | ingest | The route taken, `remux`, `clean` or `skip`, and why. |
 | `OUTPUT_EXISTS` | FAIL | remux | The destination already exists; it is never overwritten. |
 | `UNSUPPORTED_INPUT` | FAIL | remux | mkvmerge cannot read this container. |
