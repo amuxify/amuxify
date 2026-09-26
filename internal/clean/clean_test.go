@@ -476,15 +476,70 @@ func TestMp4RewriteRemovesProvenance(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("directory holds %d entries after cleaning", len(entries))
 	}
-	// A second pass may rewrite again (ffprobe always reports the brand
-	// atoms as format tags), but it never fails and the provenance stays
-	// gone. Idempotence of the mp4 rewrite belongs to internal/clean.
+	// The rewrite is idempotent: ffprobe always reports the ftyp brand
+	// fields and the muxer's default handler names as tags, and those must
+	// not count as metadata, so a second pass finds nothing to clean and
+	// does not touch the file.
+	sum := fileSHA(t, src)
+	fi, _ = os.Lstat(src)
+	ffmpegRuns := len(tr.all())
 	fr = c.CleanFile(context.Background(), src)
-	if fr.Verdict != report.Pass {
+	if fr.Verdict != report.Pass || !fr.Has(CodeNothing) || fr.Has(CodeMetadata) {
 		t.Fatalf("second pass: %s %v", fr.Verdict, codes(fr))
+	}
+	if fileSHA(t, src) != sum {
+		t.Error("second pass rewrote the file")
+	}
+	for _, l := range tr.all()[ffmpegRuns:] {
+		if strings.Contains(l, "ffmpeg") && strings.Contains(l, "-y ") {
+			t.Errorf("second pass ran a rewrite: %s", l)
+		}
 	}
 	if out, err := mp4.Parse(src); err != nil || len(out.ProvenanceKeys()) != 0 {
 		t.Fatalf("second pass: %v %v", err, out)
+	}
+	if fi2, _ := os.Lstat(src); !fi2.ModTime().Equal(fi.ModTime()) {
+		t.Error("second pass changed the mtime")
+	}
+}
+
+// A handler name of someone's choosing is not one of the muxer defaults and
+// still counts as metadata: a file carrying one is rewritten, and the
+// rewrite leaves the default name behind.
+func TestMp4CustomHandlerNameIsCleaned(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge)
+	src := testutil.Copy(t, "sample.m4v")
+	c, _ := newCleaner(t, r, mustProfile(t, "homelab"))
+	fr := c.CleanFile(context.Background(), src)
+	if fr.Verdict != report.Pass {
+		t.Fatalf("first pass: %s %v", fr.Verdict, codes(fr))
+	}
+	// Plant a hostile handler name with ffmpeg itself, keeping everything
+	// else as the clean pass left it.
+	tagged := filepath.Join(filepath.Dir(src), "tagged.m4v")
+	res, err := r.RunWithTimeout(context.Background(), time.Minute, exec.FFmpeg,
+		"-v", "error", "-i", src, "-map", "0", "-c", "copy", "-fflags", "+bitexact", "-flags", "+bitexact",
+		"-metadata:s:v:0", "handler_name=https://evil.example/track", "-f", "mp4", "-y", tagged)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("ffmpeg: %v %s", err, res.Stderr)
+	}
+	fr = c.CleanFile(context.Background(), tagged)
+	if fr.Verdict != report.Pass || !fr.Has(CodeMetadata) {
+		t.Fatalf("tagged: %s %v", fr.Verdict, codes(fr))
+	}
+	p := &probe.Prober{Runner: r, Timeout: time.Minute}
+	info, err := p.Probe(context.Background(), tagged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range info.Streams {
+		if strings.Contains(st.Tags["handler_name"], "evil") {
+			t.Errorf("stream #%d still carries the planted handler name", st.Index)
+		}
+	}
+	fr = c.CleanFile(context.Background(), tagged)
+	if !fr.Has(CodeNothing) {
+		t.Errorf("third pass not idempotent: %v", codes(fr))
 	}
 }
 
