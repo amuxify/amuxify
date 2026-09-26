@@ -811,6 +811,42 @@ var knownGaps = map[string]string{
 	"subs.mks":       "reports FAIL DECODE_FAIL because verify.decode maps 0:v? and 0:a? and ffmpeg refuses an output with no streams; internal/verify/verify.go (or scan.decodeCheck) must skip the decode pass for subtitle-only containers",
 }
 
+// A conforming file under a directory whose name holds non-ASCII, bidi and
+// zero-width characters scans PASS: the tools run under a UTF-8 locale, so
+// mkvmerge and ffprobe see the whole path. Only the file's own name is
+// subject to the BIDI_NAME check.
+func TestNonASCIIDirectoryScansClean(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
+	s := newScanner(t, mustProfile(t, "homelab"), r)
+	src := testutil.Copy(t, "conforming.mkv")
+	for _, dirName := range []string{"Épisode 1 – 日本語", "sub\u202e/\u200bdeep", "émoji 🎬"} {
+		root := t.TempDir()
+		dir := filepath.Join(root, filepath.FromSlash(dirName))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(dir, "conforming ünicode.mkv")
+		b, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.ScanPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 || res[0].File.Path != dst {
+			t.Fatalf("%q: results %+v", dirName, res)
+		}
+		expect(t, res[0].File, report.Pass)
+		if res[0].Info == nil {
+			t.Fatalf("%q: no probe result: %v", dirName, codes(res[0].File))
+		}
+	}
+}
+
 func TestCorpusVerdicts(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
 	root := testutil.Fixtures(t)
