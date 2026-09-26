@@ -49,8 +49,12 @@ type Cleaner struct {
 	DryRun                bool
 	RemoveBlockedSidecars bool
 	StripAudioTags        bool
-	Hardlinks             string
-	Timeout               time.Duration
+	// Command names the command the cleaner runs under, so advice about
+	// flags only names flags that command has. Empty means clean, which
+	// has --strip-audio-tags; ingest sets "ingest" and has no such flag.
+	Command   string
+	Hardlinks string
+	Timeout   time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
 }
@@ -75,10 +79,9 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	paths, err := scan.Walk(abs)
-	if err != nil {
-		return nil, err
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	paths, walkErr := scan.Walk(abs)
 	var out []report.FileResult
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -90,7 +93,7 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // CleanFile cleans one path.
@@ -202,7 +205,7 @@ func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, e
 		if c.StripAudioTags {
 			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container))
 		} else {
-			fr.Addf(CodeSkipped, report.Pass, "audio tags left alone (use --strip-audio-tags)")
+			fr.Addf(CodeSkipped, report.Pass, "%s", c.audioTagsAdvice())
 		}
 	default:
 		fr.Addf(CodeSkipped, report.Warn, "no cleaner for container %s", info.Container)
@@ -424,6 +427,16 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 	fr.Addf(CodeMetadata, report.Pass, "rewritten without %s", strings.Join(what, ", "))
 }
 
+// audioTagsAdvice is the SKIPPED text for an audio file whose tags are left
+// alone. It names --strip-audio-tags only for the clean command, which has
+// that flag; ingest and the hook that runs it do not (review C10).
+func (c *Cleaner) audioTagsAdvice() string {
+	if c.Command == "ingest" {
+		return "audio tags left alone; ingest does not strip audio tags"
+	}
+	return "audio tags left alone (use --strip-audio-tags)"
+}
+
 // xattrPrefixes are the only namespaces amuxify removes. Security labels,
 // ACLs and system attributes are never touched.
 func xattrPrefixes() []string {
@@ -434,6 +447,20 @@ func xattrPrefixes() []string {
 		return []string{"user."}
 	}
 	return nil
+}
+
+// inNamespace reports whether the attribute name lies in one of the
+// namespaces amuxify may remove: an exact, case-sensitive prefix match with
+// a non-empty attribute name after it. "user." alone, "USER.x",
+// "trusted.user.x", "com.applex.y" and a name that merely contains a prefix
+// somewhere after its start are all outside (guarantee 7).
+func inNamespace(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && len(name) > len(p) && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
@@ -447,13 +474,7 @@ func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
 	}
 	var removed, failed []string
 	for _, n := range names {
-		match := false
-		for _, p := range prefixes {
-			if strings.HasPrefix(n, p) {
-				match = true
-			}
-		}
-		if !match {
+		if !inNamespace(n, prefixes) {
 			continue
 		}
 		if c.DryRun {

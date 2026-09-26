@@ -83,10 +83,9 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	if !fi.IsDir() {
 		scanRoot = filepath.Dir(abs)
 	}
-	paths, err := Walk(abs)
-	if err != nil {
-		return nil, err
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	paths, walkErr := Walk(abs)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -98,7 +97,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
@@ -554,10 +553,18 @@ func (s *Scanner) polyglot(path string, size int64) string {
 
 func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	rel, err := filepath.Rel(root, fr.Path)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "" || rel == "." || strings.HasPrefix(rel, "..") {
+		// A caller that hands the file itself as the root, or a root the
+		// file does not sit under, still gets the file placed under the
+		// quarantine directory by its base name; the destination is never
+		// the quarantine root itself.
 		rel = filepath.Base(fr.Path)
 	}
 	dest := filepath.Join(s.Quarantine, rel)
+	if dest == filepath.Clean(s.Quarantine) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
+		return
+	}
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
 	// elsewhere (guarantee 4).
@@ -565,7 +572,11 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
-	if err := fsutil.PlaceNoClobber(fr.Path, dest); err != nil {
+	// The quarantine directory often sits on another filesystem than the
+	// media tree (the bare --quarantine form uses the state directory), so
+	// the move copies and verifies across devices; it never replaces a
+	// file that already sits at the destination.
+	if err := fsutil.MoveNoClobber(fr.Path, dest); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}

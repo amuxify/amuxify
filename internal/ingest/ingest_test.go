@@ -23,6 +23,7 @@ import (
 	"github.com/amuxify/amuxify/internal/scan"
 	"github.com/amuxify/amuxify/internal/testutil"
 	"github.com/amuxify/amuxify/internal/verify"
+	"github.com/pkg/xattr"
 )
 
 // ebml is a minimal Matroska magic so files look like media to sniff.
@@ -394,6 +395,14 @@ func TestDecideRoutes(t *testing.T) {
 			wantRoute: RouteRemux, wantText: "scan verdict FAIL; rebuilt because --force was given"},
 		{name: "2 BLOCK with force is not overridden here either", path: "a.mkv", verdict: report.Block, info: video(), force: true,
 			wantRoute: RouteRemux, wantText: "scan verdict FAIL; rebuilt because --force was given"},
+		{name: "2 FAIL with force on audio is cleaned, not rebuilt", path: "a.mka", verdict: report.Fail, info: audioInfo(), force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on subtitles is cleaned, not rebuilt", path: "a.mks", verdict: report.Fail, info: audioInfo(), force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on mp3 is cleaned, not rebuilt", path: "a.mp3", verdict: report.Fail, info: &probe.MediaInfo{Container: "mp3", Streams: audioInfo().Streams}, force: true,
+			wantRoute: RouteClean, wantText: "scan verdict FAIL; cleaned because --force was given"},
+		{name: "2 FAIL with force on hard-linked audio still skips", path: "a.mka", verdict: report.Fail, info: audioInfo(), force: true, nlink: "2", hardlinks: "break",
+			wantRoute: RouteSkip, wantText: "hard-linked audio or subtitle file", wantCodes: []string{"HARDLINKED/WARN"}},
 		{name: "3 hard-linked audio", path: "a.mka", info: audioInfo(), nlink: "2", hardlinks: "break",
 			wantRoute: RouteSkip, wantText: "hard-linked audio or subtitle file", wantCodes: []string{"HARDLINKED/WARN"}},
 		{name: "3 hard-linked subtitle", path: "a.mks", info: audioInfo(), nlink: "3", hardlinks: "copy",
@@ -576,6 +585,7 @@ func TestVerifyNoneRefusedFromFlagAndProfile(t *testing.T) {
 			fired := 0
 			in.Progress = func(report.FileResult) { fired++ }
 			before := snapshot(t, dir)
+			srcSum := fileSHA(t, src)
 			res, err := in.IngestPath(context.Background(), dir)
 			if err == nil || err.Error() != "ingest writes in place and requires verification; verify tier none is refused" {
 				t.Fatalf("err = %v", err)
@@ -593,7 +603,7 @@ func TestVerifyNoneRefusedFromFlagAndProfile(t *testing.T) {
 			if _, err := os.Lstat(in.Scanner.Quarantine); err == nil {
 				t.Error("quarantine directory created before the refusal")
 			}
-			if fileSHA(t, src) != fileSHA(t, src) {
+			if fileSHA(t, src) != srcSum {
 				t.Error("source changed")
 			}
 		})
@@ -1590,11 +1600,18 @@ func TestIngestCorpusVariants(t *testing.T) {
 		if rt, _ := route(t, res[0]); rt != RouteClean || res[0].Verdict > report.Warn {
 			t.Errorf("%s %s %v", rt, res[0].Verdict, codes(res[0]))
 		}
-		if fileSHA(t, dst) == "" || len(snapshot(t, dir)) != len(before) {
+		if len(snapshot(t, dir)) != len(before) {
 			t.Fatalf("tree changed shape: %v", snapshot(t, dir))
 		}
-		if sum == "" {
-			t.Fatal("unreadable source")
+		// conforming.mkv already matches the profile, so the clean route
+		// reports NOTHING_TO_CLEAN and the bytes must be exactly as before;
+		// a METADATA edit is the only thing allowed to change them.
+		after := fileSHA(t, dst)
+		switch {
+		case res[0].Has(clean.CodeMetadata) && after == sum:
+			t.Error("METADATA reported but the file did not change")
+		case !res[0].Has(clean.CodeMetadata) && after != sum:
+			t.Errorf("file changed without a METADATA finding: %v", codes(res[0]))
 		}
 	})
 	t.Run("decode pass follows the probed streams, not the extension", func(t *testing.T) {
@@ -1715,4 +1732,313 @@ func in0(t *testing.T, r *exec.Runner) *Ingester {
 	t.Helper()
 	in, _ := newIngester(t, &exec.Runner{Timeout: r.Timeout}, mustProfile(t, "homelab"))
 	return in
+}
+
+// A single blocked file given as the ingest root is quarantined under the
+// quarantine directory by its base name, the way scan.ScanPath does it. The
+// Sonarr and Radarr adapters always hand over one file, so this is the path
+// every arr quarantine takes (review C1).
+func TestIngestSingleFileRootQuarantines(t *testing.T) {
+	noTools(t)
+	for _, name := range []string{"x.url", "empty.mkv", "movie‮vkm.mkv"} {
+		t.Run(name, func(t *testing.T) {
+			body := "[InternetShortcut]\nURL=http://x\n"
+			if strings.HasSuffix(name, ".mkv") {
+				body = ""
+			}
+			src := write(t, filepath.Join(t.TempDir(), name), body)
+			q := filepath.Join(t.TempDir(), "quarantine")
+			in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+			in.Scanner.Quarantine = q
+			in.RemoveBlockedSidecars = true
+			in.apply(t)
+			res, err := in.IngestPath(context.Background(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 {
+				t.Fatalf("%d results", len(res))
+			}
+			fr := res[0]
+			dest := filepath.Join(q, name)
+			f, ok := finding(fr, scan.CodeQuarantined)
+			if !ok || f.Severity != report.Block || f.Message != "moved to "+dest {
+				t.Fatalf("QUARANTINED finding %+v ok=%v, want BLOCK moved to %s (%v)", f, ok, dest, codes(fr))
+			}
+			if fr.Verdict != report.Block {
+				t.Errorf("verdict %s", fr.Verdict)
+			}
+			if _, err := os.Lstat(dest); err != nil {
+				t.Errorf("not in quarantine: %v", err)
+			}
+			if _, err := os.Lstat(src); err == nil {
+				t.Error("source still in place")
+			}
+			if fi, err := os.Lstat(q); err != nil || !fi.IsDir() {
+				t.Errorf("quarantine root is not a directory: %v", err)
+			}
+			// A quarantined sidecar is never also removed by the cleaner.
+			if fr.Has(clean.CodeSidecarRemove) || fr.Has(clean.CodeCleanFail) {
+				t.Errorf("cleaner touched a quarantined file: %v", codes(fr))
+			}
+			if got := tr.all(); len(got) != 0 {
+				t.Errorf("tools ran: %v", got)
+			}
+		})
+	}
+}
+
+// An unreadable directory inside the tree is reported as a run-level error
+// after the readable files, never dropped, so a hook cannot tell its caller
+// the download is good when part of it could not be read (review C2).
+func TestIngestReportsUnreadableDirectory(t *testing.T) {
+	noTools(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	ok := write(t, filepath.Join(root, "a", "ok.nfo"), "nfo\n")
+	locked := filepath.Join(root, "locked")
+	write(t, filepath.Join(locked, "payload.url"), "[InternetShortcut]\nURL=http://x\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	in, _ := newIngester(t, nil, mustProfile(t, "homelab"))
+	fired := 0
+	in.Progress = func(report.FileResult) { fired++ }
+	res, err := in.IngestPath(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+locked) {
+		t.Fatalf("err %v, want one naming %s", err, locked)
+	}
+	if len(res) != 1 || res[0].Path != ok || fired != 1 {
+		t.Fatalf("results %d, progress %d", len(res), fired)
+	}
+	// The way cli.runIngest records it, the run verdict is FAIL.
+	s := report.NewSummary("amuxify", "test", "ingest", "homelab")
+	for _, r := range res {
+		s.Append(r)
+	}
+	s.Error(err.Error())
+	if s.Verdict != report.Fail {
+		t.Errorf("run verdict %s, want FAIL", s.Verdict)
+	}
+}
+
+// Review C9: a FAIL audio or subtitle file under --force takes the clean
+// route and keeps its FAIL verdict. Before the fix it was routed to remux,
+// which only handles video containers and skipped it, so the ROUTE line
+// promised a rebuild that never happened.
+func TestForcedFailAudioIsCleanedNotRemuxed(t *testing.T) {
+	r := needTools(t)
+	for _, name := range []string{"audio.mka", "subs.mks", "sample.mp3"} {
+		t.Run(name, func(t *testing.T) {
+			src := testutil.Copy(t, name)
+			if err := os.Chmod(src, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			in, _ := newIngester(t, r, mustProfile(t, "archive"))
+			in.Force = true
+			in.apply(t)
+			res, err := in.IngestPath(context.Background(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr := res[0]
+			rt, text := route(t, fr)
+			if rt != RouteClean || text != "scan verdict FAIL; cleaned because --force was given" {
+				t.Errorf("route %s %q", rt, text)
+			}
+			if fr.Verdict != report.Fail || !fr.Has(scan.CodeExecPerm) {
+				t.Errorf("verdict %s %v, want FAIL with EXEC_PERM kept", fr.Verdict, codes(fr))
+			}
+			if f, ok := finding(fr, remux.CodeSkipped); ok && strings.Contains(f.Message, "no video stream") {
+				t.Errorf("remux skipped the file: %v", codes(fr))
+			}
+			if _, err := os.Lstat(src); err != nil {
+				t.Errorf("source gone: %v", err)
+			}
+		})
+	}
+}
+
+// Review C10: ingest has no --strip-audio-tags flag, so the SKIPPED advice
+// for an audio file must not name it.
+func TestIngestAudioTagsAdviceNamesNoFlag(t *testing.T) {
+	r := needTools(t)
+	src := testutil.Copy(t, "sample.mp3")
+	in, _ := newIngester(t, r, mustProfile(t, "homelab"))
+	res, err := in.IngestPath(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res[0]
+	f, ok := finding(fr, clean.CodeSkipped)
+	if !ok || f.Message != "audio tags left alone; ingest does not strip audio tags" {
+		t.Errorf("SKIPPED %q (%v)", f.Message, codes(fr))
+	}
+	for _, f := range fr.Findings {
+		if strings.Contains(f.Message, "--strip-audio-tags") {
+			t.Errorf("advice names a flag ingest does not have: %s", f.Message)
+		}
+	}
+	// IngestFile sets the wording too, so a caller that skips IngestPath
+	// gets the same text.
+	in2, _ := newIngester(t, r, mustProfile(t, "homelab"))
+	fr = in2.IngestFile(context.Background(), src, filepath.Dir(src), filepath.Dir(src), filepath.Dir(src))
+	if f, ok := finding(fr, clean.CodeSkipped); !ok || strings.Contains(f.Message, "--strip-audio-tags") {
+		t.Errorf("IngestFile SKIPPED %q", f.Message)
+	}
+}
+
+// Review C11 and guarantee 3: a symlinked sidecar is reported once, as
+// SYMLINK by the scanner, is never followed and never cleaned through the
+// link. Before the fix the cleaner added a second SYMLINK finding.
+func TestSymlinkedSidecarReportedOnce(t *testing.T) {
+	noTools(t)
+	victim := write(t, filepath.Join(t.TempDir(), "victim.srt"), "1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link.srt")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// An attribute in the namespace the cleaner strips: it must survive,
+	// which proves the cleaner never reached the victim through the link.
+	attr := "user.amuxifytest"
+	if runtime.GOOS == "darwin" {
+		attr = "com.apple.amuxifytest"
+	}
+	if err := xattr.LSet(victim, attr, []byte("x")); err != nil {
+		t.Logf("no xattr on the victim: %v", err)
+		attr = ""
+	}
+	in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+	in.RemoveBlockedSidecars = true
+	in.apply(t)
+	res, err := in.IngestPath(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("results %+v", res)
+	}
+	fr := res[0]
+	n := 0
+	for _, f := range fr.Findings {
+		if f.Code == scan.CodeSymlink {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("SYMLINK reported %d times: %v", n, codes(fr))
+	}
+	if fr.Verdict != report.Warn || fr.Has(clean.CodeXattr) || fr.Has(clean.CodeNothing) || fr.Has(clean.CodeSidecarRemove) {
+		t.Errorf("%s %v", fr.Verdict, codes(fr))
+	}
+	if rt, text := route(t, fr); rt != RouteSkip || text != "sidecar; symlink skipped" {
+		t.Errorf("route %s %q", rt, text)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the link was removed or replaced")
+	}
+	if b, _ := os.ReadFile(victim); !strings.Contains(string(b), "hi") {
+		t.Error("the victim changed")
+	}
+	if attr != "" {
+		if _, err := xattr.LGet(victim, attr); err != nil {
+			t.Errorf("the victim's xattr was stripped through the link: %v", err)
+		}
+	}
+	if got := tr.all(); len(got) != 0 {
+		t.Errorf("tools ran: %v", got)
+	}
+}
+
+// Review C33: a dry run predicts the OUTPUT_EXISTS collision the live run
+// hits when two files of one run rebuild to the same destination, with the
+// same finding text, so the verdict counts and the exit code match.
+func TestDryRunPredictsDestinationCollision(t *testing.T) {
+	r := needTools(t)
+	prepare := func(t *testing.T) string {
+		dir := t.TempDir()
+		for _, name := range []string{"sample.mov", "sample.webm"} {
+			src := testutil.Copy(t, name)
+			if err := os.Rename(src, filepath.Join(dir, "ep"+filepath.Ext(name))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	run := func(t *testing.T, dir string, dry bool) []report.FileResult {
+		t.Helper()
+		in, _ := newIngester(t, r, mustProfile(t, "homelab"))
+		in.Remuxer.DryRun, in.Cleaner.DryRun = dry, dry
+		res, err := in.IngestPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results %d", len(res))
+		}
+		return res
+	}
+	counts := func(res []report.FileResult) map[report.Severity]int {
+		m := map[report.Severity]int{}
+		for _, fr := range res {
+			m[fr.Verdict]++
+		}
+		return m
+	}
+	dryDir := prepare(t)
+	before := snapshot(t, dryDir)
+	dry := run(t, dryDir, true)
+	sameSnapshot(t, before, snapshot(t, dryDir))
+	dest := filepath.Join(dryDir, "ep.mkv")
+	mov, webm := byBase(dry)["ep.mov"], byBase(dry)["ep.webm"]
+	if !mov.Has(remux.CodeDryRun) || mov.Output != dest || mov.Has(remux.CodeOutputExists) {
+		t.Errorf("ep.mov dry: %v %q", codes(mov), mov.Output)
+	}
+	f, ok := finding(webm, remux.CodeOutputExists)
+	if !ok || f.Severity != report.Fail || f.Message != dest+" already exists" {
+		t.Errorf("ep.webm dry: %v %q", codes(webm), f.Message)
+	}
+	if webm.Verdict != report.Fail || webm.Has(remux.CodeDryRun) || webm.Output != "" {
+		t.Errorf("ep.webm dry: %s %v %q", webm.Verdict, codes(webm), webm.Output)
+	}
+	total := 0
+	for _, fr := range dry {
+		for _, f := range fr.Findings {
+			if f.Code == remux.CodeOutputExists {
+				total++
+			}
+		}
+	}
+	if total != 1 {
+		t.Errorf("OUTPUT_EXISTS reported %d times, want 1", total)
+	}
+	// The planned set is per run: a second dry run of the same tree gives
+	// the same answer, not a collision for the first file too.
+	again := byBase(run(t, dryDir, true))
+	againMov, againWebm := again["ep.mov"], again["ep.webm"]
+	if !againMov.Has(remux.CodeDryRun) || !againWebm.Has(remux.CodeOutputExists) {
+		t.Errorf("second dry run differs: %v / %v", codes(againMov), codes(againWebm))
+	}
+
+	liveDir := prepare(t)
+	live := run(t, liveDir, false)
+	liveWebm := byBase(live)["ep.webm"]
+	liveDest := filepath.Join(liveDir, "ep.mkv")
+	if f, ok := finding(liveWebm, remux.CodeOutputExists); !ok || f.Message != liveDest+" already exists" {
+		t.Fatalf("live ep.webm: %v", codes(liveWebm))
+	}
+	if strings.Join(codes(liveWebm), ",") != strings.Join(codes(webm), ",") {
+		t.Errorf("collision findings differ: dry %v, live %v", codes(webm), codes(liveWebm))
+	}
+	if dc, lc := counts(dry), counts(live); fmt.Sprint(dc) != fmt.Sprint(lc) {
+		t.Errorf("verdict counts differ: dry %v, live %v", dc, lc)
+	}
+	if _, err := os.Lstat(liveDest); err != nil {
+		t.Errorf("live run did not place %s: %v", liveDest, err)
+	}
 }
