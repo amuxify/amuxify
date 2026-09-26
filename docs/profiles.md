@@ -40,9 +40,9 @@ Precedence: command-line flags > profile > built-in `homelab` defaults.
 - `keep` — list of languages to keep for audio and subtitles. `["*"]` keeps
   all. Accepts ISO 639-1, 639-2/B, 639-2/T and common names (`en`, `eng`,
   `english`, `ger`, `deu`, `german`, `ja`, `jpn` ...). Canonical form is ISO 639-2/B.
-- `prefer_original` — when the caller passes `--original-language` (or, in 0.3,
-  a hook supplies it), the first audio track in that language becomes the
-  default track.
+- `prefer_original` — when the caller passes `--original-language` (or the
+  Sonarr and Radarr hook adapters supply it from the series or movie record),
+  the first audio track in that language becomes the default track.
 - `und` — what to do with tracks that have no language tag: `keep`, `drop`, or
   `assume:<lang>` which tags them (for example `assume:eng`) and then applies
   `keep`. amuxify never prompts.
@@ -90,7 +90,7 @@ is never silently made silent.
 - `strip_provenance` — clear muxing and writing application, segment date, MP4
   `ilst` purchase and identifier atoms, XMP boxes.
 - `links` — `warn` or `fail` for links found in title, tags, chapter names or
-  attachment names (`LINK_IN_TAG`).
+  attachment names (`LINK_IN_TAG`) and in `.nfo` sidecars (`LINK_IN_SIDECAR`).
 - `provenance` — `warn` or `fail` when identifying atoms are present
   (`PURCHASE_ATOM`). Plain encoder fingerprints are reported at PASS level as
   `PROVENANCE_INFO` and only shown with `--verbose`.
@@ -127,6 +127,10 @@ Files in the scanned tree that are not media.
 - `block` — extensions reported as `BLOCK SIDECAR_BLOCKED`; `clean
   --remove-blocked-sidecars` deletes them.
 - Anything else is `WARN SIDECAR_UNKNOWN`.
+
+An allowed `.nfo` is classified as Kodi XML, Kodi URL, mixed or plain text
+(`NFO_KODI`, `NFO_TEXT`). Scraper URLs and artwork URLs are never reported as
+links. amuxify never rewrites an NFO file.
 
 ## Example custom profile
 
