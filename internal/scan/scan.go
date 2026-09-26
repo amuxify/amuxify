@@ -175,7 +175,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
 
 	category, isMedia := MediaExts[ext]
 	if !isMedia {
-		s.checkSidecar(fr, ext, kindRes)
+		s.checkSidecar(fr, path, ext, kindRes)
 		return r
 	}
 
@@ -231,7 +231,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
 	return r
 }
 
-func (s *Scanner) checkSidecar(fr *report.FileResult, ext string, k sniff.Result) {
+func (s *Scanner) checkSidecar(fr *report.FileResult, path, ext string, k sniff.Result) {
 	switch {
 	case contains(s.Profile.Sidecars.Block, ext):
 		fr.Addf(CodeSidecarBlocked, report.Block, "blocked sidecar type .%s", ext)
@@ -243,6 +243,9 @@ func (s *Scanner) checkSidecar(fr *report.FileResult, ext string, k sniff.Result
 			return
 		}
 		fr.Addf(CodeSidecarOK, report.Pass, "allowed sidecar .%s", ext)
+		if ext == "nfo" {
+			s.checkNfo(fr, path)
+		}
 	default:
 		fr.Addf(CodeSidecarUnknown, report.Warn, "unrecognised sidecar type .%s (%s)", ext, k.Kind)
 	}
