@@ -171,6 +171,7 @@ func TestInPlaceVerifyNoneRefused(t *testing.T) {
 			rm.InPlace = true
 			rm.VerifyTier = tc.tier
 			rm.Force = true
+			before := fileSHA(t, src)
 			_, err := rm.RemuxPath(context.Background(), dir)
 			if err == nil || !strings.Contains(err.Error(), "refusing --in-place together with verify tier none") {
 				t.Fatalf("err = %v", err)
@@ -178,7 +179,7 @@ func TestInPlaceVerifyNoneRefused(t *testing.T) {
 			if got := tr.all(); len(got) != 0 {
 				t.Fatalf("tools ran: %v", got)
 			}
-			if sum := fileSHA(t, src); sum != fileSHA(t, src) {
+			if fileSHA(t, src) != before {
 				t.Fatal("source changed")
 			}
 		})
@@ -506,11 +507,13 @@ func TestRemuxWritesViaTempAndPlaces(t *testing.T) {
 
 // Guarantee 5: a hash mismatch deletes the output and fails.
 func TestHashMismatchDeletesOutput(t *testing.T) {
-	if !seamWired {
-		t.Skip("remux seams are wired by WP1")
-	}
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
 	src := testutil.Copy(t, "clean.mkv")
+	srcBefore, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shaBefore := fileSHA(t, src)
 	outRoot := filepath.Join(t.TempDir(), "out")
 	origStream, origDecoded := streamHash, decodedHash
 	t.Cleanup(func() { streamHash, decodedHash = origStream, origDecoded })
@@ -545,6 +548,20 @@ func TestHashMismatchDeletesOutput(t *testing.T) {
 	})
 	if len(files) != 0 {
 		t.Fatalf("output kept after mismatch: %v", files)
+	}
+	// The source is untouched: same size, same mtime, same bytes.
+	srcAfter, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srcAfter.Size() != srcBefore.Size() || !srcAfter.ModTime().Equal(srcBefore.ModTime()) {
+		t.Fatalf("source size/mtime changed: %d/%v -> %d/%v", srcBefore.Size(), srcBefore.ModTime(), srcAfter.Size(), srcAfter.ModTime())
+	}
+	if fileSHA(t, src) != shaBefore {
+		t.Fatal("source content changed after a hash mismatch")
+	}
+	if l := leftovers(t, outRoot, filepath.Dir(src)); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
 	}
 }
 
@@ -640,6 +657,9 @@ func TestHardlinkModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(res) != 2 {
+			t.Fatalf("want 2 results, got %d", len(res))
+		}
 		for _, fr := range res {
 			if fr.Verdict != report.Warn || !fr.Has(CodeHardlinked) || fr.Has(CodePlaced) {
 				t.Errorf("%s: %s %v", fr.Path, fr.Verdict, codes(fr))
@@ -667,6 +687,9 @@ func TestHardlinkModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(res) != 2 {
+			t.Fatalf("want 2 results, got %d", len(res))
+		}
 		for _, fr := range res {
 			if fr.Verdict != report.Pass || !fr.Has(CodeHardlinked) || !fr.Has(CodePlaced) {
 				t.Errorf("%s: %s %v", fr.Path, fr.Verdict, codes(fr))
@@ -692,6 +715,9 @@ func TestHardlinkModes(t *testing.T) {
 		res, err := rm.RemuxPath(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("want 2 results, got %d", len(res))
 		}
 		// The first name is replaced with a warning, which breaks the link;
 		// the second name is then an ordinary single-link file.
@@ -854,6 +880,7 @@ func TestOutputRefusesSymlinkedSubdir(t *testing.T) {
 	if err := os.Symlink(elsewhere, filepath.Join(outRoot, "sub")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	before := fileSHA(t, src)
 	rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
 	rm.OutputRoot = outRoot
 	res, err := rm.RemuxPath(context.Background(), root)
@@ -872,8 +899,8 @@ func TestOutputRefusesSymlinkedSubdir(t *testing.T) {
 	if fi, err := os.Lstat(filepath.Join(outRoot, "sub")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("planted symlink was replaced or removed: %v", err)
 	}
-	if fileSHA(t, src) == "" {
-		t.Fatal("source unreadable")
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed by a refused remux")
 	}
 	// Nothing was written inside elsewhere at all.
 	entries, err := os.ReadDir(elsewhere)
@@ -883,4 +910,447 @@ func TestOutputRefusesSymlinkedSubdir(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("output tree escaped through the symlink: %v", entries)
 	}
+}
+
+// shq quotes s for a POSIX shell.
+func shq(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// mkvmergeWrapper installs a shell script as AMUXIFY_MKVMERGE that runs the
+// before snippet when mkvmerge is called with -o (a write), then the real
+// mkvmerge with the original arguments, then the after snippet, and exits
+// with mkvmerge's status. Identify calls (-J) pass straight through. The
+// Runner strips the environment, so every path a snippet needs must be
+// baked into it with shq. Tests use it to change the filesystem in the
+// window between the remuxer's checks and its placement.
+func mkvmergeWrapper(t *testing.T, r *exec.Runner, before, after string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the wrapper is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	real, err := r.Path(exec.MKVMerge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "mkvmerge")
+	body := "#!/bin/sh\nwrite=0\nfor a in \"$@\"; do [ \"$a\" = -o ] && write=1; done\n" +
+		"if [ \"$write\" = 1 ]; then\n:\n" + before + "\nfi\n" +
+		shq(real) + " \"$@\"\nrc=$?\n" +
+		"if [ \"$write\" = 1 ]; then\n:\n" + after + "\nfi\nexit $rc\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_MKVMERGE", script)
+}
+
+// Guarantee 1 under in-place mode: when the source is not .mkv already, a
+// file that appears at the .mkv name while mkvmerge runs is never replaced.
+// The wrapper plants it after the up-front existence check has passed. The
+// result is FAIL OUTPUT_EXISTS, the planted file is byte-identical, and the
+// source is untouched.
+func TestInPlacePlantedDestinationNotClobbered(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "purchased.mp4")
+	root := filepath.Dir(src)
+	dest := filepath.Join(root, "purchased.mkv")
+	before := fileSHA(t, src)
+	mkvmergeWrapper(t, r, "printf 'PRECIOUS USER DATA' > "+shq(dest), "")
+	rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	rm.InPlace = true
+	rm.Force = true // purchased.mp4 is WARN only
+	res, err := rm.RemuxPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never wrote anything; the placement was not exercised: %v", codes(fr))
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeOutputExists) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	if b, err := os.ReadFile(dest); err != nil || string(b) != "PRECIOUS USER DATA" {
+		t.Fatalf("planted destination was replaced: %q %v", b, err)
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+	if fi, err := os.Lstat(src); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("source no longer a regular file: %v", err)
+	}
+	if l := leftovers(t, root); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeOutputExists && strings.Contains(f.Message, "source was left untouched") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not say what happened to the source: %v", fr.Findings)
+	}
+}
+
+// caseInsensitiveDir reports whether dir resolves X.MKV and X.mkv to one
+// entry, which is the default on macOS APFS and on Windows.
+func caseInsensitiveDir(t *testing.T, dir string) bool {
+	t.Helper()
+	p := filepath.Join(dir, ".amuxify-case-probe.MKV")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(p)
+	a, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.Lstat(filepath.Join(dir, ".amuxify-case-probe.mkv"))
+	return err == nil && os.SameFile(a, b)
+}
+
+// An in-place remux of X.MKV must not report OUTPUT_EXISTS against itself on
+// a case-insensitive filesystem, and must still refuse a distinct X.mkv on
+// a case-sensitive one, even when that X.mkv is a hard link of the source.
+func TestInPlaceUpperCaseExtension(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	setup := func(t *testing.T) (string, string) {
+		t.Helper()
+		src := testutil.Copy(t, "clean.mkv")
+		upper := filepath.Join(filepath.Dir(src), "CLEAN.MKV")
+		if err := os.Rename(src, upper); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Dir(upper), upper
+	}
+	byName := func(res []report.FileResult, name string) (report.FileResult, bool) {
+		for _, fr := range res {
+			if filepath.Base(fr.Path) == name {
+				return fr, true
+			}
+		}
+		return report.FileResult{}, false
+	}
+	names := func(t *testing.T, dir string) []string {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name())
+		}
+		return out
+	}
+
+	t.Run("same entry on a case-insensitive filesystem", func(t *testing.T) {
+		root, src := setup(t)
+		if !caseInsensitiveDir(t, root) {
+			t.Skip("case-sensitive filesystem: CLEAN.MKV and CLEAN.mkv are distinct names here; the hard-link subtest covers that")
+		}
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.InPlace = true
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("%d results", len(res))
+		}
+		fr := res[0]
+		if fr.Has(CodeOutputExists) || fr.Verdict >= report.Fail || !fr.Has(CodePlaced) {
+			t.Fatalf("%s %v", fr.Verdict, codes(fr))
+		}
+		want := filepath.Join(root, "CLEAN.mkv")
+		if fr.Output != want {
+			t.Fatalf("Output %q want %q", fr.Output, want)
+		}
+		if got := names(t, root); !reflect.DeepEqual(got, []string{"CLEAN.mkv"}) {
+			t.Fatalf("directory holds %v, want exactly [CLEAN.mkv]", got)
+		}
+		if _, err := os.Lstat(src); err != nil {
+			t.Fatalf("the entry vanished: %v", err)
+		}
+		pr := &probe.Prober{Runner: r, Timeout: time.Minute}
+		out, err := pr.Probe(context.Background(), want)
+		if err != nil || !out.IsMatroska() {
+			t.Fatalf("output is not Matroska: %v", err)
+		}
+		if l := leftovers(t, root); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+	})
+
+	t.Run("hard-linked twin spelled with the lower-case extension", func(t *testing.T) {
+		root, src := setup(t)
+		twin := filepath.Join(root, "CLEAN.mkv")
+		if err := os.Link(src, twin); err != nil {
+			t.Skipf("cannot create CLEAN.mkv beside CLEAN.MKV (case-insensitive filesystem): %v", err)
+		}
+		before := fileSHA(t, src)
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.InPlace = true
+		rm.Hardlinks = "break"
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("want 2 results, got %d", len(res))
+		}
+		// CLEAN.MKV cannot take the name CLEAN.mkv: that is a distinct
+		// file. Whichever of the two names was processed first, the file
+		// behind CLEAN.MKV was never renamed over its twin.
+		up, ok := byName(res, "CLEAN.MKV")
+		if !ok {
+			t.Fatalf("no result for CLEAN.MKV: %v", res)
+		}
+		if !up.Has(CodeOutputExists) || up.Verdict != report.Fail || up.Has(CodePlaced) {
+			t.Fatalf("CLEAN.MKV: %s %v", up.Verdict, codes(up))
+		}
+		if fileSHA(t, src) != before {
+			t.Fatal("CLEAN.MKV was rewritten although its .mkv name was taken")
+		}
+		if got := names(t, root); !reflect.DeepEqual(got, []string{"CLEAN.MKV", "CLEAN.mkv"}) {
+			t.Fatalf("directory holds %v", got)
+		}
+		if l := leftovers(t, root); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+	})
+
+	t.Run("case-insensitive with a hard link under another name", func(t *testing.T) {
+		root, src := setup(t)
+		if !caseInsensitiveDir(t, root) {
+			t.Skip("case-sensitive filesystem: the same-entry case does not arise here")
+		}
+		twin := filepath.Join(root, "twin.mkv")
+		if err := os.Link(src, twin); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.InPlace = true
+		rm.Hardlinks = "break"
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("want 2 results, got %d", len(res))
+		}
+		up, ok := byName(res, "CLEAN.MKV")
+		if !ok {
+			t.Fatalf("no result for CLEAN.MKV: %v", res)
+		}
+		if up.Has(CodeOutputExists) || up.Verdict >= report.Fail || !up.Has(CodePlaced) || up.Output != filepath.Join(root, "CLEAN.mkv") {
+			t.Fatalf("CLEAN.MKV: %s %v output=%q", up.Verdict, codes(up), up.Output)
+		}
+		if got := names(t, root); !reflect.DeepEqual(got, []string{"CLEAN.mkv", "twin.mkv"}) {
+			t.Fatalf("directory holds %v", got)
+		}
+		if l := leftovers(t, root); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+	})
+}
+
+// Guarantee 4 under in-place mode: hardlinks=copy sends a hard-linked file
+// to the mirrored output tree, and that tree is created without following
+// symlinks, exactly as in output mode. A symlink planted at the mirrored
+// subdirectory is refused and nothing is written through it, whether the
+// output root is explicit or the derived <root>__remuxed.
+func TestInPlaceCopyModeRefusesSymlinkedOutputSubdir(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name     string
+		explicit bool
+	}{
+		{"explicit output root", true},
+		{"derived output root", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "in")
+			src := filepath.Join(root, "sub", "a.mkv")
+			if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(testutil.Copy(t, "clean.mkv"), src); err != nil {
+				t.Fatal(err)
+			}
+			twin := filepath.Join(root, "sub", "b.mkv")
+			if err := os.Link(src, twin); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			outRoot := root + "__remuxed"
+			if tc.explicit {
+				outRoot = filepath.Join(t.TempDir(), "out")
+			}
+			elsewhere := t.TempDir()
+			if err := os.MkdirAll(outRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, filepath.Join(outRoot, "sub")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			before := fileSHA(t, src)
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm.InPlace = true
+			rm.Hardlinks = "copy"
+			if tc.explicit {
+				rm.OutputRoot = outRoot
+			}
+			res, err := rm.RemuxPath(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 2 {
+				t.Fatalf("want 2 results, got %d", len(res))
+			}
+			for _, fr := range res {
+				if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+					t.Errorf("%s: %s %v output=%q", fr.Path, fr.Verdict, codes(fr), fr.Output)
+				}
+			}
+			if w := tr.writes(); len(w) != 0 {
+				t.Errorf("mkvmerge was started although the output directory was refused: %v", w)
+			}
+			entries, err := os.ReadDir(elsewhere)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("output escaped through the symlink: %v", entries)
+			}
+			if fi, err := os.Lstat(filepath.Join(outRoot, "sub")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("planted symlink was replaced or removed: %v", err)
+			}
+			if l := leftovers(t, elsewhere, outRoot, root); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+			if fileSHA(t, src) != before || fileSHA(t, twin) != before {
+				t.Fatal("sources changed")
+			}
+			fi, _ := os.Lstat(src)
+			if fsutil.Nlink(fi) != 2 {
+				t.Errorf("link broken: nlink %d", fsutil.Nlink(fi))
+			}
+		})
+	}
+}
+
+// Guarantee 3 across the scan-to-remux window: a scanned regular file that
+// is swapped for a symlink before the remuxer opens it is refused, no tool
+// runs against the link, and the file behind the link is untouched. The
+// victim is real media so a followed link would have succeeded.
+func TestSourceSwappedForSymlinkRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		inPlace bool
+	}{
+		{"before mkvmerge in place", true},
+		{"before mkvmerge to output tree", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.mkv")
+			if err := os.Rename(testutil.Copy(t, "clean.mkv"), path); err != nil {
+				t.Fatal(err)
+			}
+			victim := testutil.Copy(t, "clean.mkv")
+			victimBefore := fileSHA(t, victim)
+			outRoot := filepath.Join(t.TempDir(), "out")
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm.InPlace = tc.inPlace
+			rm.OutputRoot = outRoot
+			sc := rm.Scanner.ScanFile(context.Background(), path, dir)
+			if sc.Info == nil || sc.File.Verdict >= report.Fail {
+				t.Fatalf("scan: %v", codes(sc.File))
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			scanned := len(tr.all())
+			fr := rm.RemuxScanned(context.Background(), sc, dir, outRoot)
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "symlink") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+			}
+			if got := tr.all()[scanned:]; len(got) != 0 {
+				t.Fatalf("tools ran against the swapped path: %v", got)
+			}
+			if fileSHA(t, victim) != victimBefore {
+				t.Fatal("symlink target changed")
+			}
+			if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the planted symlink was replaced: %v", err)
+			}
+			if _, err := os.Lstat(outRoot); err == nil {
+				t.Fatal("output root created for a refused file")
+			}
+			if l := leftovers(t, dir); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+		})
+	}
+
+	// The swap can also land after mkvmerge has read the real file and
+	// before the verified output replaces it. The wrapper performs the
+	// swap as mkvmerge exits; the in-place placement must then refuse
+	// rather than rename over the link or take the victim's identity.
+	t.Run("after mkvmerge before placement in place", func(t *testing.T) {
+		src := testutil.Copy(t, "clean.mkv")
+		dir := filepath.Dir(src)
+		victim := testutil.Copy(t, "clean.mkv")
+		victimBefore := fileSHA(t, victim)
+		mkvmergeWrapper(t, r, "", "rm -f "+shq(src)+" && ln -s "+shq(victim)+" "+shq(src))
+		rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+		rm.InPlace = true
+		res, err := rm.RemuxPath(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("%d results", len(res))
+		}
+		fr := res[0]
+		if len(tr.writes()) == 0 {
+			t.Fatalf("mkvmerge never ran: %v", codes(fr))
+		}
+		if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+			t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+		}
+		if fileSHA(t, victim) != victimBefore {
+			t.Fatal("symlink target changed")
+		}
+		if fi, err := os.Lstat(src); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the planted symlink was replaced: %v", err)
+		}
+		if l := leftovers(t, dir); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 1 {
+			t.Fatalf("directory holds %d entries, want only the symlink", len(entries))
+		}
+	})
 }
