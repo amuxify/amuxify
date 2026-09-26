@@ -17,19 +17,28 @@ import (
 // Symlinks are listed (ScanFile reports them) and never followed, so a
 // symlink somewhere in the tree cannot abort the walk (guarantee 3).
 //
+// Each path in exclude names a directory that is not entered; the scanner
+// passes its quarantine directory so a quarantine that sits inside the tree
+// is not walked and its files are not quarantined again one level deeper.
+// The comparison is on the cleaned absolute path of each directory met.
+//
 // A directory that cannot be read, or an entry that vanishes or errors while
 // the tree is listed, does not stop the walk either: every readable entry is
 // still listed, and the returned error names each unreadable one. Callers
 // process the paths they got and report that error at run level, so a tree
 // with an unreadable corner is never reported as PASS with the corner missing
 // (review C2).
-func Walk(abs string) ([]string, error) {
+func Walk(abs string, exclude ...string) ([]string, error) {
 	fi, err := os.Lstat(abs)
 	if err != nil {
 		return nil, err
 	}
 	if !fi.IsDir() {
 		return []string{abs}, nil
+	}
+	skip := map[string]bool{}
+	for _, e := range exclude {
+		skip[filepath.Clean(e)] = true
 	}
 	var paths []string
 	var unreadable []string
@@ -39,6 +48,9 @@ func Walk(abs string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
+			if skip[filepath.Clean(p)] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if d.Name() == ".DS_Store" || isTempName(d.Name()) {
