@@ -257,7 +257,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	// exists and was walked without following symlinks. Otherwise the
 	// mirrored directory chain is created component by component so a
 	// symlink planted inside the output tree cannot redirect the remuxed
-	// file outside the root the user named (guarantee 4). The refusal is
+	// file outside the root the user named (guarantee 3). The refusal is
 	// reported as REMUX_FAIL because the finding codes are frozen and, from
 	// the caller's point of view, the remux of this file did not happen; the
 	// message carries the reason.

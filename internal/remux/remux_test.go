@@ -141,7 +141,7 @@ func mediaResult(path string, verdict report.Severity) scan.Result {
 	}
 }
 
-// Guarantee 7: in-place needs verification.
+// Guarantee 8: in-place needs verification.
 func TestInPlaceVerifyNoneRefused(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -194,7 +194,7 @@ func TestInPlaceVerifyNoneRefused(t *testing.T) {
 	}
 }
 
-// Guarantee 4: BLOCK is never overridden, not even by --force.
+// Guarantee 9: BLOCK is never overridden, not even by --force.
 func TestBlockRefusedEvenWithForce(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -750,7 +750,7 @@ func TestHardlinkModes(t *testing.T) {
 	})
 }
 
-// Guarantee 2 and 8: dry run touches nothing, and reports what it would do.
+// Dry run: a dry run touches nothing, and reports what it would do.
 func TestDryRunWritesNothing(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
 	src := testutil.Copy(t, "multi.mkv")
@@ -1162,7 +1162,7 @@ func TestInPlaceUpperCaseExtension(t *testing.T) {
 	})
 }
 
-// Guarantee 4 under in-place mode: hardlinks=copy sends a hard-linked file
+// Guarantee 3 under in-place mode: hardlinks=copy sends a hard-linked file
 // to the mirrored output tree, and that tree is created without following
 // symlinks, exactly as in output mode. A symlink planted at the mirrored
 // subdirectory is refused and nothing is written through it, whether the
