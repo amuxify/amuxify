@@ -9,7 +9,8 @@ SECURITY.md.
 
 - **PASS** nothing to report.
 - **WARN** the file is usable; something you should know about (a link in a
-  tag, a link in an NFO, an untagged track, an unknown sidecar, a hard link).
+  tag, a link in an NFO, an untagged track, an unknown sidecar, a hard link
+  that stops an in-place edit).
 - **FAIL** integrity: the file cannot be parsed, is truncated, is not what its
   extension claims, or an output could not be verified. `remux --force` will
   still attempt a FAIL file; the output is verified as strictly as any other.
