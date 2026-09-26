@@ -572,7 +572,11 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
-	if err := fsutil.PlaceNoClobber(fr.Path, dest); err != nil {
+	// The quarantine directory often sits on another filesystem than the
+	// media tree (the bare --quarantine form uses the state directory), so
+	// the move copies and verifies across devices; it never replaces a
+	// file that already sits at the destination.
+	if err := fsutil.MoveNoClobber(fr.Path, dest); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
