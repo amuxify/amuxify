@@ -1,3 +1,5 @@
+<img src="site/amuxify-logo.png" alt="amuxify logo" width="96" align="right">
+
 # amuxify
 
 **The ingest gate for self-hosted media.** Verify, sanitize, normalize, prove.
