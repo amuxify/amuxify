@@ -44,7 +44,7 @@ func asUser(t *testing.T, uid int) {
 	t.Cleanup(func() { fsutil.Geteuid = orig })
 }
 
-// Guarantee 8: modifying commands refuse to run as root. That includes
+// Guarantee 10: modifying commands refuse to run as root. That includes
 // ingest and every hook adapter, which is where a container running as root
 // would hit it, so the rows below cover each of them with the flags that
 // delete or move files. Nothing under the directory may change and no
@@ -498,7 +498,8 @@ func TestExitCodesFollowVerdict(t *testing.T) {
 	}
 }
 
-// Guarantee 8: --dry-run changes nothing anywhere.
+// Dry run: --dry-run changes nothing anywhere, under every command and
+// with every flag that would otherwise move or delete a file.
 func TestDryRunTouchesNothing(t *testing.T) {
 	testutil.Stubs(t)
 	asUser(t, 1000)

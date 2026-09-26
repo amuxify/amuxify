@@ -298,7 +298,7 @@ func TestDoubleExtWarnsOnBlockedPenultimate(t *testing.T) {
 	expect(t, fr, report.Block, CodeSidecarBlocked)
 }
 
-// Guarantee 9: the sidecar gate follows the profile lists.
+// Sidecar policy: the sidecar gate follows the profile lists.
 func TestSidecarListsPerProfile(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
