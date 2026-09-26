@@ -58,7 +58,10 @@ All notable changes to amuxify will be documented in this file.
   under `--json` writes exactly one JSON document to stdout and its own log
   lines to stderr, reports an interruption on stderr, and refuses a positional
   argument the adapter does not take, with a hint when a directory was written
-  after a bare `--quarantine`. The NZBGet wrapper honours `AMUXIFY_PROFILE`
+  after a bare `--quarantine`. The SABnzbd adapter accepts exactly seven or
+  eight positional parameters, so a directory written after a bare
+  `--quarantine` in front of SABnzbd's own parameters is refused with the same
+  hint instead of being silently ignored. The NZBGet wrapper honours `AMUXIFY_PROFILE`
   behind its own `NZBPO_PROFILE` option like the other wrappers. The release
   workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
   `Dockerfile.sabnzbd` installs the wrapper under

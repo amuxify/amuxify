@@ -167,13 +167,17 @@ func (g *Global) hookTest(ctx context.Context, a hook.Adapter) int {
 
 // hookPositionals refuses positional arguments the adapter does not take,
 // before the environment is read and before anything runs. SABnzbd may pass
-// its seven or eight parameters in place of the environment; every other
-// caller sets the environment only, so a stray word is a usage error rather
-// than silently ignored. The usual cause is a directory written after a bare
-// --quarantine, which takes no separate value, so the message says how to
-// write it.
+// its parameters in place of the environment: the documented eight, or
+// seven from a version older than the one that added the failure URL as the
+// eighth. Every other caller sets the environment only, so a stray word is a
+// usage error rather than silently ignored. The usual cause is a directory
+// written after a bare --quarantine, which takes no separate value, so the
+// message says how to write it. The count is exact rather than a minimum
+// because SABnzbd appends its parameters after whatever the wrapper wrote,
+// so a stray directory in front of them shows up as one parameter too many
+// and args[0] is that directory.
 func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
-	if len(args) == 0 || (a == hook.SABnzbd && len(args) >= 7) {
+	if len(args) == 0 || (a == hook.SABnzbd && (len(args) == 7 || len(args) == 8)) {
 		return ""
 	}
 	var msg string
