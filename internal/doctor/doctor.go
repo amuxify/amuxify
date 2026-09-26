@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -81,6 +82,7 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 			add(Check{Name: f.tool, Status: report.Pass, Detail: fmt.Sprintf("%s (%s)", path, line), Required: f.required})
 		}
 	}
+	add(localeCheck(ctx, r))
 	if p, err := policy.Load(profileName); err != nil {
 		add(Check{Name: "profile", Status: report.Usage, Detail: err.Error(), Required: true})
 	} else {
@@ -114,6 +116,46 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 		add(Check{Name: "tmpdir", Status: report.Pass, Detail: tmp})
 	}
 	return checks, worst
+}
+
+// localeCheck runs mkvmerge --version under the locale every tool gets
+// (exec.Locale) and reports whether mkvmerge accepted it. On a host without
+// a C.UTF-8 locale, older glibc systems for example, mkvmerge refuses to
+// start and says so; the only fix is for the user to export a UTF-8 locale
+// that exists on the host, which exec.Locale then keeps.
+func localeCheck(ctx context.Context, r *exec.Runner) Check {
+	loc := exec.Locale()
+	c := Check{Name: "locale", Status: report.Pass, Detail: loc}
+	if _, err := r.Path(exec.MKVMerge); err != nil {
+		c.Detail = loc + " (not tested: mkvmerge is not installed)"
+		return c
+	}
+	res, err := r.RunWithTimeout(ctx, 20*time.Second, exec.MKVMerge, "--version")
+	if err != nil {
+		c.Status = report.Warn
+		c.Detail = fmt.Sprintf("%s: mkvmerge --version could not be run: %v", loc, err)
+		return c
+	}
+	out := strings.ToLower(string(res.Stdout) + string(res.Stderr))
+	if res.ExitCode != 0 || strings.Contains(out, "locale") {
+		c.Status = report.Warn
+		c.Detail = fmt.Sprintf("mkvmerge rejects the locale %s: %s. Export a UTF-8 locale that exists on this host, for example LANG=en_US.UTF-8, before running amuxify.", loc, firstLine(res))
+		return c
+	}
+	return c
+}
+
+// firstLine returns the first non-empty line of a run's output, standard
+// output first, trimmed.
+func firstLine(res *exec.Result) string {
+	for _, b := range [][]byte{res.Stdout, res.Stderr} {
+		for _, line := range strings.Split(string(b), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				return line
+			}
+		}
+	}
+	return "no output"
 }
 
 func parseVersion(line string) ([]int, bool) {
