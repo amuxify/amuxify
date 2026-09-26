@@ -536,10 +536,38 @@ func TestQuarantineNeverEscapesRoot(t *testing.T) {
 	}
 	for _, p := range placed {
 		rel, err := filepath.Rel(q, p)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			t.Errorf("%s is outside the quarantine root", p)
 		}
 	}
+	// A directory whose name starts with two dots is a normal directory:
+	// its file keeps its mirrored place instead of being flattened to the
+	// quarantine root, where it would collide with a root-level file of
+	// the same name.
+	for _, want := range []string{filepath.Join(q, "..dots", "b.url"), filepath.Join(q, "a.url"), filepath.Join(q, "c.url")} {
+		if _, err := os.Lstat(want); err != nil {
+			t.Errorf("not mirrored at %s: %v (placed: %v)", want, err, placed)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(q, "b.url")); err == nil {
+		t.Errorf("..dots/b.url was flattened to the quarantine root")
+	}
+	// A file that does not sit under the root it is scanned against, or
+	// that is handed as its own root, still lands under its base name.
+	for _, against := range []string{t.TempDir(), filepath.Join(root, "sub")} {
+		outside := write(t, filepath.Join(t.TempDir(), "escape", "f.url"), "x\n", 0o644)
+		r := s.ScanFile(context.Background(), outside, against)
+		requireQuarantineFinding(t, r.File, report.Block, "moved to "+filepath.Join(q, "f.url"))
+		if _, err := os.Lstat(filepath.Join(q, "f.url")); err != nil {
+			t.Errorf("root %s: escaping file not placed under its base name: %v", against, err)
+		}
+		if err := os.Remove(filepath.Join(q, "f.url")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	self := write(t, filepath.Join(t.TempDir(), "self.url"), "x\n", 0o644)
+	r := s.ScanFile(context.Background(), self, self)
+	requireQuarantineFinding(t, r.File, report.Block, "moved to "+filepath.Join(q, "self.url"))
 	// The scan of a single file quarantines under its own base name.
 	single := write(t, filepath.Join(t.TempDir(), "solo.url"), "x\n", 0o644)
 	res, err = s.ScanPath(context.Background(), single)
@@ -1287,6 +1315,56 @@ func TestQuarantineAcrossFilesystems(t *testing.T) {
 	}
 	if _, err := os.Lstat(src); err != nil {
 		t.Fatal("source removed although the quarantine slot was taken")
+	}
+}
+
+// Guarantee 3 during quarantine: the BLOCK file is replaced by a symlink to
+// a victim between the scanner's checks and the move (the quarantine runs
+// after every tool has looked at the file). The move must not turn the
+// symlink into a hard link to the victim inside the quarantine tree: the
+// result is WARN "quarantine failed", nothing sits at the quarantine path,
+// and the victim keeps its bytes and its single link.
+func TestQuarantineRefusesSourceSwappedForSymlink(t *testing.T) {
+	noTools(t)
+	root := t.TempDir()
+	q := filepath.Join(t.TempDir(), "quarantine")
+	victim := write(t, filepath.Join(t.TempDir(), "victim.mkv"), "precious", 0o644)
+	write(t, filepath.Join(root, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n", 0o644)
+	orig := fsutil.Place
+	fsutil.Place = func(s, d string) error {
+		if err := os.Remove(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, s); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return fsutil.PlaceNoClobber(s, d)
+	}
+	t.Cleanup(func() { fsutil.Place = orig })
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = q
+	res, err := s.ScanPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	expect(t, res[0].File, report.Block, CodeSidecarBlocked)
+	requireQuarantineFinding(t, res[0].File, report.Warn, "quarantine failed")
+	dest := filepath.Join(q, "sub", "x.url")
+	if _, err := os.Lstat(dest); err == nil {
+		t.Errorf("an entry was placed at %s", dest)
+	}
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "precious" {
+		t.Errorf("victim changed: %q %v", b, err)
+	}
+	fi, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := fsutil.Nlink(fi); n != 1 {
+		t.Errorf("victim has %d links, want 1", n)
 	}
 }
 
