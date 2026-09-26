@@ -96,6 +96,11 @@ All notable changes to amuxify will be documented in this file.
   directory does not defeat them. The human report sanitiser and the
   `BIDI_NAME` check now cover every Unicode format character, including U+061C
   and the tag characters, rather than a fixed list of code points.
+- The temp file that a rebuild or an MP4 rewrite creates stays open until the
+  run's last identity check has passed. An open descriptor keeps the inode
+  allocated, so a filesystem that reuses a freed inode number at once, as ext4
+  does, cannot give that number to a file swapped onto the temp name, which
+  would otherwise pass as the run's own.
 
 ## 0.2.0
 

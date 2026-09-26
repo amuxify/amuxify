@@ -33,9 +33,13 @@ SECURITY.md.
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
    A symlink swapped onto the temp name during a run is refused before the
    output takes its source's identity, which is copied through the open
-   descriptor rather than the name, and before the output is placed.
+   descriptor rather than the name, and before the output is placed. The
+   temp file is held open from its creation until the last of those checks,
+   so its inode number cannot be freed and handed to a file swapped onto the
+   name, as ext4 would do at once.
    Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
-   `remux.TestTempSwappedBeforePlacementRefused`, `clean.TestMp4RewriteRefusesSwappedTemp`.
+   `fsutil.TestCreateTempPinsInode`, `remux.TestTempSwappedBeforePlacementRefused`,
+   `clean.TestMp4RewriteRefusesSwappedTemp`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make

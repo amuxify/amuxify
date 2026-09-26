@@ -365,13 +365,17 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 	// rewritten (guarantee 3). ffmpeg writes into the existing file rather
 	// than unlinking and recreating it, so the identity survives the
 	// rewrite. os.Remove never follows a link, so the cleanup on every
-	// failure removes a planted link and leaves its target alone.
+	// failure removes a planted link and leaves its target alone. The handle
+	// stays open until the replacement has been checked, so the inode
+	// number cannot be freed and reused by a file swapped onto the name.
 	tmp := fsutil.TempName(info.Path)
-	created, err := fsutil.CreateTemp(tmp)
+	own, err := fsutil.CreateTemp(tmp)
 	if err != nil {
 		fr.Addf(CodeCleanFail, report.Fail, "temp file: %v", err)
 		return
 	}
+	defer own.Close()
+	created := own.Info()
 	args := []string{"-v", "error", "-i", info.Path, "-map", "0", "-c", "copy", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags", "+bitexact"}
 	if c.Profile.Chapters.Keep {
 		args = append(args, "-map_chapters", "0")

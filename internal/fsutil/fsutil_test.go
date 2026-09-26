@@ -781,11 +781,17 @@ func TestReplaceInPlaceRefusesSwappedTemp(t *testing.T) {
 	if err := os.Remove(tmp); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, tmp, "mine", 0o644)
-	created, err := os.Lstat(tmp)
+	// The identity comes from CreateTemp, which keeps the file open. On a
+	// filesystem that reuses a freed inode number at once, as ext4 does,
+	// the foreign file would otherwise get the recorded number and pass as
+	// the run's own.
+	own, err := CreateTemp(tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer own.Close()
+	created := own.Info()
+	writeFile(t, tmp, "mine", 0o644)
 	if err := os.Remove(tmp); err != nil {
 		t.Fatal(err)
 	}
@@ -840,10 +846,12 @@ func TestReplaceInPlaceOwnReportsSwapBeforeRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmp := TempName(dest)
-	created, err := CreateTemp(tmp)
+	own, err := CreateTemp(tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = own.Close() })
+	created := own.Info()
 	if err := os.WriteFile(tmp, []byte("rebuilt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -909,14 +917,56 @@ func TestReplaceInPlaceOwnReportsSwapBeforeRename(t *testing.T) {
 			if _, err := os.Lstat(dest); err == nil {
 				_ = os.Remove(dest)
 			}
+			_ = own.Close()
 			var cerr error
-			created, cerr = CreateTemp(tmp)
+			own, cerr = CreateTemp(tmp)
 			if cerr != nil {
 				t.Fatal(cerr)
 			}
+			created = own.Info()
 			if err := os.WriteFile(tmp, []byte("rebuilt"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// CreateTemp keeps the file it made open so that its inode stays allocated
+// until Close. Without that, a filesystem that reuses a freed inode number
+// at once, as ext4 does, would give a file created at the same name the
+// number recorded at creation, and os.SameFile would take the swapped file
+// for the run's own. The swap is the one someone with write access to the
+// directory performs: remove the temp file, create another at the name. On
+// a filesystem that never reuses inode numbers the test passes regardless;
+// the Linux test run is the one that exercises the pin.
+func TestCreateTempPinsInode(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), ".amuxify-x.tmp")
+	own, err := CreateTemp(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer own.Close()
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, tmp, "foreign", 0o644)
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(own.Info(), now) {
+		t.Fatal("a file created at the temp name after the removal got the recorded identity")
+	}
+	if f, err := OpenOwn(tmp, own.Info()); err == nil || !strings.Contains(err.Error(), "not the file this run created") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("OpenOwn accepted the swapped file: %v", err)
+	}
+	if err := own.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := own.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
 	}
 }
