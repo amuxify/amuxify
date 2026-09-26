@@ -8,9 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -77,22 +75,9 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	fi, err := os.Lstat(abs)
+	paths, err := scan.Walk(abs)
 	if err != nil {
 		return nil, err
-	}
-	var paths []string
-	if fi.IsDir() {
-		_ = filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
-				return nil
-			}
-			paths = append(paths, p)
-			return nil
-		})
-		sort.Strings(paths)
-	} else {
-		paths = []string{abs}
 	}
 	var out []report.FileResult
 	for _, p := range paths {
@@ -125,24 +110,7 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 	}
 	ext := fsutil.Ext(path)
 	if !scan.IsMedia(path) {
-		if contains(c.Profile.Sidecars.Block, ext) {
-			if c.RemoveBlockedSidecars {
-				if c.DryRun {
-					fr.Addf(CodeDryRun, report.Pass, "would remove blocked sidecar .%s", ext)
-				} else if err := os.Remove(path); err != nil {
-					fr.Addf(CodeCleanFail, report.Fail, "remove: %v", err)
-				} else {
-					fr.Addf(CodeSidecarRemove, report.Pass, "blocked sidecar removed")
-				}
-				return fr
-			}
-			fr.Addf(CodeSkipped, report.Warn, "blocked sidecar .%s left in place (use --remove-blocked-sidecars)", ext)
-			return fr
-		}
-		c.stripXattrs(&fr, path)
-		if len(fr.Findings) == 0 {
-			fr.Addf(CodeNothing, report.Pass, "sidecar; nothing to clean")
-		}
+		c.cleanSidecar(&fr, path, ext)
 		return fr
 	}
 	if n := fsutil.Nlink(fi); n > 1 && c.hardlinks() == "skip" {
@@ -155,28 +123,91 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 		fr.Addf(CodeCleanFail, report.Fail, "probe: %v", err)
 		return fr
 	}
+	c.cleanMedia(ctx, &fr, path, ext, info)
+	return fr
+}
+
+// CleanScanned cleans one file that scan has already probed, without probing
+// again. The result carries only the cleaner's findings; ingest merges them.
+func (c *Cleaner) CleanScanned(ctx context.Context, sc scan.Result) report.FileResult {
+	start := time.Now()
+	path := sc.File.Path
+	fr := report.FileResult{Path: path, Info: map[string]string{}}
+	defer func() { fr.Duration = time.Since(start) }()
+
+	fi, err := os.Lstat(path)
+	if err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "%v", err)
+		return fr
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
+		return fr
+	}
+	ext := fsutil.Ext(path)
+	if !scan.IsMedia(path) {
+		c.cleanSidecar(&fr, path, ext)
+		return fr
+	}
+	if n := fsutil.Nlink(fi); n > 1 && c.hardlinks() == "skip" {
+		fr.Addf(CodeHardlinked, report.Warn, "file has %d hard links; skipped (safety.hardlinks = skip)", n)
+		return fr
+	}
+	if sc.Info == nil {
+		fr.Addf(CodeCleanFail, report.Fail, "no probe result; scan did not parse this file")
+		return fr
+	}
+	c.cleanMedia(ctx, &fr, path, ext, sc.Info)
+	return fr
+}
+
+// cleanSidecar removes a blocked sidecar when asked to, or strips its
+// extended attributes.
+func (c *Cleaner) cleanSidecar(fr *report.FileResult, path, ext string) {
+	if contains(c.Profile.Sidecars.Block, ext) {
+		if c.RemoveBlockedSidecars {
+			if c.DryRun {
+				fr.Addf(CodeDryRun, report.Pass, "would remove blocked sidecar .%s", ext)
+			} else if err := os.Remove(path); err != nil {
+				fr.Addf(CodeCleanFail, report.Fail, "remove: %v", err)
+			} else {
+				fr.Addf(CodeSidecarRemove, report.Pass, "blocked sidecar removed")
+			}
+			return
+		}
+		fr.Addf(CodeSkipped, report.Warn, "blocked sidecar .%s left in place (use --remove-blocked-sidecars)", ext)
+		return
+	}
+	c.stripXattrs(fr, path)
+	if len(fr.Findings) == 0 {
+		fr.Addf(CodeNothing, report.Pass, "sidecar; nothing to clean")
+	}
+}
+
+// cleanMedia picks the cleaner for a probed media file and strips extended
+// attributes afterwards.
+func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, ext string, info *probe.MediaInfo) {
 	switch {
 	case info.IsMatroska():
-		c.cleanMatroska(ctx, &fr, info)
+		c.cleanMatroska(ctx, fr, info)
 	case info.Container == "mp4":
-		c.cleanRewrite(ctx, &fr, info, mp4Muxer(ext))
+		c.cleanRewrite(ctx, fr, info, mp4Muxer(ext))
 	case info.Container == "avi":
-		c.cleanRewrite(ctx, &fr, info, "avi")
+		c.cleanRewrite(ctx, fr, info, "avi")
 	case info.Container == "flv":
-		c.cleanRewrite(ctx, &fr, info, "flv")
+		c.cleanRewrite(ctx, fr, info, "flv")
 	case info.Container == "mpegts", info.Container == "mpegps":
 		fr.Addf(CodeNothing, report.Pass, "%s carries no writable metadata; use remux to convert", info.Container)
 	case info.Container == "mp3", info.Container == "flac", info.Container == "ogg", info.Container == "wav":
 		if c.StripAudioTags {
-			c.cleanRewrite(ctx, &fr, info, audioMuxer(info.Container))
+			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container))
 		} else {
 			fr.Addf(CodeSkipped, report.Pass, "audio tags left alone (use --strip-audio-tags)")
 		}
 	default:
 		fr.Addf(CodeSkipped, report.Warn, "no cleaner for container %s", info.Container)
 	}
-	c.stripXattrs(&fr, path)
-	return fr
+	c.stripXattrs(fr, path)
 }
 
 func mp4Muxer(ext string) string {
