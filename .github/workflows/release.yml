@@ -32,12 +32,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The tag is v0.3.0; the binary reports, and the docs and
+      # contrib/hooks/Dockerfile.sabnzbd name, the bare 0.3.0.
+      - id: version
+        run: echo "bare=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ steps.version.outputs.bare }}
           tags: |
+            ghcr.io/amuxify/amuxify:${{ steps.version.outputs.bare }}
             ghcr.io/amuxify/amuxify:${{ github.ref_name }}
             ghcr.io/amuxify/amuxify:latest
+
