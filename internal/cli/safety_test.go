@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -551,6 +552,11 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 	if escaped == p || strings.ContainsAny(escaped, "\x1b\r\n‮") {
 		t.Fatalf("test setup: %q", escaped)
 	}
+	// A raw newline or carriage return in the name would start a line, or
+	// what the terminal shows as a line, with a verdict followed by the
+	// planted word instead of a path. A genuine verdict line has the
+	// absolute path after the verdict, so this cannot match one.
+	forged := regexp.MustCompile(`^(PASS|BLOCK) +forged`)
 	for _, args := range [][]string{
 		{"scan", dir},
 		{"--verbose", "scan", dir},
@@ -570,8 +576,10 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 					t.Errorf("%v: raw %U in %q", args, r, l)
 				}
 			}
-			if strings.HasPrefix(l, "PASS  /forged") || strings.HasPrefix(l, "BLOCK /forged") {
-				t.Errorf("%v: forged verdict line %q", args, l)
+			for _, part := range strings.Split(l, "\r") {
+				if forged.MatchString(part) {
+					t.Errorf("%v: forged verdict line %q", args, l)
+				}
 			}
 		}
 		if !strings.Contains(out, " "+escaped+"\n") {
