@@ -401,3 +401,158 @@ func TestAbsCleansTraversal(t *testing.T) {
 		t.Fatalf("Abs did not clean: %q", got)
 	}
 }
+
+// Guarantee 4: output and quarantine placement never leave the tree the
+// user named. MkdirAllUnder creates the requested path component by
+// component and refuses any planted symlink on the way.
+func TestMkdirAllUnderCreatesDeepPaths(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b", "c", "d")
+	if err := MkdirAllUnder(root, dir); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("dir not created: %v", err)
+	}
+	// Calling it again on an existing path is a no-op.
+	if err := MkdirAllUnder(root, dir); err != nil {
+		t.Fatal(err)
+	}
+	// root itself is allowed and creates nothing.
+	if err := MkdirAllUnder(root, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirAllUnder(root, root+string(filepath.Separator)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMkdirAllUnderRefusesSymlinkedComponent(t *testing.T) {
+	root := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(root, "sub")); err != nil {
+		t.Skip("symlinks not supported:", err)
+	}
+	err := MkdirAllUnder(root, filepath.Join(root, "sub", "deeper"))
+	if err == nil {
+		t.Fatal("expected refusal for a symlinked intermediate directory")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error does not name the symlink: %v", err)
+	}
+	if exists(filepath.Join(elsewhere, "deeper")) {
+		t.Fatal("directory was created through the symlink, outside root")
+	}
+	// The symlink itself as the target is refused too.
+	if err := MkdirAllUnder(root, filepath.Join(root, "sub")); err == nil {
+		t.Fatal("expected refusal when the target is a symlink")
+	}
+	// A symlink deeper in an otherwise real chain is refused as well, and
+	// the real components before it are left as they are.
+	if err := os.MkdirAll(filepath.Join(root, "real", "chain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(root, "real", "chain", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirAllUnder(root, filepath.Join(root, "real", "chain", "link", "x", "y")); err == nil {
+		t.Fatal("expected refusal for a symlink deep in the chain")
+	}
+	if exists(filepath.Join(elsewhere, "x")) {
+		t.Fatal("directory was created through the deep symlink")
+	}
+}
+
+func TestMkdirAllUnderRefusesFileComponent(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub"), "not a dir", 0o644)
+	err := MkdirAllUnder(root, filepath.Join(root, "sub", "deeper"))
+	if err == nil {
+		t.Fatal("expected refusal when a file sits where a directory is needed")
+	}
+	if readFile(t, filepath.Join(root, "sub")) != "not a dir" {
+		t.Fatal("the file in the way was modified")
+	}
+	if err := MkdirAllUnder(root, filepath.Join(root, "sub")); err == nil {
+		t.Fatal("expected refusal when the target itself is a file")
+	}
+}
+
+func TestMkdirAllUnderRefusesEscape(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(root)
+	bad := []string{
+		filepath.Join(root, "..", "escaped"),
+		filepath.Join(root, "a", "..", "..", "escaped"),
+		filepath.Join(parent, "escaped"),
+		filepath.Join(root + "sibling"),
+		filepath.Dir(parent),
+		string(filepath.Separator),
+	}
+	for _, dir := range bad {
+		if err := MkdirAllUnder(root, dir); err == nil {
+			t.Errorf("%s: expected refusal", dir)
+		}
+	}
+	if exists(filepath.Join(parent, "escaped")) || exists(root+"sibling") {
+		t.Fatal("a directory was created outside root")
+	}
+	// A missing root is the user's chosen tree and is created for them.
+	if err := MkdirAllUnder(filepath.Join(parent, "missing"), filepath.Join(parent, "missing", "x")); err != nil {
+		t.Fatalf("missing root: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(parent, "missing", "x")); err != nil || !fi.IsDir() {
+		t.Fatal("missing root was not created")
+	}
+	// A root that is a regular file is an error.
+	writeFile(t, filepath.Join(parent, "file"), "x", 0o644)
+	if err := MkdirAllUnder(filepath.Join(parent, "file"), filepath.Join(parent, "file", "x")); err == nil {
+		t.Fatal("expected error for a file root")
+	}
+}
+
+// The root itself may be a symlink: the user chose it, and the checks
+// protect the components below it. This documents the choice.
+func TestMkdirAllUnderAllowsSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks not supported:", err)
+	}
+	if err := MkdirAllUnder(link, filepath.Join(link, "a", "b")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(real, "a", "b")); err != nil || !fi.IsDir() {
+		t.Fatalf("directory not created under the real root: %v", err)
+	}
+}
+
+func TestMkdirAllUnderHostileNames(t *testing.T) {
+	root := t.TempDir()
+	names := []string{
+		"..hidden", "a..b", " leading", "trailing ", "with;semicolon",
+		"$(echo pwned)", "`id`", "-flag", "‮exe.mkv", "zero​width",
+		"日本語", "émoji🎬", "quote'and\"double", "star*and?glob", "pipe|and&amp",
+	}
+	for _, n := range names {
+		dir := filepath.Join(root, n, "inner")
+		if err := MkdirAllUnder(root, dir); err != nil {
+			t.Errorf("%q: %v", n, err)
+			continue
+		}
+		if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+			t.Errorf("%q: not created", n)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(names) {
+		t.Errorf("expected %d entries under root, found %d", len(names), len(entries))
+	}
+}
