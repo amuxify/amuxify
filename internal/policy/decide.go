@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/nxame/amuxify/internal/probe"
-	"github.com/nxame/amuxify/internal/report"
+	"github.com/amuxify/amuxify/internal/probe"
+	"github.com/amuxify/amuxify/internal/report"
 )
 
 // Finding codes emitted by the decision engine.

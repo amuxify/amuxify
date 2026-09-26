@@ -61,7 +61,7 @@ the same PUID and PGID:
 
 ```sh
 docker run --rm -u 1000:1000 -v /srv/media:/srv/media \
-  ghcr.io/nxame/amuxify remux --in-place /srv/media/incoming
+  ghcr.io/amuxify/amuxify remux --in-place /srv/media/incoming
 ```
 
 Hard-linked files (most torrent setups) are skipped in place by default so

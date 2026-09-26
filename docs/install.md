@@ -34,7 +34,7 @@ If a tool lives outside `PATH`, point at it with an environment variable:
 ### Release binary (Linux, macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nxame/amuxify/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
 # or into your home directory
 PREFIX=$HOME/.local sh install.sh
 ```
@@ -43,17 +43,11 @@ The script downloads the archive for your OS and CPU, verifies it against the
 `checksums.txt` published with the release, and installs `amuxify` under
 `$PREFIX/bin`. Set `VERSION=0.2.0` to pin a version.
 
-### Homebrew
-
-```sh
-brew install nxame/tap/amuxify
-```
-
 ### Docker
 
 ```sh
 docker run --rm -u "$(id -u):$(id -g)" -v /srv/media/incoming:/data \
-  ghcr.io/nxame/amuxify scan /data
+  ghcr.io/amuxify/amuxify scan /data
 ```
 
 Always pass `-u` with the uid that owns the library. Without it the container
@@ -66,7 +60,7 @@ directory at `/state` if you want quarantine and logs to persist.
 ### From source
 
 ```sh
-git clone https://github.com/nxame/amuxify && cd amuxify
+git clone https://github.com/amuxify/amuxify && cd amuxify
 make build            # ./bin/amuxify
 make install PREFIX=$HOME/.local
 ```

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nxame/amuxify/internal/exec"
-	"github.com/nxame/amuxify/internal/probe"
+	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/probe"
 )
 
 // Verifier runs decode and hash checks.

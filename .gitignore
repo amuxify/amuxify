@@ -11,8 +11,5 @@
 /testdata/out/
 /site/public/
 
-# Legacy generated launchers
-/legacy/bin/
-
 # Personal notes, never committed
 AGENT.md

@@ -3,7 +3,7 @@ package policy
 import (
 	"testing"
 
-	"github.com/nxame/amuxify/internal/probe"
+	"github.com/amuxify/amuxify/internal/probe"
 )
 
 func mustLoad(t *testing.T, name string) *Profile {

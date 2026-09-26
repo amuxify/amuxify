@@ -10,7 +10,8 @@ remuxed, and refused anything suspicious. The engineering was careful (temp
 then rename, stream hashing, protocol whitelist) but the policy was personal:
 English only, chapters dropped, every attachment blocked, interactive prompts.
 
-0.2 keeps the careful part and makes the policy a document.
+0.2 keeps the careful part and makes the policy a document. The Bash scripts
+are not carried in this tree; they are in the `v0.1.1` tag.
 
 ## Principles
 
@@ -41,7 +42,6 @@ English only, chapters dropped, every attachment blocked, interactive prompts.
 - `internal/policy` profiles and the pure `Decide()` function.
 - `internal/verify` stream hashes and decode checks.
 - `internal/scan`, `internal/remux`, `internal/clean`, `internal/doctor`.
-- `legacy/` the frozen Bash scripts; `test/` the differential test.
 
 ## Decision flow for remux
 
@@ -65,5 +65,4 @@ implementation. ffmpeg still does the MP4, MOV and AVI metadata rewrite for
 
 0.3: `ingest` (scan + remux + clean in one call), hook adapters for SABnzbd,
 NZBGet, Sonarr and Radarr, frozen JSON schema. 0.4: Windows, macOS
-notarization, parallel full verification. 1.0: fixture matrix complete,
-`legacy/` removed.
+notarization, parallel full verification. 1.0: fixture matrix complete.

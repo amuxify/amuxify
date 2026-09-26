@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nxame/amuxify/internal/exec"
-	"github.com/nxame/amuxify/internal/fsutil"
-	"github.com/nxame/amuxify/internal/policy"
-	"github.com/nxame/amuxify/internal/report"
+	"github.com/amuxify/amuxify/internal/exec"
+	"github.com/amuxify/amuxify/internal/fsutil"
+	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/report"
 )
 
 // Check is one line of the doctor report.

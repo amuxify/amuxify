@@ -8,9 +8,8 @@ Verify, sanitize, normalize, prove. One pass between "downloaded or purchased"
 and "in the library", with a verdict your download client can act on.
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nxame/amuxify/main/install.sh | sh
-brew install nxame/tap/amuxify
-docker run --rm -u 1000:1000 -v /srv/media:/data ghcr.io/nxame/amuxify scan /data
+curl -fsSL https://raw.githubusercontent.com/amuxify/amuxify/main/install.sh | sh
+docker run --rm -u 1000:1000 -v /srv/media:/data ghcr.io/amuxify/amuxify scan /data
 ```
 
 Four verdicts: PASS, WARN, FAIL, BLOCK. Four profiles: homelab, anime, archive,
