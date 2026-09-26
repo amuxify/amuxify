@@ -861,6 +861,26 @@ func TestOutputRefusesSymlinkedSubdir(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(elsewhere, "clean.mkv")); err == nil {
-		t.Skipf("remux followed a symlinked directory inside the output root and placed the file outside it (%v); internal/remux/remux.go should refuse a destination whose parent is a symlink before writing", codes(res[0]))
+		t.Fatalf("remux followed a symlinked directory inside the output root and placed the file outside it (%v)", codes(res[0]))
+	}
+	if len(leftovers(t, elsewhere)) != 0 || len(leftovers(t, outRoot)) != 0 {
+		t.Fatalf("temp files left behind: %v %v", leftovers(t, elsewhere), leftovers(t, outRoot))
+	}
+	if len(res) != 1 || res[0].Verdict != report.Fail || !res[0].Has(CodeRemuxFail) {
+		t.Fatalf("want FAIL REMUX_FAIL for the refused destination, got %v", codes(res[0]))
+	}
+	if fi, err := os.Lstat(filepath.Join(outRoot, "sub")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("planted symlink was replaced or removed: %v", err)
+	}
+	if fileSHA(t, src) == "" {
+		t.Fatal("source unreadable")
+	}
+	// Nothing was written inside elsewhere at all.
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("output tree escaped through the symlink: %v", entries)
 	}
 }
