@@ -251,10 +251,12 @@ and the C1 range) as `\xNN`, and every Unicode format character (general
 category Cf, which holds the bidirectional controls, the zero-width
 characters, the byte order mark, the soft hyphen, the tag characters and the
 other invisible ones) and the line and paragraph separators as `\uNNNN`, or
-as `\UNNNNNNNN` for a code point above U+FFFF. A file name can therefore not
-end a line early, forge a verdict line, overwrite the line with a terminal
-escape sequence or hide characters. The hook adapters' own lines are treated
-the same way. The JSON form carries the raw value.
+as `\UNNNNNNNN` for a code point above U+FFFF; the one format character
+below U+0100, the soft hyphen U+00AD, takes the `\xNN` form like a control
+character. A file name can therefore not end a line early, forge a verdict
+line, overwrite the line with a terminal escape sequence or hide characters.
+The hook adapters' own lines are treated the same way. The JSON form carries
+the raw value.
 
 ## Doctor
 
