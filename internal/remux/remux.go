@@ -271,7 +271,12 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	// is handed to mkvmerge, so a symlink planted at the name in the
 	// meantime can only get there by replacing this run's own entry, which
 	// tempUnchanged notices after mkvmerge returns and again before the
-	// output is placed. In place, the output then takes the source's mode,
+	// output is placed. The handle from the creation stays open until this
+	// function returns, which keeps the inode allocated: a filesystem that
+	// reuses a freed inode number at once (ext4 does) could otherwise give
+	// it to a file created at the name after a removal, and that file would
+	// pass every identity check as this run's own. In place, the output then
+	// takes the source's mode,
 	// ownership and time through a descriptor that takeIdentity opens
 	// without following a link and checks against the same identity, so no
 	// metadata write ever goes through the temp name; placedOwn and
@@ -282,11 +287,13 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	// cleanup removes whatever sits at the name; os.Remove never follows a
 	// link, so a planted one is removed and its target is left alone.
 	tmp := fsutil.TempName(dest)
-	created, err := createTemp(tmp)
+	own, err := createTemp(tmp)
 	if err != nil {
 		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 		return fr
 	}
+	defer own.Close()
+	created := own.Info()
 	cleanup := func() { _ = os.Remove(tmp) }
 
 	args := r.mkvmergeArgs(tmp, sc.Info, d)
@@ -534,13 +541,16 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 // appears at the name between the removal and the creation. The file gets
 // the mode mkvmerge would give a file it created itself, 0666 under the
 // umask, because in output mode the file is placed as it is; in place,
-// takeIdentity gives it the source's mode before placement.
-func createTemp(tmp string) (os.FileInfo, error) {
-	fi, err := fsutil.CreateTemp(tmp)
+// takeIdentity gives it the source's mode before placement. The handle
+// keeps the file open so its inode number cannot be reused by a file
+// swapped onto the name; the caller closes it after the last identity
+// check.
+func createTemp(tmp string) (*fsutil.Temp, error) {
+	own, err := fsutil.CreateTemp(tmp)
 	if err != nil {
 		return nil, fmt.Errorf("temp file: %v", err)
 	}
-	return fi, nil
+	return own, nil
 }
 
 // tempUnchanged reports an error when tmp no longer names the file

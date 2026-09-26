@@ -53,14 +53,41 @@ func PlaceNoClobber(tmp, dest string) error {
 	return os.Rename(tmp, dest)
 }
 
+// Temp is a temp file created by CreateTemp and still held open.
+type Temp struct {
+	f  *os.File
+	fi os.FileInfo
+}
+
+// Info returns the identity recorded when the file was created, for
+// comparison with os.SameFile.
+func (t *Temp) Info() os.FileInfo { return t.fi }
+
+// Close releases the descriptor, after which the inode may be freed and its
+// number given to another file. Closing a closed or nil handle is harmless.
+func (t *Temp) Close() error {
+	if t == nil || t.f == nil {
+		return nil
+	}
+	err := t.f.Close()
+	t.f = nil
+	return err
+}
+
 // CreateTemp removes a leftover entry at tmp, creates tmp empty and
-// exclusively, and returns the identity of the file it made, so that a name
+// exclusively, and returns a handle to the file it made, so that a name
 // about to be handed to an external tool belongs to the caller before the
-// tool starts and can be recognised again afterwards with os.SameFile. A
+// tool starts and can be recognised again afterwards with os.SameFile. The
+// handle keeps the file open, and an open descriptor keeps the inode
+// allocated, so its number cannot be freed and given to another file
+// created at the same name while the handle is open. On ext4 a freed inode
+// number is reused at once, and a file swapped onto the name that way would
+// be indistinguishable from the caller's own by os.SameFile; the caller
+// therefore closes the handle only after its last identity check. A
 // leftover that cannot be removed is an error, as is anything that appears
 // at the name between the removal and the creation. The file gets the mode
 // the tool would give a file it created itself, 0666 under the umask.
-func CreateTemp(tmp string) (os.FileInfo, error) {
+func CreateTemp(tmp string) (*Temp, error) {
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -69,14 +96,12 @@ func CreateTemp(tmp string) (os.FileInfo, error) {
 		return nil, err
 	}
 	fi, err := f.Stat()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
 	if err != nil {
+		_ = f.Close()
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	return fi, nil
+	return &Temp{f: f, fi: fi}, nil
 }
 
 // CopyIdentityTo gives the open file f the mode, ownership and modification
