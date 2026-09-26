@@ -247,11 +247,14 @@ The terminal form is written for a terminal and a log file, not for a parser,
 so it is the one place where amuxify changes what it saw. In every path,
 message, detail, output path, action and error it writes a control character
 other than tab (including the escape character, carriage return, newline, NUL
-and the C1 range) as `\xNN`, and a Unicode bidirectional control, zero-width
-character, line or paragraph separator or byte order mark as `\uNNNN`. A file
-name can therefore not end a line early, forge a verdict line, overwrite the
-line with a terminal escape sequence or hide characters. The hook adapters'
-own lines are treated the same way. The JSON form carries the raw value.
+and the C1 range) as `\xNN`, and every Unicode format character (general
+category Cf, which holds the bidirectional controls, the zero-width
+characters, the byte order mark, the soft hyphen, the tag characters and the
+other invisible ones) and the line and paragraph separators as `\uNNNN`, or
+as `\UNNNNNNNN` for a code point above U+FFFF. A file name can therefore not
+end a line early, forge a verdict line, overwrite the line with a terminal
+escape sequence or hide characters. The hook adapters' own lines are treated
+the same way. The JSON form carries the raw value.
 
 ## Doctor
 
@@ -279,7 +282,7 @@ on its own.
 | `SYMLINK` | WARN | scan, clean | The path is a symbolic link and was skipped. |
 | `EMPTY_FILE` | BLOCK | scan | The file has zero bytes. |
 | `UNREADABLE` | FAIL | scan | The file cannot be opened. |
-| `BIDI_NAME` | BLOCK | scan | The name contains a Unicode bidi or zero-width control. |
+| `BIDI_NAME` | BLOCK | scan | The name contains a Unicode bidi control or another format character (general category Cf), which print as nothing or reorder what follows. |
 | `DOUBLE_EXT` | WARN | scan | The extension before the last one is on the sidecar block list, as in `x.exe.mkv`. |
 | `EXEC_PERM` | WARN or FAIL | scan | The executable bit is set on a media file; the profile decides the severity. |
 | `EXT_MISMATCH` | FAIL | scan | The content type does not match the extension. |

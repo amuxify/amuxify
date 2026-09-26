@@ -22,4 +22,10 @@ func TestBidi(t *testing.T) {
 	if bidiChars("movie‮vkm.exe") == "" || bidiChars("movie.mkv") != "" {
 		t.Fatal("bidi detection wrong")
 	}
+	if got := bidiChars("alm\u061c.exe"); got != "bidi control U+061C" {
+		t.Errorf("U+061C: %q", got)
+	}
+	if got := bidiChars("tag\U000e0041.mkv"); got != "zero-width character U+E0041" {
+		t.Errorf("U+E0041: %q", got)
+	}
 }

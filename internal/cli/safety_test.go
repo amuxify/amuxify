@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
 
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/report"
@@ -588,5 +590,81 @@ func TestHumanReportEscapesHostileNames(t *testing.T) {
 	}
 	if len(doc.Files) != 1 || doc.Files[0].Path != p {
 		t.Errorf("JSON path %q, want %q", doc.Files, p)
+	}
+}
+
+// TestHumanReportEscapesInvisibleFormatCharacters plants names that carry
+// format characters outside the classic U+20xx block: the Arabic letter
+// mark (a bidi control), a tag character above U+FFFF, the interlinear
+// annotation anchor and the soft hyphen. Every human line must show them
+// as escapes, the tag character in the eight-digit form so it cannot be
+// read as a shorter escape followed by hex digits, and the JSON report
+// must keep the raw name.
+func TestHumanReportEscapesInvisibleFormatCharacters(t *testing.T) {
+	testutil.Stubs(t)
+	asUser(t, 1000)
+	dir := t.TempDir()
+	names := []string{
+		"alm\u061cvkm.nfo",
+		"tag\U000e0041\U000e00411.nfo",
+		"annot\ufff9ation.nfo",
+		"soft\u00adhyphen.nfo",
+	}
+	var paths, escaped []string
+	for _, n := range names {
+		p := write(t, filepath.Join(dir, n), "nfo\n")
+		e := report.Sanitize(p)
+		if e == p || strings.ContainsAny(e, "\u061c\U000e0041\ufff9\u00ad") {
+			t.Fatalf("test setup: %q", e)
+		}
+		paths = append(paths, p)
+		escaped = append(escaped, e)
+	}
+	for _, args := range [][]string{
+		{"scan", dir},
+		{"--verbose", "scan", dir},
+		{"--dry-run", "ingest", "--remove-blocked-sidecars", dir},
+	} {
+		code, out, errs := run(t, args...)
+		if code != 4 {
+			t.Errorf("%v: exit %d\n%s%s", args, code, out, errs)
+		}
+		for _, l := range append(lines(out), lines(errs)...) {
+			for _, r := range l {
+				if unicode.Is(unicode.Cf, r) {
+					t.Errorf("%v: raw %U in %q", args, r, l)
+				}
+			}
+		}
+		for _, e := range escaped {
+			if !strings.Contains(out, " "+e+"\n") {
+				t.Errorf("%v: no escaped line for %q:\n%s", args, e, out)
+			}
+		}
+		if !strings.Contains(out, `tag\U000e0041\U000e00411.nfo`) {
+			t.Errorf("%v: the tag character is not written in the eight-digit form:\n%s", args, out)
+		}
+		if !strings.Contains(out, "bidi control U+061C") {
+			t.Errorf("%v: U+061C is not reported as a bidi control:\n%s", args, out)
+		}
+		if !strings.Contains(out, "zero-width character U+E0041") {
+			t.Errorf("%v: the tag character is not reported as a zero-width character:\n%s", args, out)
+		}
+	}
+	_, out, _ := run(t, "--json", "scan", dir)
+	var doc struct {
+		Files []struct{ Path string } `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range doc.Files {
+		got = append(got, f.Path)
+	}
+	sort.Strings(got)
+	sort.Strings(paths)
+	if strings.Join(got, "\n") != strings.Join(paths, "\n") {
+		t.Errorf("JSON paths %q, want %q", got, paths)
 	}
 }
