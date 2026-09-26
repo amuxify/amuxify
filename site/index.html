@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>amuxify · the ingest gate for self-hosted media</title>
-<meta name="description" content="amuxify verifies, sanitizes, normalizes and proves media files before they enter your library. One binary, four verdicts, stable exit codes for SABnzbd, NZBGet, Sonarr and Radarr.">
+<meta name="description" content="amuxify checks media files before they go into your library. It verifies integrity, strips metadata and provenance, remuxes to a clean MKV with mkvmerge, and exits with a code your download client can act on.">
 <link rel="icon" type="image/png" href="amuxify-logo.png">
 <link rel="stylesheet" href="style.css">
 <meta property="og:title" content="amuxify">
@@ -39,8 +39,8 @@
       BLOCK ATTACH_EXEC        attachment #1 "font.ttf" (font/ttf, 71 KiB) contains executable PE/DOS executable
 
 BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1</code></pre>
-<p>It is not a transcoder, a renamer or a library manager. Streams are never re-encoded. Every remux is
-verified by hashing each kept stream against the source before the output is placed.</p>
+<p>It is not a transcoder, a renamer or a library manager. Streams are never re-encoded. After a remux,
+every kept stream is hashed and compared with the source before the output is moved into place.</p>
 </section>
 
 <section id="install">
@@ -53,9 +53,10 @@ brew install --cask amuxify/tap/amuxify
 
 <span class="c"># Docker, run as the uid that owns the library, never root</span>
 docker run --rm -u 1000:1000 -v /srv/media/incoming:/data ghcr.io/amuxify/amuxify scan /data</code></pre>
-<p>amuxify drives <strong>MKVToolNix 50+</strong> and <strong>ffmpeg 4.4+</strong>. exiftool and clamscan are
-optional. <code>amuxify doctor</code> tells you what is missing.
-<a href="https://github.com/amuxify/amuxify/blob/main/docs/install.md">Full install guide.</a></p>
+<p>amuxify needs <strong>MKVToolNix 50 or newer</strong> and <strong>ffmpeg 4.4 or newer</strong> on the
+same machine. exiftool and clamscan are optional. Run <code>amuxify doctor</code> to see what is missing.
+The <a href="https://github.com/amuxify/amuxify/blob/main/docs/install.md">install guide</a> covers
+package names per distro, pinning a version and the Docker image.</p>
 </section>
 
 <section>
@@ -70,12 +71,12 @@ optional. <code>amuxify doctor</code> tells you what is missing.
 <tr><td><code>amuxify profile</code></td><td>List or print built-in profiles</td><td>nothing</td></tr>
 </tbody>
 </table>
-<p>Input: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV. Output is always Matroska written by
-mkvmerge. ffmpeg never writes an MKV.</p>
+<p>Input containers: MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB, FLV. Output is always Matroska,
+written by mkvmerge. ffmpeg is used for probing, hashing and decode checks, never for writing an MKV.</p>
 </section>
 
 <section>
-<h2>Four verdicts, stable exit codes</h2>
+<h2>Verdicts and exit codes</h2>
 <table>
 <thead><tr><th>Verdict</th><th>Exit</th><th>Meaning</th></tr></thead>
 <tbody>
@@ -87,14 +88,15 @@ mkvmerge. ffmpeg never writes an MKV.</p>
 <tr><td>interrupted</td><td>130</td><td>Ctrl-C or SIGTERM; temp files removed</td></tr>
 </tbody>
 </table>
-<p>The worst verdict of the run is the exit code. <code>--json</code> prints the full report with the same codes.
-<a href="https://github.com/amuxify/amuxify/blob/main/docs/report.md">Report schema.</a></p>
+<p>The worst verdict of the run becomes the exit code. With <code>--json</code> the full report is printed
+instead, using the same codes. The JSON format is described in
+<a href="https://github.com/amuxify/amuxify/blob/main/docs/report.md">docs/report.md</a>.</p>
 </section>
 
 <section>
 <h2>Profiles</h2>
-<p>A profile is a TOML file. Four are built in; <code>homelab</code> is the default. Unknown keys are rejected so
-a typo cannot silently widen a policy.</p>
+<p>A profile is a TOML file that says what to keep, what to drop and how hard to verify. Four are built in
+and <code>homelab</code> is the default. Unknown keys are rejected, so a typo cannot silently widen a policy.</p>
 <table>
 <thead><tr><th>Profile</th><th>Languages</th><th>Chapters</th><th>Fonts</th><th>Commentary</th><th>Links / provenance</th><th>Verify</th></tr></thead>
 <tbody>
@@ -106,11 +108,11 @@ a typo cannot silently widen a policy.</p>
 </table>
 <pre><code>amuxify profile show homelab &gt; my.toml   <span class="c"># edit, then</span>
 amuxify --profile ./my.toml remux ~/incoming</code></pre>
-<p><a href="https://github.com/amuxify/amuxify/blob/main/docs/profiles.md">Every key, documented.</a></p>
+<p>All keys are described in <a href="https://github.com/amuxify/amuxify/blob/main/docs/profiles.md">docs/profiles.md</a>.</p>
 </section>
 
 <section>
-<h2>Ten safety guarantees</h2>
+<h2>Safety guarantees</h2>
 <ol class="guarantees">
 <li>Never overwrites an existing path; a collision is a <code>FAIL</code>.</li>
 <li>Writes a temp file beside the destination, fsyncs, then renames. Never across filesystems.</li>
@@ -123,16 +125,18 @@ amuxify --profile ./my.toml remux ~/incoming</code></pre>
 <li><code>BLOCK</code> cannot be overridden by any flag.</li>
 <li>Refuses to modify files as root unless <code>--allow-root</code>.</li>
 </ol>
-<p>Each guarantee has a test. <a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">Details.</a></p>
+<p>Each of these is covered by a test in the repository.
+<a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">docs/safety.md</a> explains what each one
+protects against and what happens when it fires.</p>
 </section>
 
 <section>
 <h2>Unattended use</h2>
-<p>amuxify never prompts. Untagged-language tracks follow <code>languages.und</code> in the profile. Call it from
-your post-processing script and branch on the exit code; hook adapters for SABnzbd, NZBGet, Sonarr and Radarr
-arrive in 0.3.</p>
+<p>amuxify never asks a question. Tracks with no language tag are handled by the <code>languages.und</code>
+profile key. Call it from your post-processing script and check the exit code. Built-in hook adapters for
+SABnzbd, NZBGet, Sonarr and Radarr are planned for 0.3.</p>
 <pre><code>amuxify remux --in-place "$SAB_COMPLETE_DIR" || exit 1</code></pre>
-<p><a href="https://github.com/amuxify/amuxify/blob/main/docs/hooks.md">Hook examples.</a></p>
+<p>Example scripts for each tool are in <a href="https://github.com/amuxify/amuxify/blob/main/docs/hooks.md">docs/hooks.md</a>.</p>
 </section>
 
 </main>
