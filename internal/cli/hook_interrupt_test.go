@@ -72,6 +72,19 @@ func TestHookInterrupted(t *testing.T) {
 			if code != tc.code {
 				t.Fatalf("exit %d, want %d\n%s%s", code, tc.code, out, errb.String())
 			}
+			// The caller's log says why the job failed: one line on stderr,
+			// which NZBGet shows as an [ERROR] line.
+			want := "amuxify hook " + tc.adapter + ": interrupted\n"
+			if tc.adapter == "nzbget" {
+				want = "[ERROR] " + want
+			}
+			if !strings.Contains(errb.String(), want) {
+				t.Errorf("stderr %q lacks %q", errb.String(), want)
+			}
+			if strings.Contains(out, "interrupted") {
+				t.Errorf("the interrupted line went to stdout:\n%s", out)
+			}
+
 			if strings.Contains(out, "PASS  "+c+"\n") {
 				t.Errorf("the run went on after the interrupt:\n%s", out)
 			}

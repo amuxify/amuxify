@@ -31,7 +31,7 @@ func Example() *Summary {
 	movie.Addf("HASH_OK", Pass, "2 stream(s) verified identical to source")
 	movie.Addf("PLACED", Pass, "written and verified")
 	movie.Addf("ROUTE", Pass, "remux: #1 default flag false -> true")
-	movie.Output = "/srv/incoming__remuxed/movie.mkv"
+	movie.Output = "/srv/incoming/movie.mkv"
 	movie.Actions = []string{
 		"keep #0 video h264 und: primary video",
 		"keep #1 audio aac eng default: language eng",

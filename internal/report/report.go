@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Severity orders verdicts from best to worst. The numeric values are the
@@ -224,25 +225,28 @@ func (s *Summary) WriteHuman(w io.Writer, verbose bool) {
 
 // WriteHuman prints one file's verdict line and its findings. Used both for
 // the final report and for streaming a result as soon as the file is done.
+// Every value that came from a file or a caller goes through Sanitize, so
+// the line structure of the terminal form is amuxify's own: a file name
+// cannot end a line early, forge a verdict line or hide characters.
 func (f *FileResult) WriteHuman(w io.Writer, verbose bool) {
-	fmt.Fprintf(w, "%-5s %s\n", f.Verdict, f.Path)
+	fmt.Fprintf(w, "%-5s %s\n", f.Verdict, Sanitize(f.Path))
 	for _, fd := range f.Findings {
 		if fd.Severity == Pass && !verbose {
 			continue
 		}
-		fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, fd.Message)
+		fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, Sanitize(fd.Message))
 		if verbose && fd.Detail != "" {
 			for _, line := range strings.Split(fd.Detail, "\n") {
-				fmt.Fprintf(w, "            %s\n", line)
+				fmt.Fprintf(w, "            %s\n", Sanitize(line))
 			}
 		}
 	}
 	if f.Output != "" {
-		fmt.Fprintf(w, "      -> %s\n", f.Output)
+		fmt.Fprintf(w, "      -> %s\n", Sanitize(f.Output))
 	}
 	if verbose {
 		for _, a := range f.Actions {
-			fmt.Fprintf(w, "      * %s\n", a)
+			fmt.Fprintf(w, "      * %s\n", Sanitize(a))
 		}
 	}
 }
@@ -250,7 +254,7 @@ func (f *FileResult) WriteHuman(w io.Writer, verbose bool) {
 // WriteHumanTail prints run-level errors and the count line.
 func (s *Summary) WriteHumanTail(w io.Writer) {
 	for _, e := range s.Errors {
-		fmt.Fprintf(w, "ERROR %s\n", e)
+		fmt.Fprintf(w, "ERROR %s\n", Sanitize(e))
 	}
 	keys := make([]string, 0, len(s.Counts))
 	for k := range s.Counts {
@@ -262,4 +266,64 @@ func (s *Summary) WriteHumanTail(w io.Writer) {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, s.Counts[k]))
 	}
 	fmt.Fprintf(w, "\n%s: %d file(s) %s\n", s.Verdict, len(s.Files), strings.Join(parts, " "))
+}
+
+// Sanitize returns s with every character that could reshape terminal or
+// log output replaced by a visible escape: a control character other than
+// tab (0x00-0x1F, 0x7F and the C1 range 0x80-0x9F) becomes \xNN and a
+// Unicode bidirectional, zero-width or line separator control becomes
+// \uNNNN. The human report writers and the hook log lines use it, so a file
+// name carrying an escape sequence, a carriage return, a newline or a bidi
+// override cannot overwrite, split or reorder a line. Bytes that are not
+// valid UTF-8 pass through unchanged, as the terminal form promises. The JSON
+// form is untouched: it carries the raw value with JSON escaping.
+func Sanitize(s string) string {
+	i := 0
+	for i < len(s) {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if !(r == utf8.RuneError && n == 1) && sanitized(r) {
+			break
+		}
+		i += n
+	}
+	if i >= len(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	b.WriteString(s[:i])
+	for i < len(s) {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n == 1:
+			b.WriteByte(s[i])
+		case !sanitized(r):
+			b.WriteString(s[i : i+n])
+		case r < 0x100:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+		i += n
+	}
+	return b.String()
+}
+
+// sanitized reports whether Sanitize replaces r.
+func sanitized(r rune) bool {
+	switch {
+	case r == '\t':
+		return false
+	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		return true
+	}
+	switch r {
+	case 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, // zero-width and marks
+		0x2028, 0x2029, // line and paragraph separators
+		0x202A, 0x202B, 0x202C, 0x202D, 0x202E, // bidi embeddings and overrides
+		0x2060, 0x2066, 0x2067, 0x2068, 0x2069, // word joiner and bidi isolates
+		0xFEFF: // byte order mark
+		return true
+	}
+	return false
 }

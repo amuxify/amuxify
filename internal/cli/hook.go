@@ -51,6 +51,9 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return hook.ExitCode(a, report.Pass, report.Fail, hook.UsageError)
 	}
+	if msg := hookPositionals(a, fs.Args(), &o); msg != "" {
+		return usage("hook %s: %s", a, msg)
+	}
 	failOn, err := hook.ParseFailOn(*failOnS)
 	if err != nil {
 		return usage("hook %s: %v", a, err)
@@ -77,8 +80,15 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 			job.Skip = fmt.Sprintf("category %s does not match --category %s", job.Category, *category)
 		}
 	}
+	// The adapter's own lines go to stdout, where the caller logs them.
+	// Under --json stdout carries exactly one JSON document and nothing
+	// else, so they go to stderr instead.
+	logw := g.stdout
+	if g.JSON {
+		logw = g.stderr
+	}
 	if job.Skip != "" {
-		fmt.Fprintf(g.stdout, "amuxify hook %s: skipping, %s\n", a, oneLine(job.Skip))
+		fmt.Fprintf(logw, "amuxify hook %s: skipping, %s\n", a, report.Sanitize(job.Skip))
 		return hook.ExitCode(a, report.Pass, failOn, hook.Skipped)
 	}
 	t, err := g.setup(!g.DryRun)
@@ -94,11 +104,12 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 	if label == "" {
 		label = strings.Join(job.Paths, ", ")
 	}
-	fmt.Fprintf(g.stdout, "amuxify hook %s: %s (%s)\n", a, oneLine(label), oneLine(job.Event))
+	fmt.Fprintf(logw, "amuxify hook %s: %s (%s)\n", a, report.Sanitize(label), report.Sanitize(job.Event))
 	s := g.runIngest(ctx, in, job.Paths)
 	outcome := hook.Ran
 	if ctx.Err() != nil {
 		outcome = hook.Interrupted
+		fmt.Fprintf(g.stderr, "amuxify hook %s: interrupted\n", a)
 	}
 	code := hook.ExitCode(a, s.Verdict, failOn, outcome)
 	s.Hook = &report.HookInfo{Adapter: string(a), Event: job.Event, Label: job.Label,
@@ -108,7 +119,7 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 		g.writeJSONOut(s, *jsonOut)
 	}
 	if a == hook.SABnzbd && !g.Quiet {
-		fmt.Fprintf(g.stdout, "amuxify: %s, %d file(s)\n", s.Verdict, len(s.Files))
+		fmt.Fprintf(logw, "amuxify: %s, %d file(s)\n", s.Verdict, len(s.Files))
 	}
 	if (a == hook.Sonarr || a == hook.Radarr) && s.Verdict >= failOn {
 		s.WriteHumanTail(g.stderr)
@@ -150,8 +161,32 @@ func (g *Global) hookTest(ctx context.Context, a hook.Adapter) int {
 		return fail(err)
 	}
 	fmt.Fprintf(g.stdout, "amuxify %s: hook %s ready (profile %s; ffmpeg: %s; mkvmerge: %s)\n",
-		Version, a, t.profile.Name, oneLine(ffmpeg), oneLine(mkvmerge))
+		Version, a, t.profile.Name, report.Sanitize(ffmpeg), report.Sanitize(mkvmerge))
 	return 0
+}
+
+// hookPositionals refuses positional arguments the adapter does not take,
+// before the environment is read and before anything runs. SABnzbd may pass
+// its seven or eight parameters in place of the environment; every other
+// caller sets the environment only, so a stray word is a usage error rather
+// than silently ignored. The usual cause is a directory written after a bare
+// --quarantine, which takes no separate value, so the message says how to
+// write it.
+func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
+	if len(args) == 0 || (a == hook.SABnzbd && len(args) >= 7) {
+		return ""
+	}
+	var msg string
+	if a == hook.SABnzbd {
+		msg = fmt.Sprintf("expected no positional arguments or SABnzbd's eight parameters, got %d beginning with %q", len(args), args[0])
+	} else {
+		msg = fmt.Sprintf("unexpected argument %q; the adapter reads the job from the environment", args[0])
+	}
+	if o.quarantine.set && o.quarantine.dir == "" {
+		msg += fmt.Sprintf("; if it was meant as the quarantine directory write --quarantine=%s", report.Sanitize(args[0]))
+	}
+	return msg
+
 }
 
 // writeJSONOut writes the report to a new file. An existing file, a symlink
@@ -170,16 +205,4 @@ func (g *Global) writeJSONOut(s *report.Summary, path string) {
 	if err != nil {
 		fmt.Fprintf(g.stderr, "amuxify: json-out: %s: %v\n", path, err)
 	}
-}
-
-// oneLine keeps caller-supplied text on the line it was printed on: every
-// control character, including a newline or a carriage return that could
-// forge a further log line, becomes a space.
-func oneLine(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s)
 }

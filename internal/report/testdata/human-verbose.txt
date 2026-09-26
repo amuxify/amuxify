@@ -4,7 +4,7 @@ WARN  /srv/incoming/movie.mkv
       PASS  HASH_OK            2 stream(s) verified identical to source
       PASS  PLACED             written and verified
       PASS  ROUTE              remux: #1 default flag false -> true
-      -> /srv/incoming__remuxed/movie.mkv
+      -> /srv/incoming/movie.mkv
       * keep #0 video h264 und: primary video
       * keep #1 audio aac eng default: language eng
 PASS  /srv/incoming/movie.nfo

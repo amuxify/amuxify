@@ -20,4 +20,4 @@
 ### NZBGET POST-PROCESSING SCRIPT                                          ###
 ##############################################################################
 
-exec amuxify --profile "${NZBPO_PROFILE:-homelab}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"
+exec amuxify --profile "${NZBPO_PROFILE:-${AMUXIFY_PROFILE:-homelab}}" hook nzbget --fail-on "${NZBPO_FAILON:-fail}"

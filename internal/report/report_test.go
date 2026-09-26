@@ -376,7 +376,7 @@ func TestHumanFormats(t *testing.T) {
 	for _, want := range []string{
 		"WARN  /srv/incoming/movie.mkv\n",
 		"      WARN  LINK_IN_TAG        1 link(s) in metadata: tag COMMENT: http://x.example\n",
-		"      -> /srv/incoming__remuxed/movie.mkv\n",
+		"      -> /srv/incoming/movie.mkv\n",
 		"BLOCK /srv/incoming/readme.exe\n",
 		"ERROR /srv/incoming/gone.mkv: lstat /srv/incoming/gone.mkv: no such file or directory\n",
 		"\nBLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1\n",
@@ -553,10 +553,11 @@ func TestDetailWithNewlinesIsEscaped(t *testing.T) {
 		t.Errorf("detail is not escaped as a single JSON string:\n%s", b)
 	}
 	// In the verbose human form each line of the detail is printed indented
-	// under its finding; the carriage return is not treated as a separator.
+	// under its finding; the carriage return is not treated as a separator
+	// and is written as a visible escape rather than sent to the terminal.
 	var out bytes.Buffer
 	s.WriteHuman(&out, true)
-	if !strings.Contains(out.String(), "            tag A: http://a.example\r\n            tag B: http://b.example\n            \n") {
+	if !strings.Contains(out.String(), `            tag A: http://a.example\x0d`+"\n            tag B: http://b.example\n            \n") {
 		t.Errorf("verbose detail lines:\n%q", out.String())
 	}
 }
@@ -633,5 +634,96 @@ func TestHookOnTheWire(t *testing.T) {
 	// Key order on the wire is the declaration order.
 	if !bytes.Contains(marshalJSON(t, s), []byte("\"hook\": {\n    \"adapter\": \"nzbget\",\n    \"event\": \"post-process\",\n    \"fail_on\": \"BLOCK\",\n    \"exit_code\": 0\n  }")) {
 		t.Errorf("hook layout:\n%s", marshalJSON(t, s))
+	}
+}
+
+// TestSanitize pins what the terminal form does to each hostile character:
+// control characters, C1 controls, bidi and zero-width controls become
+// visible escapes; tab, printable text and bytes that are not UTF-8 pass
+// through; a clean string comes back unchanged.
+func TestSanitize(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"/srv/plain file.mkv", "/srv/plain file.mkv"},
+		{"tab\there", "tab\there"},
+		{"nul\x00byte", `nul\x00byte`},
+		{"esc\x1b[31mred\x1b[0m", `esc\x1b[31mred\x1b[0m`},
+		{"cr\rlf\n", `cr\x0dlf\x0a`},
+		{"del\x7f", `del\x7f`},
+		{"c1\u0085next\u009b[", `c1\x85next\x9b[`},
+		{"bidi\u202evkm.exe", `bidi\u202evkm.exe`},
+		{"\u202a\u202b\u202c\u202d\u200e\u200f\u2066\u2067\u2068\u2069", `\u202a\u202b\u202c\u202d\u200e\u200f\u2066\u2067\u2068\u2069`},
+		{"zero\u200b\u200c\u200d\u2060\ufeffwidth", `zero\u200b\u200c\u200d\u2060\ufeffwidth`},
+		{"line\u2028para\u2029", `line\u2028para\u2029`},
+		{"caf\xe9.mkv", "caf\xe9.mkv"},
+		{"\xff\xfe\x1b", "\xff\xfe" + `\x1b`},
+		{"emoji\U0001F600 日本語", "emoji\U0001F600 日本語"},
+		{`already\x1b`, `already\x1b`},
+	} {
+		if got := Sanitize(tc.in); got != tc.want {
+			t.Errorf("Sanitize(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestHumanOutputSanitized feeds file names, messages, details, outputs,
+// actions and run errors that try to forge or hide terminal lines and
+// checks the human writers keep one line per item with no raw control
+// byte or bidi control in it, while the JSON keeps the raw values.
+func TestHumanOutputSanitized(t *testing.T) {
+	forged := "\x1b[2K\rPASS  /forged\nBLOCK /also-forged"
+	path := "/srv/movie\u202evkm\x1b[0m.mkv" + forged
+	s := NewSummary("amuxify", "0.3.0", "scan", "homelab")
+	fr := FileResult{Path: path, Output: "/out" + forged, Actions: []string{"keep #0" + forged}}
+	fr.Add(Finding{Code: "LINK_IN_TAG", Severity: Warn, Message: "tag" + forged + "\u200b", Detail: "line 1" + forged + "\nline 2\u2028\u2029"})
+	fr.Add(Finding{Code: "HASH_OK", Severity: Pass, Message: "ok\x00\x7f\u0085"})
+	s.Append(fr)
+	s.Error("/gone" + forged)
+
+	raw := func(line string) bool {
+		for _, r := range line {
+			if r < 0x20 && r != '\t' || r == 0x7f || r >= 0x80 && r <= 0x9f || sanitized(r) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, verbose := range []bool{false, true} {
+		var out bytes.Buffer
+		s.WriteHuman(&out, verbose)
+		text := out.String()
+		ls := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		wantLines := 5 // verdict, WARN finding, output, ERROR, blank, count
+		if verbose {
+			wantLines = 10 // plus detail x2, PASS finding, action
+		}
+		if len(ls) != wantLines+1 {
+			t.Errorf("verbose=%v: %d lines, want %d:\n%q", verbose, len(ls), wantLines+1, text)
+		}
+		for _, l := range ls {
+			if raw(l) {
+				t.Errorf("verbose=%v: raw control or bidi character in %q", verbose, l)
+			}
+			if strings.HasPrefix(l, "PASS  ") || strings.HasPrefix(l, "BLOCK ") {
+				t.Errorf("verbose=%v: forged verdict line %q", verbose, l)
+			}
+		}
+		if !strings.HasPrefix(text, `WARN  /srv/movie\u202evkm\x1b[0m.mkv\x1b[2K\x0dPASS  /forged\x0aBLOCK /also-forged`+"\n") {
+			t.Errorf("verbose=%v: first line:\n%q", verbose, text)
+		}
+		if !strings.Contains(text, `ERROR /gone\x1b[2K\x0dPASS  /forged\x0aBLOCK /also-forged`+"\n\nFAIL: 1 file(s) WARN=1\n") {
+			t.Errorf("verbose=%v: tail:\n%q", verbose, text)
+		}
+		if verbose && !strings.Contains(text, `            line 2\u2028\u2029`+"\n      PASS  HASH_OK            ok"+`\x00\x7f\x85`+"\n") {
+			t.Errorf("detail lines:\n%q", text)
+		}
+	}
+	// The JSON form is not sanitised: the raw value round-trips.
+	var back Summary
+	if err := json.Unmarshal(marshalJSON(t, s), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Files[0].Path != path || back.Errors[0] != "/gone"+forged {
+		t.Errorf("JSON changed the raw values: %q %q", back.Files[0].Path, back.Errors[0])
 	}
 }
