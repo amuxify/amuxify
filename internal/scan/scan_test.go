@@ -184,6 +184,23 @@ func TestSymlinkVariantsNeverFollowed(t *testing.T) {
 	}
 }
 
+// toolsRequired mirrors testutil: AMUXIFY_REQUIRE_TOOLS set to 1, true or
+// yes turns a skip over a tool or environment problem into a failure, so CI
+// cannot go green on a test that never ran (review C18).
+func toolsRequired() bool {
+	v := strings.TrimSpace(os.Getenv("AMUXIFY_REQUIRE_TOOLS"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
+
+// skipOrFail skips the test, or fails it under AMUXIFY_REQUIRE_TOOLS.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if toolsRequired() {
+		t.Fatalf("required (AMUXIFY_REQUIRE_TOOLS set): "+format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 func TestBidiNameBlocks(t *testing.T) {
 	noTools(t)
 	dir := t.TempDir()
@@ -209,7 +226,7 @@ func TestBidiNameBlocks(t *testing.T) {
 			body = "plain text\n"
 		}
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Skipf("filesystem refuses the name %q: %v", n, err)
+			skipOrFail(t, "filesystem refuses the name %q: %v", n, err)
 		}
 	}
 	res, err := s.ScanPath(context.Background(), dir)
@@ -906,7 +923,7 @@ func TestExeAttachmentOutsideTailIsBlocked(t *testing.T) {
 		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
 		"-t", "6", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-c:a", "aac", "-shortest", video)
 	if err != nil || res.ExitCode != 0 {
-		t.Skipf("cannot build the padded video with ffmpeg: %v %s", err, res.Stderr)
+		skipOrFail(t, "cannot build the padded video with ffmpeg: %v %s", err, res.Stderr)
 	}
 	payload := write(t, filepath.Join(dir, "payload.bin"), "\x7fELF\x02\x01\x01\x00payload", 0o644)
 	out := filepath.Join(dir, "big_exe.mkv")
@@ -1271,4 +1288,29 @@ func TestQuarantineAcrossFilesystems(t *testing.T) {
 	if _, err := os.Lstat(src); err != nil {
 		t.Fatal("source removed although the quarantine slot was taken")
 	}
+}
+
+// Review C18: the skip helper honours AMUXIFY_REQUIRE_TOOLS the way
+// testutil does, including the hostile spellings that must not count.
+func TestSkipOrFailHonoursRequireTools(t *testing.T) {
+	for v, want := range map[string]bool{"1": true, "true": true, "YES": true, " yes ": true,
+		"": false, "0": false, "no": false, "false": false, "11": false, "1;rm -rf /": false, "true false": false} {
+		t.Setenv("AMUXIFY_REQUIRE_TOOLS", v)
+		if got := toolsRequired(); got != want {
+			t.Errorf("AMUXIFY_REQUIRE_TOOLS=%q: required %v, want %v", v, got, want)
+		}
+	}
+	// With the variable unset skipOrFail skips rather than fails: the test
+	// process reaches the skip and its result is SKIP, not FAIL.
+	t.Setenv("AMUXIFY_REQUIRE_TOOLS", "")
+	skipped := t.Run("skips when unset", func(t *testing.T) {
+		skipOrFail(t, "tool missing")
+		t.Fatal("skipOrFail returned")
+	})
+	if !skipped {
+		t.Error("skipOrFail failed the subtest with AMUXIFY_REQUIRE_TOOLS unset")
+	}
+	// With it set, skipOrFail calls t.Fatalf, which cannot be observed
+	// without failing this test; the predicate it branches on is asserted
+	// above.
 }
