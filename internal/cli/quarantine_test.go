@@ -32,7 +32,9 @@ func TestQuarantineInsideTreeIsMovedOnce(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "downloads")
 			write(t, filepath.Join(dir, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n")
 			write(t, filepath.Join(dir, "ok.nfo"), "nfo\n")
-			q := filepath.Join(dir, "sub", "..", "quarantine") + string(filepath.Separator)
+			// Built by string concatenation: filepath.Join would clean the
+			// ".." away before the command saw it.
+			q := dir + "/sub/../quarantine/"
 			dest := filepath.Join(dir, "quarantine", "sub", "x.url")
 			args := tc.args(dir, q)
 			_, out, errs := run(t, args...)
@@ -81,7 +83,7 @@ func TestRootInsideQuarantineIsUsageError(t *testing.T) {
 		want string
 	}{
 		{"scan root is the quarantine", nil, []string{"scan", "--quarantine", q + "/", q}, 2, "scan: " + q + " is the quarantine directory"},
-		{"scan root inside the quarantine", nil, []string{"scan", "--quarantine", q, filepath.Join(inside, "..", "sub")}, 2, "lies inside the quarantine directory " + q},
+		{"scan root inside the quarantine", nil, []string{"scan", "--quarantine", q, inside + "/../sub"}, 2, "lies inside the quarantine directory " + q},
 		{"scan second root inside the quarantine", nil, []string{"scan", "--quarantine", q, base, inside}, 2, "scan: " + inside + " lies inside the quarantine directory"},
 		{"ingest root inside the quarantine", nil, []string{"ingest", "--quarantine=" + q, inside}, 2, "ingest: " + inside + " lies inside the quarantine directory"},
 		{"ingest bare quarantine under the state dir", nil, []string{"--state-dir", state, "ingest", "--quarantine", filepath.Join(state, "quarantine", "x")}, 2, "ingest: " + filepath.Join(state, "quarantine", "x") + " lies inside the quarantine directory"},

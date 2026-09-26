@@ -95,7 +95,7 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 	// walkErr; those are reported at run level after the readable files,
 	// which raises the run verdict to FAIL. A quarantine directory inside
 	// the tree is not entered.
-	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(abs, in.Scanner.Quarantine)...)
+	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(in.Scanner.Quarantine)...)
 	in.planned = map[string]bool{}
 	var out []report.FileResult
 	for _, p := range paths {

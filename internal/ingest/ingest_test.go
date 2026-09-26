@@ -2055,7 +2055,9 @@ func TestIngestQuarantineInsideTree(t *testing.T) {
 	url := write(t, filepath.Join(tree, "sub", "x.url"), "[InternetShortcut]\nURL=http://x\n")
 	write(t, filepath.Join(tree, "sub", "keep.nfo"), "nfo\n")
 	write(t, filepath.Join(tree, "ok.nfo"), "nfo\n")
-	q := filepath.Join(tree, "sub", "..", "quarantine") + string(filepath.Separator)
+	// The ".." spelling is built by string concatenation: filepath.Join
+	// would clean it away before IngestPath saw it.
+	q := tree + "/sub/../quarantine/"
 	in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
 	in.Scanner.Quarantine = q
 	in.RemoveBlockedSidecars = true
@@ -2098,7 +2100,7 @@ func TestIngestQuarantineInsideTree(t *testing.T) {
 		t.Error("a nested quarantine directory was created")
 	}
 	before := len(tr.all())
-	for _, r := range []string{filepath.Join(tree, "quarantine"), filepath.Join(tree, "quarantine") + "/", filepath.Join(tree, "quarantine", "sub"), dest, filepath.Join(tree, "quarantine", "sub", "..", "sub")} {
+	for _, r := range []string{filepath.Join(tree, "quarantine"), filepath.Join(tree, "quarantine") + "/", filepath.Join(tree, "quarantine", "sub"), dest, filepath.Join(tree, "quarantine") + "/sub/../sub"} {
 		res, err := in.IngestPath(context.Background(), r)
 		if err == nil || !strings.Contains(err.Error(), "quarantine directory") {
 			t.Errorf("root %s: got %v, want a refusal", r, err)

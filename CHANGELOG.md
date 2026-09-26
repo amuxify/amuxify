@@ -70,7 +70,9 @@ All notable changes to amuxify will be documented in this file.
   that sits inside the scanned tree is skipped by the walk, and a path that
   is the quarantine directory or lies inside it is refused as a usage error
   before anything runs, so a file is quarantined once rather than moved a
-  level deeper on every run. The human report sanitiser and the `BIDI_NAME`
+  level deeper on every run; both checks compare directories by identity,
+  so another spelling or letter case of the same directory does not defeat
+  them. The human report sanitiser and the `BIDI_NAME`
   check now cover every Unicode format character, including U+061C and the
   tag characters, rather than a fixed list of code points.
 
