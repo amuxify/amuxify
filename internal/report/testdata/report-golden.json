@@ -1,0 +1,116 @@
+{
+  "schema": "amuxify.report/1",
+  "tool": "amuxify",
+  "version": "0.3.0",
+  "command": "ingest",
+  "profile": "homelab",
+  "hook": {
+    "adapter": "sabnzbd",
+    "event": "pp status 0",
+    "label": "Sample.Movie.2026.1080p",
+    "category": "movies",
+    "fail_on": "FAIL",
+    "exit_code": 1
+  },
+  "started": "2026-09-22T10:00:00Z",
+  "finished": "2026-09-22T10:00:04Z",
+  "verdict": "BLOCK",
+  "counts": {
+    "BLOCK": 1,
+    "PASS": 1,
+    "WARN": 1
+  },
+  "files": [
+    {
+      "path": "/srv/incoming/movie.mkv",
+      "verdict": "WARN",
+      "findings": [
+        {
+          "code": "LINK_IN_TAG",
+          "severity": "WARN",
+          "message": "1 link(s) in metadata: tag COMMENT: http://x.example",
+          "detail": "tag COMMENT: http://x.example"
+        },
+        {
+          "code": "HASH_OK",
+          "severity": "PASS",
+          "message": "2 stream(s) verified identical to source"
+        },
+        {
+          "code": "PLACED",
+          "severity": "PASS",
+          "message": "written and verified"
+        },
+        {
+          "code": "ROUTE",
+          "severity": "PASS",
+          "message": "remux: #1 default flag false -\u003e true"
+        }
+      ],
+      "output": "/srv/incoming__remuxed/movie.mkv",
+      "actions": [
+        "keep #0 video h264 und: primary video",
+        "keep #1 audio aac eng default: language eng"
+      ],
+      "info": {
+        "container": "matroska",
+        "kind": "matroska",
+        "route": "remux"
+      },
+      "duration_ms": 812
+    },
+    {
+      "path": "/srv/incoming/movie.nfo",
+      "verdict": "PASS",
+      "findings": [
+        {
+          "code": "SIDECAR_OK",
+          "severity": "PASS",
+          "message": "allowed sidecar .nfo"
+        },
+        {
+          "code": "NFO_KODI",
+          "severity": "PASS",
+          "message": "Kodi movie nfo"
+        },
+        {
+          "code": "NOTHING_TO_CLEAN",
+          "severity": "PASS",
+          "message": "sidecar; nothing to clean"
+        },
+        {
+          "code": "ROUTE",
+          "severity": "PASS",
+          "message": "skip: sidecar"
+        }
+      ],
+      "info": {
+        "route": "skip"
+      },
+      "duration_ms": 3
+    },
+    {
+      "path": "/srv/incoming/readme.exe",
+      "verdict": "BLOCK",
+      "findings": [
+        {
+          "code": "SIDECAR_BLOCKED",
+          "severity": "BLOCK",
+          "message": "blocked sidecar type .exe"
+        },
+        {
+          "code": "ROUTE",
+          "severity": "PASS",
+          "message": "skip: sidecar"
+        }
+      ],
+      "info": {
+        "route": "skip"
+      },
+      "duration_ms": 1
+    }
+  ],
+  "errors": [
+    "/srv/incoming/gone.mkv: lstat /srv/incoming/gone.mkv: no such file or directory"
+  ]
+}
