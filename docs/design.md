@@ -95,8 +95,13 @@ implementation. ffmpeg still does the MP4, MOV and AVI metadata rewrite for
 
 ## Roadmap
 
-0.3 (this release): `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and
-Radarr, frozen report schema `amuxify.report/1`, Kodi NFO awareness, a test for
-every guarantee. 0.4: Windows, macOS notarization, parallel full verification, a
-watch mode for set-ups where the hook cannot run inside the client container.
-1.0: fixture matrix complete.
+0.3: `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and Radarr, frozen
+report schema `amuxify.report/1`, Kodi NFO awareness, a test for every
+guarantee. 0.4: HDR and Dolby Vision assertions, `--jobs` for parallel full
+verification, a watch mode for set-ups where the hook cannot run inside the
+client container, ClamAV polish, and the fixes carried over from 0.3. macOS
+notarization waits for an Apple developer account; until then the Homebrew
+cask clears the quarantine attribute on install. A native Windows build is not
+planned: the guarantees rest on POSIX file identity, and Windows users run the
+Docker image through Docker Desktop or the Linux binary under WSL (see
+[install.md](install.md)). 1.0: fixture matrix complete.

@@ -82,8 +82,22 @@ Go 1.26 or newer.
 
 ### Windows
 
-Planned for 0.4. The code does not build for Windows yet (the file identity
-checks use Unix `stat` fields), so no Windows binary is published.
+There is no native Windows build, and none is planned. The safety guarantees
+in [safety.md](safety.md) rest on POSIX file identity: a file is recognised
+by its device and inode number so that a symlink, a hard link or a file
+swapped onto a name during a run is caught before anything is written, and
+ownership, mode and modification time are carried over to the rebuilt file.
+Windows has no equivalent that the same code can rely on, and a port that
+weakened those checks would not be amuxify.
+
+On Windows, run amuxify in one of two ways. With Docker Desktop, use the
+Docker image described above; mount the library into the container and pass
+the uid and gid that own it, exactly as on Linux. With WSL, install the Linux
+binary or the Docker image inside the WSL distribution and keep the library
+on a Linux filesystem there (a path under `/home` or `/srv`, not under
+`/mnt/c`), because a Windows drive mounted into WSL does not provide the
+file identity the guarantees need. The hook adapters work the same way when
+the download client runs inside WSL or in a container.
 
 ## Check
 
