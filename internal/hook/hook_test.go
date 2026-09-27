@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,9 +69,20 @@ func TestParseSABnzbd(t *testing.T) {
 		}
 	})
 	t.Run("env without optional variables", func(t *testing.T) {
-		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/dl/Job"}, nil)
+		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/dl/Job", "SAB_PP_STATUS=0"}, nil)
 		if err != nil || j.Skip != "" || j.Event != "pp status 0" || j.Label != "" || j.Category != "" {
 			t.Errorf("%+v %v", j, err)
+		}
+	})
+	t.Run("env without SAB_PP_STATUS is refused, not assumed successful", func(t *testing.T) {
+		for _, env := range [][]string{
+			{"SAB_COMPLETE_DIR=/dl/Job"},
+			{"SAB_COMPLETE_DIR=/dl/Job", "SAB_PP_STATUS="},
+		} {
+			_, err := Parse(SABnzbd, env, nil)
+			if err == nil || err.Error() != "not started by SABnzbd: SAB_COMPLETE_DIR is set but SAB_PP_STATUS is not" {
+				t.Errorf("%v: err %v", env, err)
+			}
 		}
 	})
 	for _, st := range []string{"1", "2", "3", "-1", "junk"} {
@@ -108,10 +121,39 @@ func TestParseSABnzbd(t *testing.T) {
 			t.Errorf("%+v %v", j, err)
 		}
 	})
-	t.Run("argv with only the directory", func(t *testing.T) {
-		j, err := Parse(SABnzbd, nil, []string{"/argv/dir"})
-		if err != nil || j.Skip != "" || j.Paths[0] != "/argv/dir" || j.Label != "" {
+	t.Run("seven parameters from an older SABnzbd", func(t *testing.T) {
+		j, err := Parse(SABnzbd, nil, eight[:7])
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Job{Adapter: SABnzbd, Paths: []string{"/argv/dir"}, Label: "Job Name", Category: "movies", Event: "pp status 0"}
+		if !reflect.DeepEqual(j, want) {
+			t.Errorf("got %+v\nwant %+v", j, want)
+		}
+	})
+	t.Run("the NZB name labels the job when the clean name is empty", func(t *testing.T) {
+		args := append([]string(nil), eight...)
+		args[2] = ""
+		j, err := Parse(SABnzbd, nil, args)
+		if err != nil || j.Label != "job.nzb" {
 			t.Errorf("%+v %v", j, err)
+		}
+	})
+	t.Run("argv with only the directory is not SABnzbd's shape", func(t *testing.T) {
+		_, err := Parse(SABnzbd, nil, []string{"/argv/dir"})
+		want := `expected no positional arguments or SABnzbd's seven or eight parameters, got 1 beginning with "/argv/dir"`
+		if err == nil || err.Error() != want {
+			t.Errorf("err %v", err)
+		}
+	})
+	t.Run("an empty status is refused, not assumed successful", func(t *testing.T) {
+		for _, n := range []int{7, 8} {
+			args := append([]string(nil), eight[:n]...)
+			args[6] = ""
+			_, err := Parse(SABnzbd, nil, args)
+			if err == nil || err.Error() != "SABnzbd's seventh parameter, the post-processing status, is empty" {
+				t.Errorf("%d parameters: err %v", n, err)
+			}
 		}
 	})
 	t.Run("neither", func(t *testing.T) {
@@ -120,20 +162,114 @@ func TestParseSABnzbd(t *testing.T) {
 			t.Errorf("err %v", err)
 		}
 	})
+	t.Run("env with a wrong argv shape is still a usage error", func(t *testing.T) {
+		// SABnzbd sets both, so positionals of the wrong shape are a wrapper
+		// mistake even when the environment alone would describe the job.
+		_, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/env/dir", "SAB_PP_STATUS=0"}, []string{"/stray/dir"})
+		if err == nil || !strings.HasPrefix(err.Error(), "expected no positional arguments") {
+			t.Errorf("err %v", err)
+		}
+	})
 	t.Run("env wins over argv", func(t *testing.T) {
 		args := append([]string(nil), eight...)
 		args[6] = "1"
-		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/env/dir", "SAB_CAT=tv"}, args)
+		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/env/dir", "SAB_PP_STATUS=0", "SAB_CAT=tv"}, args)
 		if err != nil || j.Paths[0] != "/env/dir" || j.Skip != "" || j.Category != "tv" {
 			t.Errorf("%+v %v", j, err)
 		}
 	})
 	t.Run("SAB_STATUS is never read", func(t *testing.T) {
-		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/dl/Job", "SAB_STATUS=Failed"}, nil)
+		j, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/dl/Job", "SAB_PP_STATUS=0", "SAB_STATUS=Failed"}, nil)
 		if err != nil || j.Skip != "" {
 			t.Errorf("%+v %v", j, err)
 		}
 	})
+}
+
+// CheckSABnzbdArgs is the definition of which positionals are SABnzbd's.
+// The stray directory cases matter for safety: a directory added in front
+// of or after SABnzbd's own parameters must never be ingested or read as a
+// parameter in silence, whatever the wrapper did to put it there.
+func TestCheckSABnzbdArgs(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "job.nzb")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+	seven := []string{dir, "job.nzb", "Job", "1", "tv", "alt.binaries", "0"}
+	eight := append(append([]string(nil), seven...), "")
+	with := func(base []string, i int, v string) []string {
+		out := append([]string(nil), base...)
+		out[i] = v
+		return out
+	}
+	tests := []struct {
+		name string
+		args []string
+		arg  string // the argument a usage message should name, "" for none
+		err  string // "" means accepted
+	}{
+		{"none", nil, "", ""},
+		{"seven", seven, "", ""},
+		{"eight", eight, "", ""},
+		{"eight with a failure URL", with(eight, 7, "https://indexer/report/1"), "", ""},
+		{"seven with a missing directory", with(seven, 0, missing), "", ""},
+		{"eight with a file where the NZB name goes", with(eight, 1, file), "", ""},
+		{"eight with a missing path where the NZB name goes", with(eight, 1, missing), "", ""},
+		{"one directory", []string{dir}, dir,
+			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 1 beginning with %q", dir)},
+		{"a directory named --quarantine", []string{"--quarantine"}, "--quarantine",
+			`expected no positional arguments or SABnzbd's seven or eight parameters, got 1 beginning with "--quarantine"`},
+		{"six", seven[:6], dir,
+			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 6 beginning with %q", dir)},
+		{"nine: a directory before eight", append([]string{dir}, eight...), dir,
+			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with %q", dir)},
+		{"nine: a directory after eight", append(append([]string(nil), eight...), dir), dir,
+			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with %q", dir)},
+		{"a directory before seven", append([]string{missing}, seven...), missing,
+			fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", dir)},
+		{"a symlink to a directory before seven", append([]string{missing}, with(seven, 0, link)...), missing,
+			fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", link)},
+		{"a directory after seven", append(append([]string(nil), seven...), dir), dir,
+			fmt.Sprintf("%q is a directory where SABnzbd's eighth parameter, the failure URL, belongs; a directory after SABnzbd's parameters is not read as one of them", dir)},
+		{"a symlink to a directory after seven", append(append([]string(nil), seven...), link), link,
+			fmt.Sprintf("%q is a directory where SABnzbd's eighth parameter, the failure URL, belongs; a directory after SABnzbd's parameters is not read as one of them", link)},
+		{"seven with an empty status", with(seven, 6, ""), "",
+			"SABnzbd's seventh parameter, the post-processing status, is empty"},
+		{"eight with an empty status", with(eight, 6, ""), "",
+			"SABnzbd's seventh parameter, the post-processing status, is empty"},
+		{"a NUL where the NZB name goes is data, not a directory", with(eight, 1, dir+"\x00"), "", ""},
+		{"a newline where the failure URL goes is data, not a directory", with(eight, 7, dir+"\n"), "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckSABnzbdArgs(tc.args)
+			if tc.err == "" {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("accepted %q", tc.args)
+			}
+			if err.Error() != tc.err {
+				t.Errorf("got  %s\nwant %s", err, tc.err)
+			}
+			var ae *SABnzbdArgError
+			if !errors.As(err, &ae) {
+				t.Fatalf("%T is not a *SABnzbdArgError", err)
+			}
+			if ae.Arg != tc.arg {
+				t.Errorf("Arg %q, want %q", ae.Arg, tc.arg)
+			}
+		})
+	}
 }
 
 func TestParseNZBGet(t *testing.T) {
@@ -338,11 +474,19 @@ func TestParseKeepsHostileValuesAsData(t *testing.T) {
 			t.Errorf("sonarr %.20q: %+v %v", v, j, err)
 		}
 	}
-	// Positional arguments beyond the eight are ignored, and a flag-shaped
-	// argument is a directory name, never a flag.
-	j, err := Parse(SABnzbd, nil, []string{"--quarantine=/", "n", "c", "1", "cat", "g", "0", "", "extra", "--fail-on", "block"})
-	if err != nil || j.Paths[0] != "--quarantine=/" || j.Skip != "" {
-		t.Errorf("%+v %v", j, err)
+	// A flag-shaped positional is a directory name, never a flag, and every
+	// hostile value in the positional form is carried as data too.
+	for _, v := range []string{"--quarantine=/", "--quarantine", "-rf", "$(id)", "a\x00b", "/dl/x\nBLOCK /forged", "‮/dl/x"} {
+		j, err := Parse(SABnzbd, nil, []string{v, v, v, v, v, v, "0", v})
+		if err != nil || j.Paths[0] != v || j.Label != v || j.Category != v || j.Skip != "" {
+			t.Errorf("%.20q: %+v %v", v, j, err)
+		}
+	}
+	// Positional arguments beyond the eight are not ignored: the shape is
+	// not SABnzbd's, so the call is refused before any path is read.
+	_, err := Parse(SABnzbd, nil, []string{"--quarantine=/", "n", "c", "1", "cat", "g", "0", "", "extra", "--fail-on", "block"})
+	if err == nil || !strings.HasPrefix(err.Error(), "expected no positional arguments or SABnzbd's seven or eight parameters, got 11 ") {
+		t.Errorf("err %v", err)
 	}
 }
 

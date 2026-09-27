@@ -37,9 +37,12 @@ SECURITY.md.
    temp file is held open from its creation until the last of those checks,
    so its inode number cannot be freed and handed to a file swapped onto the
    name, as ext4 would do at once.
+   A job directory that a download client hands over as a symlink is the
+   same case: the hook reports the link and never enters the target.
    Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
    `fsutil.TestCreateTempPinsInode`, `remux.TestTempSwappedBeforePlacementRefused`,
-   `clean.TestMp4RewriteRefusesSwappedTemp`.
+   `clean.TestMp4RewriteRefusesSwappedTemp`,
+   `cli.TestHookSABnzbdArgumentForms/SAB_COMPLETE_DIR_is_a_symlink`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make
@@ -76,6 +79,18 @@ edited by the same mkvpropedit call `clean` uses, or left alone, and a
 hard-linked file is never edited in place. Every guarantee above applies to
 them unchanged. A hook never turns a client job into a failed one for a WARN
 or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
+
+Everything a hook receives from its caller is untrusted. Positional
+arguments are accepted only in the shapes the caller is documented to
+produce (for SABnzbd, none or its seven or eight parameters, with a
+directory added in front of or after them refused rather than read as one),
+a job whose status is missing is refused rather than assumed successful, a
+job directory that is or lies inside the quarantine directory is refused
+before anything runs, and every value is carried as data: nothing is split,
+expanded or executed, and control characters never reach the log raw.
+Test: `hook.TestCheckSABnzbdArgs`, `hook.TestParseKeepsHostileValuesAsData`,
+`cli.TestHookSABnzbdArgumentForms`, `cli.TestHookArgumentInjection`,
+`cli.TestHookEnvironmentInjection`.
 
 ## What scan looks at
 

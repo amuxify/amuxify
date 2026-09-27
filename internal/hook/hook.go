@@ -5,6 +5,7 @@ package hook
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -67,33 +68,122 @@ func Parse(a Adapter, env []string, args []string) (Job, error) {
 	return Job{}, fmt.Errorf("unknown adapter %q", string(a))
 }
 
+// SABnzbd's positional parameters, in the order SABnzbd passes them to a
+// post-processing script. Versions before the failure URL was added pass
+// the first seven; current versions pass all eight.
+const (
+	sabDir      = iota // the final directory of the job
+	sabNZBName         // the name of the original NZB file
+	sabJobName         // the clean job name, as shown in the queue
+	sabReport          // the indexer's report number
+	sabCategory        // the user-defined category
+	sabGroup           // the newsgroup
+	sabStatus          // the post-processing status: 0 is success
+	sabFailURL         // the failure URL, or empty
+)
+
+// SABnzbdParams and SABnzbdParamsWithoutURL are the two counts of
+// positional arguments the SABnzbd adapter accepts besides none at all.
+const (
+	SABnzbdParams           = sabFailURL + 1
+	SABnzbdParamsWithoutURL = sabStatus + 1
+)
+
+// SABnzbdArgError says why positional arguments are not SABnzbd's
+// parameters. Arg is the argument at fault when one can be named, so a
+// caller can say how it should have been written; it is empty otherwise.
+type SABnzbdArgError struct {
+	Arg    string
+	Reason string
+}
+
+func (e *SABnzbdArgError) Error() string { return e.Reason }
+
+// CheckSABnzbdArgs decides whether args are SABnzbd's positional parameters.
+// The accepted forms are exactly these: no arguments at all (the job is read
+// from the environment), the seven parameters an older SABnzbd passes, or
+// the eight a current one passes. Any other count is refused, and so is a
+// shape that has the right count only because a directory was added to the
+// front or the back of SABnzbd's own parameters, because that directory
+// would otherwise be ingested, or read as the failure URL, in silence.
+//
+// The tells are the second and the eighth parameter. SABnzbd's second
+// parameter is the name of the original NZB file, never a directory, so an
+// existing directory there means a directory was written in front of seven
+// genuine parameters. The eighth is the failure URL, empty or a URL, so an
+// existing directory there means one was written after seven. A symlink to
+// a directory counts as a directory in both places: SABnzbd would never
+// pass one either. The first parameter is not inspected, because the stray
+// directory may be a symlink or may not exist yet and either would let the
+// shifted shape through. The seventh parameter, the status, must not be
+// empty: the adapter only ever runs on a status of exactly 0 and refuses to
+// guess when the wrapper dropped it. Every value is otherwise taken as data.
+func CheckSABnzbdArgs(args []string) error {
+	switch len(args) {
+	case 0:
+		return nil
+	case SABnzbdParamsWithoutURL, SABnzbdParams:
+	default:
+		return &SABnzbdArgError{Arg: args[0], Reason: fmt.Sprintf(
+			"expected no positional arguments or SABnzbd's seven or eight parameters, got %d beginning with %q", len(args), args[0])}
+	}
+	if isDir(args[sabNZBName]) {
+		return &SABnzbdArgError{Arg: args[sabDir], Reason: fmt.Sprintf(
+			"%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", args[sabNZBName])}
+	}
+	if len(args) == SABnzbdParams && isDir(args[sabFailURL]) {
+		return &SABnzbdArgError{Arg: args[sabFailURL], Reason: fmt.Sprintf(
+			"%q is a directory where SABnzbd's eighth parameter, the failure URL, belongs; a directory after SABnzbd's parameters is not read as one of them", args[sabFailURL])}
+	}
+	if args[sabStatus] == "" {
+		return &SABnzbdArgError{Reason: "SABnzbd's seventh parameter, the post-processing status, is empty"}
+	}
+	return nil
+}
+
+// isDir reports whether path names an existing directory, following a
+// symlink to one. A NUL in the path is an error from Stat, so such a value
+// is simply not a directory.
+func isDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// parseSABnzbd reads the job from the environment when SAB_COMPLETE_DIR is
+// set, which is how SABnzbd 2 and later start a script, and otherwise from
+// the positional parameters. The positional arguments are checked first in
+// either case: SABnzbd sets both, so a wrong shape is a wrapper mistake
+// whichever form the job would then be read from. In the environment form
+// SAB_PP_STATUS must be set, as SABnzbd always does alongside
+// SAB_COMPLETE_DIR; a job whose status is missing is refused rather than
+// assumed successful.
 func parseSABnzbd(env []string, args []string) (Job, error) {
 	j := Job{Adapter: SABnzbd}
+	if err := CheckSABnzbdArgs(args); err != nil {
+		return j, err
+	}
 	dir, _ := Lookup(env, "SAB_COMPLETE_DIR")
-	status := "0"
+	var status string
 	switch {
 	case dir != "":
-		if v, ok := Lookup(env, "SAB_PP_STATUS"); ok && v != "" {
-			status = v
+		status, _ = Lookup(env, "SAB_PP_STATUS")
+		if status == "" {
+			return j, errors.New("not started by SABnzbd: SAB_COMPLETE_DIR is set but SAB_PP_STATUS is not")
 		}
 		j.Label, _ = Lookup(env, "SAB_FINAL_NAME")
 		j.Category, _ = Lookup(env, "SAB_CAT")
 	case len(args) > 0:
-		// SABnzbd passes eight positional parameters: complete dir, nzb
-		// name, clean job name, indexer report number, category, group,
-		// post-processing status, failure URL.
-		dir = args[0]
-		if len(args) > 2 && args[2] != "" {
-			j.Label = args[2]
-		} else if len(args) > 1 {
-			j.Label = args[1]
+		dir = args[sabDir]
+		if args[sabJobName] != "" {
+			j.Label = args[sabJobName]
+		} else {
+			j.Label = args[sabNZBName]
 		}
-		if len(args) > 4 {
-			j.Category = args[4]
-		}
-		if len(args) > 6 && args[6] != "" {
-			status = args[6]
-		}
+		j.Category = args[sabCategory]
+		status = args[sabStatus]
 	default:
 		return j, errors.New("not started by SABnzbd: SAB_COMPLETE_DIR is not set and no arguments were given")
 	}
