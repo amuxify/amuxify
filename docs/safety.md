@@ -37,9 +37,33 @@ SECURITY.md.
    temp file is held open from its creation until the last of those checks,
    so its inode number cannot be freed and handed to a file swapped onto the
    name, as ext4 would do at once.
+   The same holds for a named pipe, which is worse than a symlink in one way:
+   opening it waits for a peer that a planter never has to supply, so a pipe
+   at a name the run opens could park the process for good. Every open of a
+   name amuxify did not create through a descriptor it still holds (an input
+   file, a sidecar, the quarantine source and destination, the temp name
+   after an external tool wrote to it) is made without following a link and
+   without blocking, and the entry is refused unless it turns out to be a
+   regular file. A pipe under a media or sidecar name is `FAIL UNREADABLE`
+   and skipped; a pipe swapped onto the temp name after mkvmerge or ffmpeg
+   returns is caught before any further read of that name. While the tool
+   itself has the name, only its timeout bounds the wait, and the run
+   reports the timeout as a failed remux or clean. The flush before
+   placement goes through the descriptor held since the temp file was
+   created, never through the name.
    Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
    `fsutil.TestCreateTempPinsInode`, `remux.TestTempSwappedBeforePlacementRefused`,
-   `clean.TestMp4RewriteRefusesSwappedTemp`.
+   `clean.TestMp4RewriteRefusesSwappedTemp`,
+   `fsutil.TestOpenRegularRefusesNamedPipeAndEveryOtherKind`, `fsutil.TestOpenOwnRefusesNamedPipe`,
+   `fsutil.TestReplaceInPlaceOwnRefusesNamedPipeAtTemp`, `fsutil.TestCreateTempReplacesPlantedPipe`,
+   `fsutil.TestFsyncRefusesNamedPipe`, `fsutil.TestTempSyncNeverOpensTheName`,
+   `fsutil.TestMoveNoClobberRefusesNamedPipes`, `sniff.TestFileRefusesNamedPipeAndSymlink`,
+   `mp4.TestParseRefusesNamedPipeAndSymlink`, `scan.TestNamedPipeInputRefused`,
+   `scan.TestScanReadersRefuseNamedPipe`, `scan.TestQuarantineRefusesNamedPipeAtDestination`,
+   `scan.TestAttachmentSwappedForPipeDoesNotBlock`, `clean.TestNamedPipeInputRefused`,
+   `clean.TestMp4RewriteRefusesPipeAtTemp`, `remux.TestNamedPipeInputRefused`,
+   `remux.TestTempSwappedForPipeAfterMkvmerge`, `remux.TestTakeIdentityRefusesPipeAtTemp`,
+   `remux.TestMkvmergeBlockedOnPipeIsKilled`, `ingest.TestNamedPipeInputRefused`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make

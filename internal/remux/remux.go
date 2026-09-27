@@ -342,7 +342,9 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		cleanup()
 		return fr
 	}
-	if err := fsutil.Fsync(tmp); err != nil {
+	// The flush goes through the handle held since the creation, so the
+	// name is not opened again for it.
+	if err := own.Sync(); err != nil {
 		cleanup()
 		fr.Addf(CodeRemuxFail, report.Fail, "fsync: %v", err)
 		return fr
@@ -554,12 +556,13 @@ func createTemp(tmp string) (*fsutil.Temp, error) {
 }
 
 // tempUnchanged reports an error when tmp no longer names the file
-// createTemp made: a symlink or another entry renamed onto the name, or a
-// hard link added to the file, any of which would let the verification or
-// the placement reach a file this run did not create. mkvmerge and
-// mkvpropedit write into the existing file rather than unlinking and
-// recreating it (checked against mkvmerge and mkvpropedit v102, which keep
-// the inode), so the identity survives both tools.
+// createTemp made: a symlink, a named pipe or another entry renamed onto
+// the name, or a hard link added to the file, any of which would let the
+// verification or the placement reach a file this run did not create, or
+// let a tool that opens the name block on a pipe. mkvmerge and mkvpropedit
+// write into the existing file rather than unlinking and recreating it
+// (checked against mkvmerge and mkvpropedit v102, which keep the inode),
+// so the identity survives both tools.
 func tempUnchanged(tmp string, created os.FileInfo) error {
 	now, err := os.Lstat(tmp)
 	if err != nil {

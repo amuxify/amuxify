@@ -8,9 +8,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
+
+	"github.com/amuxify/amuxify/internal/fsutil"
 )
 
 // Info is what the walker learned.
@@ -84,9 +85,11 @@ func (in *Info) ProvenanceKeys() []string {
 	return keys
 }
 
-// Parse walks a file.
+// Parse walks a file. The path is opened with fsutil.OpenRegular, so a
+// symbolic link is never followed and a named pipe planted at the path is
+// refused rather than read from.
 func Parse(path string) (*Info, error) {
-	f, err := os.Open(path)
+	f, err := fsutil.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

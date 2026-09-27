@@ -130,6 +130,14 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
 		return r
 	}
+	// Anything else that is not a regular file is refused before any read:
+	// a named pipe would block the first open until a writer appeared, and
+	// a device or a socket is never media. The path is reported as
+	// unreadable, which is what it is for this run.
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeUnreadable, report.Fail, "%s; skipped", entryKind(fi.Mode()))
+		return r
+	}
 	name := filepath.Base(path)
 	if bad := bidiChars(name); bad != "" {
 		fr.Addf(CodeBidiName, report.Block, "filename contains %s (extension spoofing)", bad)
@@ -318,22 +326,28 @@ func (s *Scanner) checkMkv(ctx context.Context, fr *report.FileResult, info *pro
 }
 
 // sniffAttachment extracts an attachment to a temp file and returns a
-// description when its content is executable or an archive.
+// description when its content is executable or an archive. The file is
+// written under a directory this run creates with mode 0700 and a random
+// name, so no other user can plant an entry at the path mkvextract is
+// given, and it is read back with sniff.File, which refuses anything that
+// is not a regular file without following or waiting on it. An attachment
+// that cannot be extracted or read is not sniffed and the policy decides
+// on its declared type alone.
 func (s *Scanner) sniffAttachment(ctx context.Context, path string, a probe.Attachment) string {
 	if a.Size > 64<<20 || !s.Runner.Have(exec.MKVExtract) {
 		return ""
 	}
-	tmp, err := os.CreateTemp("", "amuxify-att-*")
+	dir, err := attachmentDir()
 	if err != nil {
 		return ""
 	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
-	res, err := s.Runner.RunWithTimeout(ctx, 2*time.Minute, exec.MKVExtract, path, "attachments", fmt.Sprintf("%d:%s", a.ID, tmp.Name()))
+	defer os.RemoveAll(dir)
+	tmp := filepath.Join(dir, "attachment")
+	res, err := s.Runner.RunWithTimeout(ctx, 2*time.Minute, exec.MKVExtract, path, "attachments", fmt.Sprintf("%d:%s", a.ID, tmp))
 	if err != nil || res.ExitCode >= 2 {
 		return ""
 	}
-	k, err := sniff.File(tmp.Name())
+	k, err := sniff.File(tmp)
 	if err != nil {
 		return ""
 	}
@@ -524,11 +538,17 @@ var polySigs = [][]byte{
 	[]byte("This program cannot be run in DOS mode"),
 }
 
+// attachmentDir creates the private directory an attachment is extracted
+// into. Tests replace it to hand the extraction a directory of their own.
+var attachmentDir = func() (string, error) { return os.MkdirTemp("", "amuxify-att-*") }
+
 // polyglot looks for archive or executable signatures in the last 1 MiB and
 // for the PE stub string in the first 1 MiB. Matroska and MP4 payloads are
 // compressed video, so these strings essentially never occur by accident.
+// The file is opened with fsutil.OpenRegular, so a named pipe swapped onto
+// the path since the scan's own stat cannot block the read.
 func (s *Scanner) polyglot(path string, size int64) string {
-	f, err := os.Open(path)
+	f, err := fsutil.OpenRegular(path)
 	if err != nil {
 		return ""
 	}
@@ -690,6 +710,22 @@ func bidiChars(name string) string {
 		}
 	}
 	return ""
+}
+
+// entryKind names what a directory entry is when it is not a regular file,
+// for the finding that refuses it.
+func entryKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeNamedPipe != 0:
+		return "not a regular file (named pipe)"
+	case m&os.ModeSocket != 0:
+		return "not a regular file (socket)"
+	case m&os.ModeDevice != 0:
+		return "not a regular file (device)"
+	case m&os.ModeDir != 0:
+		return "not a regular file (directory)"
+	}
+	return "not a regular file"
 }
 
 func penultimateExt(name string) string {

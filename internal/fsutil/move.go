@@ -37,8 +37,9 @@ var CopyData = func(dst io.Writer, src io.Reader) (int64, error) { return io.Cop
 // PlaceNoClobber lands the original file at dest under a new number, and
 // removing it would delete the only copy of the media. Across filesystems,
 // where link and rename fail with EXDEV, it creates dest with
-// O_CREATE|O_EXCL (so a file or a symlink already at dest is refused and
-// never followed), copies the bytes, fsyncs, reads dest back and compares
+// O_CREATE|O_EXCL (so a file, a symlink or a named pipe already at dest is
+// refused and never followed or opened), copies the bytes, fsyncs, reads
+// dest back through OpenRegular and compares
 // its SHA-256 with the hash of the bytes copied, checks that src is still
 // the file it opened, and only then removes src. On any failure the partial
 // copy is removed and src is left untouched. The copy is created with mode
@@ -102,7 +103,10 @@ func copyThenRemove(src, dest string) (err error) {
 	if !lfi.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file; refusing to copy it", src)
 	}
-	in, err := os.Open(src)
+	// The path was a regular file at Lstat; the open refuses anything else
+	// without following a link or blocking on a pipe swapped in since, and
+	// the file opened must still be that same file.
+	in, err := OpenRegular(src)
 	if err != nil {
 		return err
 	}
@@ -111,8 +115,6 @@ func copyThenRemove(src, dest string) (err error) {
 	if err != nil {
 		return err
 	}
-	// The path was a regular file at Lstat; make sure the file opened is
-	// that same file, not something swapped in between the two calls.
 	if !sfi.Mode().IsRegular() || identityOf(sfi) != identityOf(lfi) {
 		return fmt.Errorf("%s changed while it was being opened; refusing to copy it", src)
 	}
@@ -182,9 +184,11 @@ func copyThenRemove(src, dest string) (err error) {
 }
 
 // verifyCopy reads dest back and checks that it is the file created here,
-// has the expected size and hashes to sum.
+// has the expected size and hashes to sum. The name is opened with
+// OpenRegular, so a link or a named pipe swapped onto it while the copy ran
+// is refused rather than followed or waited on.
 func verifyCopy(dest string, created identity, size int64, sum []byte) error {
-	f, err := os.Open(dest)
+	f, err := OpenRegular(dest)
 	if err != nil {
 		return err
 	}

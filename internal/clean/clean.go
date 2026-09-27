@@ -111,6 +111,10 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
 		return fr
 	}
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeCleanFail, report.Fail, "not a regular file; skipped")
+		return fr
+	}
 	ext := fsutil.Ext(path)
 	if !scan.IsMedia(path) {
 		c.cleanSidecar(&fr, path, ext)
@@ -145,6 +149,10 @@ func (c *Cleaner) CleanScanned(ctx context.Context, sc scan.Result) report.FileR
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
+		return fr
+	}
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeCleanFail, report.Fail, "not a regular file; skipped")
 		return fr
 	}
 	ext := fsutil.Ext(path)
@@ -358,16 +366,21 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		return
 	}
 	// The temp file is created here, empty and exclusively, before its name
-	// is handed to ffmpeg, and the identity recorded is what the replacement
-	// below requires of the file it opens: the source's mode, ownership and
-	// time are written through that descriptor, never through the name, so
-	// a symlink swapped onto the temp name cannot have its target's identity
-	// rewritten (guarantee 3). ffmpeg writes into the existing file rather
-	// than unlinking and recreating it, so the identity survives the
-	// rewrite. os.Remove never follows a link, so the cleanup on every
-	// failure removes a planted link and leaves its target alone. The handle
-	// stays open until the replacement has been checked, so the inode
-	// number cannot be freed and reused by a file swapped onto the name.
+	// is handed to ffmpeg, and the identity recorded is what every later
+	// step requires of the entry at the name: as soon as ffmpeg returns, and
+	// before ffprobe, the stream hashes or the atom parser open that name,
+	// tempUnchanged checks that it still leads to this run's own regular
+	// file, so a symlink swapped onto it is never read through and a named
+	// pipe swapped onto it is never opened, which would block the run until
+	// the planter chose to write. The replacement below then writes the
+	// source's mode, ownership and time through a descriptor of that same
+	// file, never through the name (guarantee 3). ffmpeg writes into the
+	// existing file rather than unlinking and recreating it, so the identity
+	// survives the rewrite. os.Remove never follows a link, so the cleanup
+	// on every failure removes a planted link or pipe and leaves any target
+	// alone. The handle stays open until the replacement has been checked,
+	// so the inode number cannot be freed and reused by a file swapped onto
+	// the name, and the flush before the replacement goes through it.
 	tmp := fsutil.TempName(info.Path)
 	own, err := fsutil.CreateTemp(tmp)
 	if err != nil {
@@ -406,6 +419,11 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		fr.Addf(CodeCleanFail, report.Fail, "ffmpeg rewrite: %s", msg)
 		return
 	}
+	if err := tempUnchanged(tmp, created); err != nil {
+		_ = os.Remove(tmp)
+		fr.Addf(CodeCleanFail, report.Fail, "replace: %v; original untouched", err)
+		return
+	}
 	out, err := c.Prober.Probe(ctx, tmp)
 	if err != nil || len(out.Streams) != len(info.Streams) {
 		_ = os.Remove(tmp)
@@ -436,7 +454,7 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 	// The replacement's error is assigned to the function-level err on
 	// purpose: an if-scoped err here would be discarded and a failed
 	// replacement reported as a successful rewrite.
-	err = fsutil.Fsync(tmp)
+	err = own.Sync()
 	if err == nil {
 		err = fsutil.ReplaceInPlaceOwn(tmp, info.Path, created)
 	}
@@ -446,6 +464,28 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		return
 	}
 	fr.Addf(CodeMetadata, report.Pass, "rewritten without %s", strings.Join(what, ", "))
+}
+
+// tempUnchanged reports an error when tmp no longer names the regular file
+// created describes with a single name: a symlink, a named pipe or another
+// entry swapped onto the name, or a hard link added to the file. It runs
+// as soon as ffmpeg has returned, before any tool or parser opens the name
+// again.
+func tempUnchanged(tmp string, created os.FileInfo) error {
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		return fmt.Errorf("temp file: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", tmp)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+		return fmt.Errorf("%s is not the file this run created", tmp)
+	}
+	if n := fsutil.Nlink(now); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
+	}
+	return nil
 }
 
 // audioTagsAdvice is the SKIPPED text for an audio file whose tags are left
