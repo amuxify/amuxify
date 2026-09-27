@@ -40,15 +40,22 @@ func TestParseVersion(t *testing.T) {
 // text to stdout and stderr and exits with code.
 func fakeMkvmerge(t *testing.T, stdout, stderr string, code int) {
 	t.Helper()
+	fakeTool(t, exec.MKVMerge, stdout, stderr, code)
+}
+
+// fakeTool installs a shell script under the tool's override variable
+// that prints the given text to stdout and stderr and exits with code.
+func fakeTool(t *testing.T, tool, stdout, stderr string, code int) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("the fake mkvmerge is a POSIX shell script")
+		t.Skip("the fake tool is a POSIX shell script")
 	}
-	p := filepath.Join(t.TempDir(), "mkvmerge")
+	p := filepath.Join(t.TempDir(), tool)
 	body := "#!/bin/sh\nprintf '%s\\n' " + shq(stdout) + "\nprintf '%s\\n' " + shq(stderr) + " >&2\nexit " + strconv.Itoa(code) + "\n"
 	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AMUXIFY_MKVMERGE", p)
+	t.Setenv("AMUXIFY_"+strings.ToUpper(tool), p)
 }
 
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -125,14 +132,136 @@ func TestLocaleCheck(t *testing.T) {
 	})
 }
 
-// runChecks runs the doctor with every other tool pointed at a missing
-// path so the result does not depend on what the host has installed.
+// runChecks runs the doctor for the homelab profile with every tool but
+// mkvmerge pointed at a missing path so the result does not depend on
+// what the host has installed.
 func runChecks(t *testing.T) []Check {
 	t.Helper()
-	missing := filepath.Join(t.TempDir(), "no-such-tool")
-	for _, tool := range []string{exec.FFmpeg, exec.FFprobe, exec.MKVPropedit, exec.MKVExtract, exec.ExifTool, exec.ClamScan} {
-		t.Setenv("AMUXIFY_"+strings.ToUpper(tool), missing)
-	}
-	checks, _ := Run(context.Background(), &exec.Runner{Timeout: 10 * time.Second}, "homelab", "")
+	checks, _ := runProfile(t, "homelab", exec.MKVMerge)
 	return checks
+}
+
+// runProfile runs the doctor for the named profile with every tool not
+// listed in keep pointed at a missing path, and returns the checks and the
+// worst status.
+func runProfile(t *testing.T, profile string, keep ...string) ([]Check, report.Severity) {
+	t.Helper()
+	missing := filepath.Join(t.TempDir(), "no-such-tool")
+	for _, tool := range []string{exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract, exec.ExifTool, exec.ClamScan} {
+		kept := false
+		for _, k := range keep {
+			kept = kept || k == tool
+		}
+		if !kept {
+			t.Setenv("AMUXIFY_"+strings.ToUpper(tool), missing)
+		}
+	}
+	return Run(context.Background(), &exec.Runner{Timeout: 10 * time.Second}, profile, "")
+}
+
+func checkOf(checks []Check, name string) (Check, bool) {
+	for _, c := range checks {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Check{}, false
+}
+
+// The clamscan rows: the version line is reported bounded and sanitised,
+// and the signature database version and age are read from it into an
+// informational row that never changes the exit status. Without a
+// database the row says so; with an old one it names freshclam.
+func TestClamscanVersionAndDatabaseAge(t *testing.T) {
+	fixed := time.Date(2026, 9, 28, 12, 0, 0, 0, time.Local)
+	orig := now
+	now = func() time.Time { return fixed }
+	t.Cleanup(func() { now = orig })
+	cases := []struct {
+		name, line, want string
+	}{
+		{"fresh", "ClamAV 1.2.1/27000/Sat Sep 26 08:33:45 2026", "signatures 27000 from 2026-09-26 (2 day(s) old)"},
+		{"zero-padded day", "ClamAV 0.103.8/27001/Sat Sep 05 07:46:16 2026", "signatures 27001 from 2026-09-05 (23 day(s) old); run freshclam to update them"},
+		{"stale", "ClamAV 1.4.0/26900/Mon May 11 07:46:16 2026", "signatures 26900 from 2026-05-11 (140 day(s) old); run freshclam to update them"},
+		{"future", "ClamAV 1.2.1/27002/Wed Oct 14 08:33:45 2026", "signatures 27002 from 2026-10-14 (0 day(s) old)"},
+		{"no database", "ClamAV 1.2.1", "no signature database version in the clamscan version line; run freshclam to download one"},
+		{"unparseable date", "ClamAV 1.2.1/27000/yesterday", "signatures 27000 from yesterday (age unknown: the date did not parse)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeTool(t, exec.ClamScan, tc.line, "", 0)
+			checks, worst := runProfile(t, "archive", exec.ClamScan)
+			tool, ok := checkOf(checks, "clamscan")
+			if !ok || tool.Status != report.Pass || !strings.HasSuffix(tool.Detail, " ("+tc.line+")") {
+				t.Fatalf("clamscan row %+v", tool)
+			}
+			db, ok := checkOf(checks, "clamav-db")
+			if !ok || db.Status != report.Pass || db.Required || db.Detail != tc.want {
+				t.Fatalf("clamav-db row %+v, want detail %q", db, tc.want)
+			}
+			if _, ok := checkOf(checks, "clamav"); ok {
+				t.Fatal("clamav row present although clamscan is installed")
+			}
+			// Only the missing required tools decide the status.
+			if worst != report.Usage {
+				t.Fatalf("worst %s with mkvmerge and ffmpeg missing", worst)
+			}
+		})
+	}
+	t.Run("hostile version line", func(t *testing.T) {
+		line := "ClamAV 1.2.1/27000/Sat Sep 26 08:33:45 2026\x1b[2K\r\u202ePASS everything" + strings.Repeat("x", 1000)
+		fakeTool(t, exec.ClamScan, line, "", 0)
+		checks, _ := runProfile(t, "archive", exec.ClamScan)
+		for _, name := range []string{"clamscan", "clamav-db"} {
+			c, _ := checkOf(checks, name)
+			for _, bad := range []string{"\x1b", "\r", "\u202e"} {
+				if strings.Contains(c.Detail, bad) {
+					t.Errorf("%s row carries a raw control or format character: %q", name, c.Detail)
+				}
+			}
+			if len(c.Detail) > 2*versionBytes {
+				t.Errorf("%s row not bounded: %d bytes", name, len(c.Detail))
+			}
+		}
+		c, _ := checkOf(checks, "clamscan")
+		if !strings.Contains(c.Detail, `\x1b[2K\x0d\u202ePASS`) || !strings.HasSuffix(c.Detail, "...)") {
+			t.Errorf("clamscan row not sanitised and cut: %q", c.Detail)
+		}
+		if !strings.Contains(Format(checks), `\u202ePASS`) {
+			t.Error("the terminal form carries the raw override")
+		}
+	})
+	t.Run("version cannot be read", func(t *testing.T) {
+		fakeTool(t, exec.ClamScan, "", "", 0)
+		checks, _ := runProfile(t, "archive", exec.ClamScan)
+		db, ok := checkOf(checks, "clamav-db")
+		if !ok || db.Status != report.Pass || !strings.HasPrefix(db.Detail, "no signature database version") {
+			t.Fatalf("clamav-db row %+v", db)
+		}
+	})
+}
+
+// A profile that requires clamscan fails the doctor (exit 2 in the CLI)
+// with the same message as before when clamscan is missing, and there is
+// no database row to report on. An optional profile only warns.
+func TestClamscanMissingWithRequiredProfile(t *testing.T) {
+	checks, worst := runProfile(t, "strict")
+	c, ok := checkOf(checks, "clamav")
+	if !ok || c.Status != report.Usage || !c.Required || c.Detail != "profile requires clamscan but it is not installed" {
+		t.Fatalf("clamav row %+v", c)
+	}
+	if worst != report.Usage {
+		t.Fatalf("worst %s", worst)
+	}
+	if _, ok := checkOf(checks, "clamav-db"); ok {
+		t.Fatal("clamav-db row present without clamscan")
+	}
+	tool, _ := checkOf(checks, "clamscan")
+	if tool.Status != report.Warn || tool.Required {
+		t.Fatalf("clamscan row %+v", tool)
+	}
+	checks, _ = runProfile(t, "archive", exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract, exec.FFmpeg, exec.FFprobe)
+	if _, ok := checkOf(checks, "clamav"); ok {
+		t.Fatal("optional profile produced the required-clamscan row")
+	}
 }

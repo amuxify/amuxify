@@ -312,7 +312,7 @@ on its own.
 | `DECODE_FAIL` | FAIL | scan, remux, ingest | ffmpeg reported errors while decoding. |
 | `NO_DURATION` | WARN | scan | The container reports no duration. |
 | `CLAMAV_INFECTED` | BLOCK | scan | clamscan reported a match. |
-| `CLAMAV_ERROR` | WARN | scan | clamscan could not run or failed. |
+| `CLAMAV_ERROR` | WARN | scan | clamscan could not run, ran past the timeout or exited with an error; the file is still probed and verified. |
 | `CLAMAV_MISSING` | FAIL | scan | The profile requires clamscan and it is not installed. |
 | `HARDLINKED` | PASS (scan, remux copy) or WARN (remux skip or break, clean skip, ingest) | scan, remux, clean, ingest | More than one link to the inode; scan records the count in `info.nlink`. |
 | `SIDECAR_BLOCKED` | BLOCK | scan | A sidecar extension on the block list. |
@@ -344,5 +344,5 @@ on its own.
 | `XATTR` | PASS, or WARN when an attribute could not be removed | clean | Extended attributes were removed. |
 | `NOTHING_TO_CLEAN` | PASS | clean | The file was already clean or carries no writable metadata. |
 | `CLEAN_FAIL` | FAIL | clean | A cleaning step failed; the source is untouched. |
-| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
+| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `CLAMAV-DB`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
 | `TRACK`, `ATTACHMENT` | reserved | remux | Declared, never emitted. |

@@ -20,7 +20,7 @@ import (
 // name of each check. They are not Go constants, so they are listed here.
 var doctorCodes = []string{
 	"MKVMERGE", "MKVPROPEDIT", "MKVEXTRACT", "FFMPEG", "FFPROBE", "EXIFTOOL", "CLAMSCAN",
-	"LOCALE", "PROFILE", "CLAMAV", "USER", "STATE-DIR", "TMPDIR",
+	"CLAMAV-DB", "LOCALE", "PROFILE", "CLAMAV", "USER", "STATE-DIR", "TMPDIR",
 }
 
 // reserved codes are declared in the code but never emitted. The docs must
