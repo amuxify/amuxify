@@ -49,8 +49,24 @@ SECURITY.md.
    in the source and in the output with `ffmpeg -f streamhash` (SHA-256 of
    packets). When the source container frames packets differently from
    Matroska (MPEG-TS, MPEG-PS, AVI), decoded frames are compared instead. Any
-   difference deletes the output and fails the file.
-   Test: `remux.TestHashMismatchDeletesOutput`.
+   difference deletes the output and fails the file. The colour and HDR
+   signalling of every kept video stream is held to the same standard,
+   because it lives in the container header rather than in the packets and
+   a muxer can drop or alter it without changing a single hash: the colour
+   primaries, transfer characteristic, matrix coefficients and range, the
+   mastering display chromaticity and luminance, the content light levels
+   and the Dolby Vision configuration record are read from the source and
+   from the output, and any value that was lost, gained or changed is
+   `FAIL HDR_LOST` with the value named; the output is deleted like any
+   other verification failure. An SDR file is compared as strictly, so an
+   output that gained signalling fails too. Every number read from a tool
+   is validated before it is compared: a value that is not a number, not
+   finite, negative, or beyond what the format can express is recorded as
+   malformed rather than trusted, and a malformed value in the source that
+   is missing in the output is still a difference.
+   Test: `remux.TestHashMismatchDeletesOutput`, `remux.TestHDRPropertyStrippedDeletesOutput`,
+   `remux.TestSDRGainedHDRFails`, `remux.TestHdrDiffDolbyVision`,
+   `probe.TestColorHostileFFprobeJSON`, `probe.TestColorHostileMkvmergeJSON`.
 6. **In place preserves identity.** `--in-place` copies mode, owner, group and
    modification time from the source to the output before the rename.
    Test: `fsutil.TestReplaceInPlacePreservesModeAndMtime`, `remux.TestInPlacePreservesIdentity`.
@@ -85,7 +101,9 @@ Container: magic bytes versus extension, executable or archive signatures in the
 first and last MiB (polyglots), truncated MP4, ffprobe and `mkvmerge -J`
 parseability with warnings tolerated. Streams: no video, no audio, unknown or
 data streams outside the allow list, attachments by policy with payload
-sniffing, HDR and Dolby Vision presence. Metadata: links in title, tags, chapter
+sniffing, HDR and Dolby Vision presence with the colour description, the
+mastering display and content light values and the Dolby Vision profile listed
+in the finding's detail. Metadata: links in title, tags, chapter
 names, attachment names, text subtitle tracks; MP4 purchase and identifier
 atoms; XMP boxes. Optional: ClamAV, full decode.
 
