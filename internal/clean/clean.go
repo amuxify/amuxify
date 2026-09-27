@@ -18,6 +18,7 @@ import (
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/scan"
@@ -56,7 +57,12 @@ type Cleaner struct {
 	Hardlinks string
 	Timeout   time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(report.FileResult)
+	// Jobs is the number of files CleanPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
 }
 
 func (c *Cleaner) hardlinks() string {
@@ -82,16 +88,32 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	// Walk lists every readable entry and names the unreadable ones in
 	// walkErr; those are reported at run level after the readable files.
 	paths, walkErr := scan.Walk(abs)
-	var out []report.FileResult
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
+	// Two names of one inode are cleaned one after the other in walk order,
+	// never at the same time, so the second sees what the first did.
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			if k := fsutil.InodeKey(fi); k != "" {
+				keys[i] = []string{"inode:" + k}
+			}
 		}
-		fr := c.CleanFile(ctx, p)
+	}
+	results := make([]report.FileResult, len(paths))
+	ran := pool.Run(ctx, c.Jobs, len(paths), keys, func(i int) {
+		fr := c.CleanFile(ctx, paths[i])
 		if c.Progress != nil {
 			c.Progress(fr)
 		}
-		out = append(out, fr)
+		results[i] = fr
+	})
+	var out []report.FileResult
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
 }

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -42,10 +43,19 @@ type Global struct {
 	StateDir  string
 	AllowRoot bool
 	Trace     bool
+	Jobs      int
 
 	stdout io.Writer
 	stderr io.Writer
+	// outMu serialises the writes that workers of a parallel run make to
+	// stdout and stderr: each streamed per-file block and each trace line
+	// goes out whole, never interleaved with another worker's.
+	outMu sync.Mutex
 }
+
+// MaxJobs bounds --jobs. Every job holds a tool process and an open temp
+// file, and a larger number would only contend for the same disks.
+const MaxJobs = 64
 
 // bind registers the global flags. Defaults are the current values so the
 // same flags can be accepted again after the subcommand without resetting
@@ -60,6 +70,9 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	if g.StateDir == "" {
 		g.StateDir = defaultStateDir()
 	}
+	if g.Jobs == 0 {
+		g.Jobs = 1
+	}
 	fs.StringVar(&g.Profile, "profile", g.Profile, "built-in profile name or path to a TOML file")
 	fs.BoolVar(&g.JSON, "json", g.JSON, "write the report as JSON on stdout")
 	fs.BoolVar(&g.DryRun, "dry-run", g.DryRun, "decide and report, change nothing")
@@ -69,7 +82,24 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "directory for quarantine and run logs")
 	fs.BoolVar(&g.AllowRoot, "allow-root", g.AllowRoot, "run even as root (files would be root-owned)")
 	fs.BoolVar(&g.Trace, "trace", g.Trace, "print every external command line to stderr")
+	fs.IntVar(&g.Jobs, "jobs", g.Jobs, "files to process at the same time, 1 to 64; hook always uses 1")
 }
+
+// parse parses args with fs and then checks the global values the flag
+// package cannot check on its own. On a value out of range it prints the
+// reason and returns an error, which the caller turns into a usage exit.
+func (g *Global) parse(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if g.Jobs < 1 || g.Jobs > MaxJobs {
+		fmt.Fprintf(g.stderr, "amuxify: --jobs must be between 1 and %d\n", MaxJobs)
+		return errJobs
+	}
+	return nil
+}
+
+var errJobs = errors.New("--jobs out of range")
 
 func defaultStateDir() string {
 	if v := os.Getenv("AMUXIFY_STATE_DIR"); v != "" {
@@ -124,7 +154,7 @@ Tool paths can be overridden with AMUXIFY_FFMPEG, AMUXIFY_MKVMERGE, and so on.
 func globalFlagHelp() string {
 	fs := flag.NewFlagSet("amuxify", flag.ContinueOnError)
 	(&Global{}).bind(fs)
-	placeholders := map[string]string{"profile": "name|path", "state-dir": "dir", "timeout": "duration"}
+	placeholders := map[string]string{"profile": "name|path", "state-dir": "dir", "timeout": "duration", "jobs": "n"}
 	var b strings.Builder
 	fs.VisitAll(func(f *flag.Flag) {
 		name, usage := flag.UnquoteUsage(f)
@@ -147,7 +177,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprintf(stderr, usageText, Version) }
 	g.bind(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -227,7 +257,11 @@ func (g *Global) setup(requireWriter bool) (*tools, error) {
 	}
 	r := &exec.Runner{Timeout: g.Timeout}
 	if g.Trace {
-		r.Trace = func(s string) { fmt.Fprintln(g.stderr, "+", s) }
+		r.Trace = func(s string) {
+			g.outMu.Lock()
+			defer g.outMu.Unlock()
+			fmt.Fprintln(g.stderr, "+", s)
+		}
 	}
 	for _, t := range []string{exec.FFmpeg, exec.FFprobe, exec.MKVMerge} {
 		if !r.Have(t) {
@@ -245,9 +279,13 @@ func (g *Global) setup(requireWriter bool) (*tools, error) {
 // streaming reports whether per-file lines go out as files finish.
 func (g *Global) streaming() bool { return !g.JSON && !g.Quiet }
 
-// progress prints one result immediately in human mode.
+// progress prints one result immediately in human mode. Workers of a
+// parallel run call it at the same time; the lock keeps each file's block,
+// the verdict line and the findings under it, together on the terminal.
 func (g *Global) progress(fr report.FileResult) {
 	if g.streaming() {
+		g.outMu.Lock()
+		defer g.outMu.Unlock()
 		fr.WriteHuman(g.stdout, g.Verbose)
 	}
 }
@@ -310,7 +348,7 @@ func (g *Global) profile(args []string) int {
 
 func (g *Global) doctor(ctx context.Context, args []string) int {
 	fs := g.subFlags("doctor")
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	r := &exec.Runner{Timeout: 30 * time.Second}
@@ -353,7 +391,7 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 	tier := fs.String("verify", "", "decode verification: quick | full | none (default from profile)")
 	clam := fs.Bool("clamav", false, "run clamscan on every file regardless of profile")
 	quarantine := fs.String("quarantine", "", "move BLOCK files under this directory (mirrored tree)")
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if fs.NArg() == 0 {
@@ -372,7 +410,7 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 		return g.usageErr("%v", err)
 	}
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		VerifyTier: *tier, ClamAV: *clam, Quarantine: *quarantine}
+		VerifyTier: *tier, ClamAV: *clam, Quarantine: *quarantine, Jobs: g.Jobs}
 	if g.DryRun {
 		sc.Quarantine = ""
 	}
@@ -398,7 +436,7 @@ func (g *Global) remux(ctx context.Context, args []string) int {
 	tier := fs.String("verify", "", "quick | full | none (default from profile; none refused with --in-place)")
 	force := fs.Bool("force", false, "remux files whose scan verdict is FAIL (BLOCK is never overridden)")
 	original := fs.String("original-language", "", "original language of the title, used to pick the default audio")
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if fs.NArg() == 0 {
@@ -430,7 +468,7 @@ func (g *Global) remux(ctx context.Context, args []string) int {
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile, VerifyTier: "none"}
 	rm := &remux.Remuxer{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Scanner: sc, Profile: t.profile,
 		OutputRoot: *output, InPlace: *inPlace, Hardlinks: *hardlinks, VerifyTier: *tier, Force: *force,
-		DryRun: g.DryRun, Original: *original, Timeout: g.Timeout, Progress: g.progress}
+		DryRun: g.DryRun, Original: *original, Timeout: g.Timeout, Progress: g.progress, Jobs: g.Jobs}
 	s := report.NewSummary("amuxify", Version, "remux", t.profile.Name)
 	for _, p := range fs.Args() {
 		res, err := rm.RemuxPath(ctx, p)
@@ -449,7 +487,7 @@ func (g *Global) clean(ctx context.Context, args []string) int {
 	removeSidecars := fs.Bool("remove-blocked-sidecars", false, "delete sidecar files on the profile's block list")
 	audioTags := fs.Bool("strip-audio-tags", false, "also rewrite mp3/flac/ogg/wav without tags")
 	hardlinks := fs.String("hardlinks", "", "skip | break (default from profile)")
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if fs.NArg() == 0 {
@@ -466,7 +504,7 @@ func (g *Global) clean(ctx context.Context, args []string) int {
 		return g.usageErr("mkvpropedit not found; run 'amuxify doctor'")
 	}
 	cl := &clean.Cleaner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		DryRun: g.DryRun, RemoveBlockedSidecars: *removeSidecars, StripAudioTags: *audioTags, Hardlinks: *hardlinks, Timeout: g.Timeout, Progress: g.progress}
+		DryRun: g.DryRun, RemoveBlockedSidecars: *removeSidecars, StripAudioTags: *audioTags, Hardlinks: *hardlinks, Timeout: g.Timeout, Progress: g.progress, Jobs: g.Jobs}
 	s := report.NewSummary("amuxify", Version, "clean", t.profile.Name)
 	for _, p := range fs.Args() {
 		res, err := cl.CleanPath(ctx, p)

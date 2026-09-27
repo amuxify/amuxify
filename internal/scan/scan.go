@@ -19,6 +19,7 @@ import (
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/sniff"
@@ -38,8 +39,18 @@ type Scanner struct {
 	// Quarantine, when set, moves BLOCK files under this directory.
 	Quarantine string
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(Result)
 	Trace    func(string)
+	// Jobs is the number of files ScanPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
+
+	// claims holds the quarantine destinations this run has taken, so two
+	// files that would be moved to the same place, from two workers or
+	// from two roots, produce exactly one quarantined file (guarantee 1).
+	claims pool.Claims
 }
 
 // MediaExts are extensions treated as media to be probed.
@@ -91,18 +102,46 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	// walkErr; those are reported at run level after the readable files.
 	// A quarantine directory inside the tree is not entered.
 	paths, walkErr := Walk(abs, QuarantineExcludes(s.Quarantine)...)
-	var out []Result
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		r := s.ScanFile(ctx, p, scanRoot)
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = s.SerialKeys(p, scanRoot)
+	}
+	results := make([]Result, len(paths))
+	ran := pool.Run(ctx, s.Jobs, len(paths), keys, func(i int) {
+		r := s.ScanFile(ctx, paths[i], scanRoot)
 		if s.Progress != nil {
 			s.Progress(r)
 		}
-		out = append(out, r)
+		results[i] = r
+	})
+	var out []Result
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
+}
+
+// SerialKeys lists what keeps path from being scanned beside another file
+// of the same walk when Jobs is above one: its inode when it has other hard
+// links, so two names of one file are handled one after the other, and the
+// place quarantine would move it to, spelled in lower case, so two files
+// that map to one quarantine destination are decided in walk order.
+func (s *Scanner) SerialKeys(path, root string) []string {
+	var keys []string
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if k := fsutil.InodeKey(fi); k != "" {
+			keys = append(keys, "inode:"+k)
+		}
+	}
+	if s.Quarantine != "" {
+		keys = append(keys, "quarantine:"+strings.ToLower(s.quarantineDest(path, root)))
+	}
+	return keys
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
@@ -639,8 +678,11 @@ func CheckQuarantineRoot(root, quarantine string) error {
 	return nil
 }
 
-func (s *Scanner) quarantine(fr *report.FileResult, root string) {
-	rel, err := filepath.Rel(root, fr.Path)
+// quarantineDest is the place under the quarantine directory that path,
+// found under root, is moved to: its path relative to root, or its base
+// name when it does not sit under root.
+func (s *Scanner) quarantineDest(path, root string) string {
+	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "" || rel == "." || escapes(rel) {
 		// A caller that hands the file itself as the root, or a root the
 		// file does not sit under, still gets the file placed under the
@@ -648,13 +690,29 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		// the quarantine root itself. The test is on the first path
 		// component, so a directory whose name merely starts with two dots
 		// keeps its mirrored place.
-		rel = filepath.Base(fr.Path)
+		rel = filepath.Base(path)
 	}
-	dest := filepath.Join(s.Quarantine, rel)
+	return filepath.Join(s.Quarantine, rel)
+}
+
+func (s *Scanner) quarantine(fr *report.FileResult, root string) {
+	dest := s.quarantineDest(fr.Path, root)
 	if dest == filepath.Clean(s.Quarantine) {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
 		return
 	}
+	// The destination is claimed while it is being created: a second
+	// worker of the same run that maps to the same place at the same time
+	// is refused here with the words the move primitive uses for a file
+	// that is already there, so the two never race for one name. The claim
+	// is given back afterwards in every case, because from then on the
+	// disk itself tells a later file that the place is taken, and the move
+	// primitive never replaces what sits there (guarantee 1).
+	if !s.claims.Claim(dest) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", fsutil.ErrExists)
+		return
+	}
+	defer s.claims.Release(dest)
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
 	// elsewhere (guarantee 3).
