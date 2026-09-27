@@ -108,6 +108,11 @@ func TestHDRPropertyStrippedDeletesOutput(t *testing.T) {
 	}{
 		{"content light deleted", "hdr10.mkv", false, "--delete max-content-light --delete max-frame-light", []string{"content light level lost"}},
 		{"max luminance changed", "hdr10.mkv", false, "--set max-luminance=4000", []string{"max_luminance changed from 1000 to 4000"}},
+		// A nudge below a tenth of a percent is still a change: the comparison
+		// tolerates only the rounding of the header's single precision floats.
+		{"max luminance nudged", "hdr10.mkv", false, "--set max-luminance=1000.9", []string{"max_luminance changed from 1000 to 1000.9"}},
+		{"chromaticity nudged", "hdr10.mkv", false, "--set chromaticity-coordinates-red-x=0.7087", []string{"red_x changed from 0.708 to 0.7087"}},
+		{"min luminance nudged", "hdr10.mkv", false, "--set min-luminance=0.000101", []string{"min_luminance changed from 0.0001 to 0.000101"}},
 		{"min luminance changed", "hdr10.mkv", false, "--set min-luminance=0.005", []string{"min_luminance changed from 0.0001 to 0.005"}},
 		{"chromaticity changed", "hdr10.mkv", false, "--set chromaticity-coordinates-red-x=0.64", []string{"red_x changed from 0.708 to 0.64"}},
 		{"white point changed", "hdr10.mkv", false, "--set white-coordinates-y=0.3", []string{"white_y changed from 0.329 to 0.3"}},

@@ -179,13 +179,14 @@ func (c *Color) String() string {
 // ColorDiff lists, in plain words, every field that differs between the
 // colour signalling of a source stream and of its remuxed copy: fields the
 // output lost, fields it gained, and fields whose value changed. The
-// chromaticity and luminance values are compared with a small tolerance,
-// because a value stored as a fixed-point fraction in one container and as
-// a float in another comes back from ffprobe as two rationals that differ
-// in the eighth digit; a difference of one part in a thousand (or one
-// millionth absolute, for values near zero) is reported. Names, light
-// levels and the Dolby Vision fields must match exactly. An empty result
-// means the two agree.
+// chromaticity and luminance values are compared with a tolerance no wider
+// than the rounding it exists for: a value stored as a fixed-point fraction
+// in one container and as a single precision float in the Matroska header
+// comes back from ffprobe as two rationals that differ in the eighth digit,
+// so a difference of one part in a million (or one part in a billion
+// absolute, for values near zero) is reported. Names, light levels and the
+// Dolby Vision fields must match exactly. An empty result means the two
+// agree.
 func ColorDiff(src, out *Color) []string {
 	var diffs []string
 	groups := []struct {
@@ -250,9 +251,15 @@ func ColorDiff(src, out *Color) []string {
 	return diffs
 }
 
+// closeEnough reports whether two measured values differ by no more than
+// the rounding of a single precision float, which is how the Matroska
+// header stores them: at most one part in 2^24 (about 6e-8) relative, so a
+// relative window of 1e-6 covers it with room to spare and still reports a
+// value that was nudged by a tenth of a percent. The absolute floor only
+// matters when one side is exactly zero.
 func closeEnough(a, b float64) bool {
 	d := math.Abs(a - b)
-	return d <= 1e-6 || d <= 1e-3*math.Max(math.Abs(a), math.Abs(b))
+	return d <= 1e-9 || d <= 1e-6*math.Max(math.Abs(a), math.Abs(b))
 }
 
 func formatNum(v float64) string {
@@ -717,56 +724,94 @@ func floatList(raw json.RawMessage, n int) ([]float64, bool) {
 	return out, true
 }
 
+// The Malformed names that disqualify each group of values. A name listed
+// here for a group means the group holds no value while the name is in
+// Malformed, so that a field is never both malformed and set.
+var (
+	malformedPrimaries = []string{"red_x", "red_y", "green_x", "green_y", "blue_x", "blue_y", "white_x", "white_y",
+		"chromaticity_coordinates", "white_coordinates"}
+	malformedLuminance = []string{"luminance", "min_luminance", "max_luminance"}
+	malformedLight     = []string{"max_cll", "max_fall"}
+	malformedDV        = []string{"dv_profile", "dv_level", "dv_rpu", "dv_el", "dv_bl", "dv_bl_signal_compatibility_id"}
+)
+
 // merge fills the fields of c that ffprobe left empty from the Matroska
 // track header mkvmerge reported. ffprobe stays the primary source because
 // it reads the same header and the codec's own signalling, and both the
 // source and the output are probed the same way; mkvmerge adds what ffprobe
-// omitted. A malformed field stays malformed whichever tool saw it.
+// omitted. A malformed field stays malformed whichever tool saw it: a name
+// in either tool's Malformed list is never filled from the other tool, and
+// a value the other tool did hold for it is dropped, so the merged Color
+// lists the name once, as malformed, and ColorDiff compares it as such.
 func (c *Color) merge(mk Color) {
-	if c.Primaries == "" {
-		c.Primaries = mk.Primaries
+	bad := map[string]bool{}
+	for _, m := range c.Malformed {
+		bad[m] = true
 	}
-	if c.Transfer == "" {
-		c.Transfer = mk.Transfer
+	for _, m := range mk.Malformed {
+		bad[m] = true
 	}
-	if c.Matrix == "" {
-		c.Matrix = mk.Matrix
-	}
-	if c.Range == "" {
-		c.Range = mk.Range
-	}
-	if mk.Mastering != nil {
-		if c.Mastering == nil {
-			c.Mastering = &MasteringDisplay{}
+	hit := func(names []string) bool {
+		for _, n := range names {
+			if bad[n] {
+				return true
+			}
 		}
-		if !c.Mastering.HasPrimaries && mk.Mastering.HasPrimaries {
+		return false
+	}
+	fill := func(dst *string, name, v string) {
+		if bad[name] {
+			*dst = ""
+		} else if *dst == "" {
+			*dst = v
+		}
+	}
+	fill(&c.Primaries, "primaries", mk.Primaries)
+	fill(&c.Transfer, "transfer", mk.Transfer)
+	fill(&c.Matrix, "matrix", mk.Matrix)
+	fill(&c.Range, "range", mk.Range)
+	badPrimaries, badLuminance := hit(malformedPrimaries), hit(malformedLuminance)
+	if mk.Mastering != nil && c.Mastering == nil {
+		c.Mastering = &MasteringDisplay{}
+	}
+	if m := c.Mastering; m != nil {
+		if !m.HasPrimaries && !badPrimaries && mk.Mastering != nil && mk.Mastering.HasPrimaries {
 			p := *mk.Mastering
-			c.Mastering.HasPrimaries = true
-			c.Mastering.RedX, c.Mastering.RedY = p.RedX, p.RedY
-			c.Mastering.GreenX, c.Mastering.GreenY = p.GreenX, p.GreenY
-			c.Mastering.BlueX, c.Mastering.BlueY = p.BlueX, p.BlueY
-			c.Mastering.WhiteX, c.Mastering.WhiteY = p.WhiteX, p.WhiteY
+			m.HasPrimaries = true
+			m.RedX, m.RedY = p.RedX, p.RedY
+			m.GreenX, m.GreenY = p.GreenX, p.GreenY
+			m.BlueX, m.BlueY = p.BlueX, p.BlueY
+			m.WhiteX, m.WhiteY = p.WhiteX, p.WhiteY
 		}
-		if !c.Mastering.HasLuminance && mk.Mastering.HasLuminance {
-			c.Mastering.HasLuminance = true
-			c.Mastering.MinLuminance, c.Mastering.MaxLuminance = mk.Mastering.MinLuminance, mk.Mastering.MaxLuminance
+		if !m.HasLuminance && !badLuminance && mk.Mastering != nil && mk.Mastering.HasLuminance {
+			m.HasLuminance = true
+			m.MinLuminance, m.MaxLuminance = mk.Mastering.MinLuminance, mk.Mastering.MaxLuminance
+		}
+		if badPrimaries {
+			m.HasPrimaries = false
+			m.RedX, m.RedY, m.GreenX, m.GreenY, m.BlueX, m.BlueY, m.WhiteX, m.WhiteY = 0, 0, 0, 0, 0, 0, 0, 0
+		}
+		if badLuminance {
+			m.HasLuminance = false
+			m.MinLuminance, m.MaxLuminance = 0, 0
+		}
+		if !m.HasPrimaries && !m.HasLuminance {
+			c.Mastering = nil
 		}
 	}
-	if c.Light == nil && mk.Light != nil {
+	switch {
+	case hit(malformedLight):
+		c.Light = nil
+	case c.Light == nil && mk.Light != nil:
 		l := *mk.Light
 		c.Light = &l
 	}
-	if len(mk.Malformed) > 0 {
-		seen := map[string]bool{}
-		for _, m := range c.Malformed {
-			seen[m] = true
-		}
-		for _, m := range mk.Malformed {
-			if !seen[m] {
-				c.Malformed = append(c.Malformed, m)
-				seen[m] = true
-			}
-		}
-		sort.Strings(c.Malformed)
+	if hit(malformedDV) {
+		c.DolbyVision = nil
 	}
+	c.Malformed = nil
+	for m := range bad {
+		c.Malformed = append(c.Malformed, m)
+	}
+	sort.Strings(c.Malformed)
 }
