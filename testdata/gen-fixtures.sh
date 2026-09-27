@@ -131,6 +131,21 @@ printf '\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\r\n\xb0\xb1\xb2 SAMPLE.
 printf '\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\xdb\r\n\xb0\xb1\xb2 SAMPLE.GROUP \xb2\xb1\xb0\r\n\r\nhttps://www.imdb.com/title/tt0120616/\r\n' > scene/imdb.nfo
 # 22. Text sidecar with links (LINK_IN_SIDECAR is NFO-only in 0.3; this stays SIDECAR_OK).
 printf 'see https://example.com/a and http://example.org/b\n' > links.txt
+# 23. HDR10 Matroska: BT.2020 primaries and matrix, PQ transfer, limited
+#     range, ST 2086 mastering display metadata (P3 primaries, D65 white,
+#     0.0001 to 1000 cd/m²) and CTA-861.3 content light levels, all set in
+#     the track header. ffprobe reports them as stream side data; the remux
+#     verifier holds the output to every one of them.
+mkvmerge -q -o hdr10.mkv \
+  --colour-primaries 0:9 --colour-transfer-characteristics 0:16 --colour-matrix-coefficients 0:9 --colour-range 0:1 \
+  --max-content-light 0:1000 --max-frame-light 0:400 --max-luminance 0:1000 --min-luminance 0:0.0001 \
+  --chromaticity-coordinates 0:0.708,0.292,0.170,0.797,0.131,0.046 --white-colour-coordinates 0:0.3127,0.3290 \
+  video.h264 --language 0:eng audio_eng.m4a >/dev/null || true
+# 24. HLG Matroska: the same colour description with the ARIB STD-B67
+#     transfer and no static metadata, which HLG does not need.
+mkvmerge -q -o hlg.mkv \
+  --colour-primaries 0:9 --colour-transfer-characteristics 0:18 --colour-matrix-coefficients 0:9 --colour-range 0:1 \
+  video.h264 --language 0:eng audio_eng.m4a >/dev/null || true
 
 rm -f video.h264 audio_*.m4a subs_*.srt chapters.txt tags.xml fake.ttf payload.bin real.ttf
 echo "fixtures written to $out"
