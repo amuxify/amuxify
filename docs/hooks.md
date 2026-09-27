@@ -57,7 +57,10 @@ fails the job and nothing reaches the library. The Sonarr and Radarr adapters
 run after the import; they sanitise the file that is already in the library and
 cannot block the import, because Sonarr and Radarr only look at the exit code
 of the Test event. Use them when the download client is not yours to configure,
-or for imports that do not come through SABnzbd or NZBGet.
+or for imports that do not come through SABnzbd or NZBGet. When no hook can
+run at all, because amuxify cannot be installed next to the client, `amuxify
+watch` polls the download folder from its own container or from the host; see
+[Watching a folder](#watching-a-folder).
 
 ## SABnzbd
 
@@ -307,6 +310,119 @@ amuxify ingest /srv/media/incoming
 so they stop being picked up, without deleting anything. The directory may sit
 inside the incoming tree, as above; the walk skips it. `ingest` then rebuilds
 or cleans what is left, in place, and exits with the worst verdict of the run.
+
+A timer runs ingest over the whole folder at fixed times and has no way to
+tell a finished download from one that is still being written. When the
+folder receives files at any time, `amuxify watch` below does the same work
+and waits for each file to stop changing first.
+
+## Watching a folder
+
+```
+amuxify [global flags] watch [--interval 5s] [--settle 30s] [--once] [ingest flags] <dir>
+```
+
+`watch` polls one directory and runs `ingest` on each file once it has stayed
+unchanged for the settle window. It takes the ingest flags (`--quarantine`,
+`--profile` as a global flag, `--verify`, `--hardlinks`, `--force`,
+`--dry-run`, `--remove-blocked-sidecars`) and treats each file exactly as
+`ingest` would, with the same walker, the same quarantine exclusion and the
+same symlink rules. It uses polling only, so it works on any filesystem,
+including network shares and Docker bind mounts, where change notification is
+unreliable or absent.
+
+Use `watch` when the hook cannot run inside the download client, for example
+when the client is a stock container you do not want to rebuild, or when the
+files arrive by other means (an rsync target, an SFTP drop, a USB copy). Prefer
+the hook when it is available: the hook knows when the download is complete
+and can fail the job, while a watcher can only infer completion from the file
+having stopped changing, and it cannot stop the client from importing the file
+in the meantime.
+
+Every pass walks the directory and notes the size, modification time and
+identity (device and inode) of every regular file. A file is ingested once it
+has been seen unchanged in all three for at least `--settle`, and then only
+once for that content: it is not ingested again on the next pass. A file that
+changes later, by growing, being rewritten or being replaced by a different
+file under the same name, is a new version and is ingested again once it has
+settled. That includes a file amuxify itself rebuilt or cleaned: the watcher
+does not try to tell its own writes from someone else's, so the rewritten file
+is looked at once more after it settles, and that second ingest finds nothing
+left to change. A file that is still growing is never ingested. Right before
+each ingest the watcher checks the path again: it must be the same regular
+file it decided on, still inside the watched directory, reached through real
+directories and not through a symlink. A file that vanished before its turn
+is dropped without a report. Symlinks are listed but never followed, and each one
+is noticed once on stderr. A subdirectory that cannot be read is reported once,
+and again only when the error changes. The watcher keeps only the files
+present at the last pass in memory, so a folder that files pass through does
+not grow its footprint.
+
+Per-file verdicts stream in the same human format as `ingest`, as each file
+finishes, and a pass that ingested at least one file ends with the usual count
+line. Under `--json` each such pass writes one complete `amuxify.report/1`
+document on a single line, with `command` set to `ingest`, so a consumer reads
+newline-delimited reports and can parse each line as it arrives; the watcher's
+own lines go to stderr. A pass that ingested nothing prints nothing, so a quiet
+folder stays quiet. The command starts with one line naming the directory, the
+interval and the settle window.
+
+Exit behaviour: without `--once` the command runs until it is interrupted
+(SIGINT or SIGTERM). On an interrupt it finishes the file it is working on,
+reports it, starts no further file, prints `amuxify watch: interrupted,
+stopped` and exits 0, whatever the verdicts were. No temporary file is left
+behind, because a file in progress is either finished or its temporary output
+is removed, as in every other command. With `--once` the command makes one
+pass, waits one settle window, makes a second pass that ingests what has
+settled, and exits with the worst verdict of the run using the usual codes (0
+PASS, 1 WARN, 3 FAIL, 4 BLOCK, 130 interrupted). A `--once` run therefore
+takes at least `--settle`; `--settle 0s` ingests everything present in a single
+pass, which is the cron case from above with the same command line as the
+continuous watcher.
+
+`watch` refuses the quarantine directory itself, or a directory inside it, as
+the watched directory, and refuses a symlink in place of the directory, both
+before any tool runs. A quarantine directory inside the watched tree is not
+entered, exactly as with `ingest`, so a blocked file that was moved there is
+not picked up again. `--verify none` is refused. The root guard is unchanged:
+`watch` refuses to run as root unless `--allow-root` is given.
+
+A compose set-up runs the watcher as its own service over the volume the
+download client writes to. The download client is any stock image; the watcher
+is the plain amuxify image, run as the uid and gid that own the folder:
+
+```yaml
+services:
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - /srv/media/downloads:/downloads
+
+  amuxify:
+    image: ghcr.io/amuxify/amuxify
+    user: "1000:1000"
+    command: >
+      watch --interval 10s --settle 60s
+      --quarantine /downloads/quarantine --remove-blocked-sidecars
+      /downloads/complete
+    volumes:
+      - /srv/media/downloads:/downloads
+    restart: unless-stopped
+```
+
+The watcher sees the folder the client writes to, waits until each file has
+been unchanged for a minute, and then verifies and sanitises it in place; a
+BLOCK file is moved under `/downloads/quarantine`, which the walk never
+enters. Pick a settle window longer than the longest pause your client makes
+between two writes to one file; the default of 30 seconds is enough for a
+client that writes a download in one go, while a client that assembles a file
+from parts may pause longer while it repairs or unpacks. With `--json` the
+service's stdout is one report document per line, so `docker compose logs -f
+amuxify` or a log shipper can follow it. The container stops with exit code 0
+when compose sends its stop signal.
 
 ## Docker
 

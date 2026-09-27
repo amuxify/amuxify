@@ -183,7 +183,11 @@ report.
 ## Fields
 
 The top-level object has these keys, in this order. The `command` value is one
-of `scan`, `remux`, `clean`, `ingest` or `doctor`.
+of `scan`, `remux`, `clean`, `ingest` or `doctor`. A hook run and a `watch`
+pass both report `ingest`, because that is the command they ran on the files.
+Every command writes one indented document and nothing else on stdout, except
+`watch`, which writes one complete document per pass on a single line, so its
+stdout is a sequence of newline-delimited reports.
 
 | Key | Type | Always present | Meaning |
 |---|---|---|---|
