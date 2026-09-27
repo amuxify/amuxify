@@ -127,8 +127,15 @@ func CreateTemp(tmp string) (*Temp, error) {
 // fchown and futimes), never through a name, so a symbolic link swapped onto
 // the file's former name after f was opened cannot redirect any of them to
 // another file. Ownership is best effort: chown fails for a non-root user
-// changing the owner, which is fine. Only src is read by name, and it is the
-// file whose identity the caller wants copied.
+// changing the owner, which is fine. The mode and the time are not: a mode
+// or a time that cannot be set is returned as an error, so that the callers
+// (ReplaceInPlaceOwn and the remuxer's in-place placement) stop before the
+// rename and the source keeps its name, rather than placing an output whose
+// identity differs from the source without a finding saying so. On Linux
+// that error also carries the refusal of the name-based fallback when the
+// temp name was swapped while the descriptor calls were unavailable. Only
+// src is read by name, and it is the file whose identity the caller wants
+// copied.
 func CopyIdentityTo(f *os.File, src string) error {
 	fi, err := os.Stat(src)
 	if err != nil {
@@ -140,9 +147,16 @@ func CopyIdentityTo(f *os.File, src string) error {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		_ = f.Chown(int(st.Uid), int(st.Gid))
 	}
-	_ = futimes(f, time.Now(), fi.ModTime())
+	if err := setTimes(f, time.Now(), fi.ModTime()); err != nil {
+		return fmt.Errorf("set the modification time of %s: %v", f.Name(), err)
+	}
 	return nil
 }
+
+// setTimes is the descriptor-based time call CopyIdentityTo uses. Tests
+// replace it to make the call fail on every platform, since the real
+// futimes cannot be made to fail on macOS or the BSDs from a test.
+var setTimes = futimes
 
 // OpenOwn opens path for writing without following a symbolic link and
 // returns the file only when what was opened is a regular file with a single

@@ -197,3 +197,103 @@ func TestFutimesDescriptorCallIgnoresTheName(t *testing.T) {
 		t.Errorf("the victim behind the planted link got the time: %v %v", vfi.ModTime(), err)
 	}
 }
+
+// Guarantee 6 through the in-place primitive itself: with both descriptor
+// calls refused, the temp name is swapped in the one window the name-based
+// fallback has, between OpenOwn and utimensat by name. The swap is made
+// from inside the refused descriptor call, which runs exactly there, so no
+// production seam is needed. The fallback's refusal has to come out of
+// ReplaceInPlaceOwn as an error and stop it before the rename: the
+// destination keeps its content and time, the entry swapped onto the temp
+// name keeps its own time and is not renamed over the destination, and
+// the file that was opened keeps the old time as well.
+func TestReplaceInPlaceOwnRefusesSwapDuringPathFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		swap func(t *testing.T, tmp, victim string)
+		want string
+	}{
+		{"other file renamed onto the name", func(t *testing.T, tmp, victim string) {
+			if err := os.Rename(victim, tmp); err != nil {
+				t.Fatal(err)
+			}
+		}, "no longer names the file"},
+		{"hard link to another file", func(t *testing.T, tmp, victim string) {
+			if err := os.Remove(tmp); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(victim, tmp); err != nil {
+				t.Fatal(err)
+			}
+		}, "no longer names the file"},
+		{"symlink planted at the name", func(t *testing.T, tmp, victim string) {
+			if err := os.Remove(tmp); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, tmp); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlink"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			noDescriptorCalls(t)
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "movie.mkv")
+			tmp := TempName(dest)
+			writeFile(t, dest, "original", 0o644)
+			if err := os.Chtimes(dest, oldStamp, oldStamp); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(dir, "victim.mkv")
+			writeFile(t, victim, "victim", 0o600)
+			if err := os.Chtimes(victim, oldStamp, oldStamp); err != nil {
+				t.Fatal(err)
+			}
+			own, err := CreateTemp(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer own.Close()
+			writeFile(t, tmp, "replacement", 0o600)
+			if err := os.Chtimes(tmp, oldStamp, oldStamp); err != nil {
+				t.Fatal(err)
+			}
+			// The swap happens inside the first refused descriptor call,
+			// which is after OpenOwn checked the name and before the
+			// fallback looks at it.
+			orig := futimensFd
+			futimensFd = func(int, *[2]syscall.Timespec) error {
+				tc.swap(t, tmp, victim)
+				return syscall.ENOSYS
+			}
+			t.Cleanup(func() { futimensFd = orig })
+
+			err = ReplaceInPlaceOwn(tmp, dest, own.Info())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want a refusal saying %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "through /proc: no such file") {
+				t.Errorf("the error does not say that /proc was missing: %v", err)
+			}
+			if got := readFile(t, dest); got != "original" {
+				t.Fatalf("destination replaced after a refused identity copy: %q", got)
+			}
+			if _, mtime := identityOfPath(t, dest); !mtime.Equal(oldStamp) {
+				t.Errorf("destination's time changed: %v", mtime)
+			}
+			now, err := os.Lstat(tmp)
+			if err != nil {
+				t.Fatalf("the entry swapped onto the temp name is gone: %v", err)
+			}
+			if now.Mode()&os.ModeSymlink == 0 && !now.ModTime().Equal(oldStamp) {
+				t.Errorf("the entry swapped onto the temp name got the source's time: %v", now.ModTime())
+			}
+			if vfi, err := os.Lstat(victim); err == nil && !vfi.ModTime().Equal(oldStamp) {
+				t.Errorf("the victim got the source's time: %v", vfi.ModTime())
+			}
+			if fi, err := own.f.Stat(); err != nil || !fi.ModTime().Equal(oldStamp) {
+				t.Errorf("the file this run created got the time through the name: %v %v", fi.ModTime(), err)
+			}
+		})
+	}
+}

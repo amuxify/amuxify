@@ -44,11 +44,12 @@ SECURITY.md.
    file, a sidecar, the quarantine source and destination, the temp name
    after an external tool wrote to it) is made without following a link and
    without blocking, and the entry is refused unless it turns out to be a
-   regular file. A pipe under a media or sidecar name is `FAIL UNREADABLE`
-   and skipped; a pipe swapped onto the temp name after mkvmerge or ffmpeg
-   returns is caught before any further read of that name. While the tool
-   itself has the name, only its timeout bounds the wait, and the run
-   reports the timeout as a failed remux or clean. The flush before
+   regular file. A pipe under a media or sidecar name is skipped: scan,
+   remux and ingest report it as `FAIL UNREADABLE`, and clean reports it as
+   `FAIL CLEAN_FAIL`. A pipe swapped onto the temp name after mkvmerge or
+   ffmpeg returns is caught before any further read of that name. While
+   the tool itself has the name, only its timeout bounds the wait, and the
+   run reports the timeout as a failed remux or clean. The flush before
    placement goes through the descriptor held since the temp file was
    created, never through the name.
    Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
@@ -83,10 +84,18 @@ SECURITY.md.
    not need `/proc`; the `/proc/self/fd` form the Go standard library uses
    is the second attempt, and only when both are refused is the file's own
    name used, after a check that the name still leads to the open file and
-   with a call that never follows a symlink.
+   with a call that never follows a symlink. A mode or a modification time
+   that cannot be set is an error, not a best-effort step: the run stops
+   before the rename, the source keeps its name, and the file is reported
+   as a failed replacement. The same happens when the name-based fallback
+   finds the temp name swapped, so an output that would have carried the
+   wrong identity is never placed. Only ownership is best effort, because
+   a non-root user cannot give a file away.
    Test: `fsutil.TestReplaceInPlacePreservesModeAndMtime`, `remux.TestInPlacePreservesIdentity`,
+   `fsutil.TestReplaceInPlaceOwnFailsWhenTimeCannotBeSet`,
    `fsutil.TestFutimesFallsBackWithoutProc`, `fsutil.TestFutimesPathFallbackRefusesSwappedFile`,
-   `fsutil.TestFutimesDescriptorCallIgnoresTheName` (Linux only).
+   `fsutil.TestFutimesDescriptorCallIgnoresTheName`,
+   `fsutil.TestReplaceInPlaceOwnRefusesSwapDuringPathFallback` (the last four Linux only).
 7. **Extended attributes are scoped.** Only `user.*` (Linux, FreeBSD) and
    `com.apple.*` (macOS) are removed. ACLs, SELinux labels, capabilities and
    `security.*` are never touched.

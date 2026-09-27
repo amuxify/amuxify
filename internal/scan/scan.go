@@ -337,7 +337,7 @@ func (s *Scanner) sniffAttachment(ctx context.Context, path string, a probe.Atta
 	if a.Size > 64<<20 || !s.Runner.Have(exec.MKVExtract) {
 		return ""
 	}
-	dir, err := attachmentDir()
+	dir, err := os.MkdirTemp("", "amuxify-att-*")
 	if err != nil {
 		return ""
 	}
@@ -537,10 +537,6 @@ var polySigs = [][]byte{
 	[]byte("PK\x03\x04"), []byte("PK\x05\x06"), []byte("Rar!\x1a\x07"), []byte("7z\xbc\xaf\x27\x1c"), []byte("\x7fELF"),
 	[]byte("This program cannot be run in DOS mode"),
 }
-
-// attachmentDir creates the private directory an attachment is extracted
-// into. Tests replace it to hand the extraction a directory of their own.
-var attachmentDir = func() (string, error) { return os.MkdirTemp("", "amuxify-att-*") }
 
 // polyglot looks for archive or executable signatures in the last 1 MiB and
 // for the PE stub string in the first 1 MiB. Matroska and MP4 payloads are

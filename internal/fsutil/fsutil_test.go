@@ -970,3 +970,66 @@ func TestCreateTempPinsInode(t *testing.T) {
 		t.Fatalf("second close: %v", err)
 	}
 }
+
+// Guarantee 6: a modification time that cannot be set is reported, and the
+// rename never happens. The time call is made to fail the way every
+// descriptor form on a Linux system without /proc and with utimensat
+// refused would, and the failure has to reach the caller: an in-place run
+// that placed its output anyway would carry a fresh time with no finding
+// saying so, and on Linux the same discarded error is what the path
+// fallback uses to report a swapped temp name. The destination keeps its
+// content, mode and time, and the temp file stays where it was.
+func TestReplaceInPlaceOwnFailsWhenTimeCannotBeSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits differ on windows")
+	}
+	orig := setTimes
+	setTimes = func(*os.File, time.Time, time.Time) error { return errors.New("utimensat refused for the test") }
+	t.Cleanup(func() { setTimes = orig })
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "movie.mkv")
+	tmp := TempName(dest)
+	writeFile(t, dest, "original", 0o644)
+	if err := os.Chmod(dest, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2020, 3, 4, 5, 6, 7, 0, time.UTC)
+	if err := os.Chtimes(dest, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	own, err := CreateTemp(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer own.Close()
+	writeFile(t, tmp, "replacement", 0o600)
+
+	err = ReplaceInPlaceOwn(tmp, dest, own.Info())
+	if err == nil || !strings.Contains(err.Error(), "utimensat refused for the test") {
+		t.Fatalf("ReplaceInPlaceOwn with the time call refused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "modification time") {
+		t.Errorf("the error does not say which step failed: %v", err)
+	}
+	if got := readFile(t, dest); got != "original" {
+		t.Fatalf("destination replaced although the time was not set: %q", got)
+	}
+	if mode, mtime := identityOfPath(t, dest); mode != 0o640 || !mtime.Equal(stamp) {
+		t.Fatalf("destination changed: mode %o mtime %v", mode, mtime)
+	}
+	if got := readFile(t, tmp); got != "replacement" {
+		t.Fatalf("the temp file was removed or changed: %q", got)
+	}
+	// CopyIdentityTo on its own reports the same failure, and the mode it
+	// set before the time call stays on the open file: nothing is undone,
+	// the caller simply never places the file.
+	f, err := OpenOwn(tmp, own.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := CopyIdentityTo(f, dest); err == nil || !strings.Contains(err.Error(), "utimensat refused for the test") {
+		t.Fatalf("CopyIdentityTo with the time call refused: %v", err)
+	}
+}
