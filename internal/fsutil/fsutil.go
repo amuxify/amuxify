@@ -74,6 +74,19 @@ func (t *Temp) Close() error {
 	return err
 }
 
+// Sync flushes the file to stable storage through the descriptor held
+// since its creation. fsync acts on the file, not on the descriptor, so the
+// data an external tool wrote into that file through its name is flushed
+// as well, and the name itself is never opened again for it: an entry
+// swapped onto the name cannot be reached this way, and a named pipe
+// planted there cannot stall the flush.
+func (t *Temp) Sync() error {
+	if t == nil || t.f == nil {
+		return errors.New("temp file is not open")
+	}
+	return t.f.Sync()
+}
+
 // CreateTemp removes a leftover entry at tmp, creates tmp empty and
 // exclusively, and returns a handle to the file it made, so that a name
 // about to be handed to an external tool belongs to the caller before the
@@ -87,6 +100,11 @@ func (t *Temp) Close() error {
 // leftover that cannot be removed is an error, as is anything that appears
 // at the name between the removal and the creation. The file gets the mode
 // the tool would give a file it created itself, 0666 under the umask.
+//
+// The creation is exclusive, so a named pipe or any other entry planted at
+// the name before the call is removed as a leftover, never opened, and one
+// planted between the removal and the creation makes the creation fail; a
+// pipe cannot make this call block.
 func CreateTemp(tmp string) (*Temp, error) {
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -132,9 +150,11 @@ func CopyIdentityTo(f *os.File, src string) error {
 // the check a caller performs on a temp file it made itself before it writes
 // metadata to it or places it, so that a symbolic link, a hard link or a
 // different file swapped onto the name is refused rather than followed. The
-// caller closes the file.
+// open never blocks, so a named pipe swapped onto the name is refused too
+// rather than left to stall the run (see OpenRegular). The caller closes
+// the file.
 func OpenOwn(path string, created os.FileInfo) (*os.File, error) {
-	f, err := openNoFollow(path)
+	f, err := openNoFollow(path, os.O_WRONLY)
 	if err != nil {
 		if refusedSymlink(err) {
 			return nil, fmt.Errorf("%s is now a symlink; refusing to follow it", path)
@@ -153,6 +173,27 @@ func OpenOwn(path string, created os.FileInfo) (*os.File, error) {
 	if n := Nlink(fi); n != 1 {
 		_ = f.Close()
 		return nil, fmt.Errorf("%s has %d hard links; expected 1", path, n)
+	}
+	return f, nil
+}
+
+// OpenRegular opens path for reading and returns the file only when the
+// entry at the name is a regular file. It is the open every reader of an
+// input file or of a temp file uses instead of os.Open: a symbolic link at
+// the name is refused rather than followed, and the open never blocks, so
+// a named pipe planted at the name (which open(2) would otherwise wait on
+// until a writer appears, possibly forever) is refused as well, as is a
+// socket, a device or a directory. The check is made on the descriptor
+// after the open, so what is refused is what was really opened, not what
+// an earlier stat of the name saw. The returned file is in ordinary
+// blocking mode. The caller closes it.
+func OpenRegular(path string) (*os.File, error) {
+	f, err := openNoFollow(path, os.O_RDONLY)
+	if err != nil {
+		if refusedSymlink(err) {
+			return nil, fmt.Errorf("%s is a symlink; refusing to follow it", path)
+		}
+		return nil, err
 	}
 	return f, nil
 }
@@ -215,9 +256,12 @@ func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
 // name is used again by ReplaceInPlaceOwn. It is nil in production.
 var beforeRename func(tmp, dest string)
 
-// Fsync flushes a written file to stable storage.
+// Fsync flushes a written file to stable storage. The name is opened with
+// OpenRegular, so a symbolic link or a named pipe swapped onto it is
+// refused. A caller that still holds the handle from CreateTemp uses
+// Temp.Sync instead and never opens the name again.
 func Fsync(path string) error {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return err
 	}

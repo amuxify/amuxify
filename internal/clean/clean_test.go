@@ -430,15 +430,17 @@ func ffmpegWrapper(t *testing.T, r *exec.Runner, after string) {
 
 // Guarantee 3 and 1 for the MP4 rewrite: once ffmpeg has written the temp
 // file, its name is swapped for a symlink to a victim that is itself a clean
-// copy of the same media, so every read that follows the link passes and
-// the run reaches the replacement. The replacement must refuse the link
-// rather than give the victim the source's mode and time and rename the
-// link over the source, and the refusal must be reported: the rewrite is a
-// failed clean, not a successful one. The victim is private with an old
-// stamp and the source is world-writable with a different one, so a
-// path-based identity copy would show on the victim. The source must keep
-// its bytes, its mode, its time and its single name, and only the planted
-// link may be removed.
+// copy of the same media, so every read that followed the link would pass.
+// The cleaner checks the temp name against the file it created as soon as
+// ffmpeg returns and refuses the link there; should that check ever be
+// lost, the replacement itself refuses the link as well rather than give
+// the victim the source's mode and time and rename the link over the
+// source. Either way the refusal must be reported: the rewrite is a failed
+// clean, not a successful one. The victim is private with an old stamp and
+// the source is world-writable with a different one, so a path-based
+// identity copy would show on the victim. The source must keep its bytes,
+// its mode, its time and its single name, and only the planted link may be
+// removed.
 func TestMp4RewriteRefusesSwappedTemp(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge)
 	if runtime.GOOS == "windows" {
