@@ -98,7 +98,9 @@ func futimes(f *os.File, atime, mtime time.Time) error {
 // itself never follows a link, so the window that remains between the
 // check and the call can only be filled by a hard link to another file
 // renamed onto the name; the name is looked at once more afterwards so a
-// swap in that window is at least reported rather than passed over.
+// swap in that window is returned as an error rather than passed over.
+// The error reaches CopyIdentityTo, which returns it, and the in-place
+// callers then stop before the rename with the source still in place.
 func utimesOwnName(f *os.File, ts *[2]syscall.Timespec) error {
 	path := f.Name()
 	ffi, err := f.Stat()
