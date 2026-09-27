@@ -39,6 +39,7 @@ type Stream struct {
 	ColorTrc     string            `json:"color_transfer,omitempty"`
 	ColorPrim    string            `json:"color_primaries,omitempty"`
 	HDR          []string          `json:"hdr,omitempty"` // hdr10 hlg dovi hdr10plus
+	Color        Color             `json:"color"`         // the full colour and HDR signalling of a video stream
 	TextSubtitle bool              `json:"text_subtitle"`
 	Tags         map[string]string `json:"tags,omitempty"`
 }
@@ -154,13 +155,16 @@ type ffprobeOut struct {
 		PixFmt         string            `json:"pix_fmt"`
 		ColorTransfer  string            `json:"color_transfer"`
 		ColorPrimaries string            `json:"color_primaries"`
+		ColorSpace     string            `json:"color_space"`
+		ColorRange     string            `json:"color_range"`
 		Channels       int               `json:"channels"`
 		SampleRate     string            `json:"sample_rate"`
 		Disposition    map[string]int    `json:"disposition"`
 		Tags           map[string]string `json:"tags"`
-		SideData       []struct {
-			Type string `json:"side_data_type"`
-		} `json:"side_data_list"`
+		// SideData is kept raw and decoded entry by entry, so that one
+		// malformed entry, or a list of the wrong shape, cannot make the
+		// whole probe fail or hide the other entries.
+		SideData json.RawMessage `json:"side_data_list"`
 	} `json:"streams"`
 	Chapters []struct {
 		Start string            `json:"start_time"`
@@ -210,21 +214,8 @@ func fromFFprobe(path string, fp *ffprobeOut) *MediaInfo {
 			st.TextSubtitle = textSubCodecs[s.CodecName]
 		}
 		if s.CodecType == "video" {
-			if s.ColorTransfer == "smpte2084" {
-				st.HDR = append(st.HDR, "hdr10")
-			}
-			if s.ColorTransfer == "arib-std-b67" {
-				st.HDR = append(st.HDR, "hlg")
-			}
-			for _, sd := range s.SideData {
-				t := strings.ToLower(sd.Type)
-				if strings.Contains(t, "dovi") || strings.Contains(t, "dolby vision") {
-					st.HDR = append(st.HDR, "dovi")
-				}
-				if strings.Contains(t, "hdr10+") || strings.Contains(t, "dynamic hdr") {
-					st.HDR = append(st.HDR, "hdr10plus")
-				}
-			}
+			st.HDR = hdrLabels(s.ColorTransfer, s.SideData)
+			st.Color = colorFromFFprobe(s.ColorPrimaries, s.ColorTransfer, s.ColorSpace, s.ColorRange, s.SideData)
 		}
 		m.Streams = append(m.Streams, st)
 	}
@@ -308,23 +299,43 @@ type mkvOut struct {
 		TrackID    int `json:"track_id"`
 	} `json:"track_tags"`
 	Tracks []struct {
-		ID         int    `json:"id"`
-		Type       string `json:"type"`
-		Codec      string `json:"codec"`
-		Properties struct {
-			Language        string `json:"language"`
-			LanguageIETF    string `json:"language_ietf"`
-			TrackName       string `json:"track_name"`
-			Default         bool   `json:"default_track"`
-			Forced          bool   `json:"forced_track"`
-			Commentary      bool   `json:"flag_commentary"`
-			HearingImpaired bool   `json:"flag_hearing_impaired"`
-			VisualImpaired  bool   `json:"flag_visual_impaired"`
-			Original        bool   `json:"flag_original"`
-			TextSubtitles   bool   `json:"text_subtitles"`
-			CodecID         string `json:"codec_id"`
-		} `json:"properties"`
+		ID         int           `json:"id"`
+		Type       string        `json:"type"`
+		Codec      string        `json:"codec"`
+		Properties mkvTrackProps `json:"properties"`
 	} `json:"tracks"`
+}
+
+// mkvTrackFields are the typed track properties mergeMkv reads directly.
+type mkvTrackFields struct {
+	Language        string `json:"language"`
+	LanguageIETF    string `json:"language_ietf"`
+	TrackName       string `json:"track_name"`
+	Default         bool   `json:"default_track"`
+	Forced          bool   `json:"forced_track"`
+	Commentary      bool   `json:"flag_commentary"`
+	HearingImpaired bool   `json:"flag_hearing_impaired"`
+	VisualImpaired  bool   `json:"flag_visual_impaired"`
+	Original        bool   `json:"flag_original"`
+	TextSubtitles   bool   `json:"text_subtitles"`
+	CodecID         string `json:"codec_id"`
+}
+
+// mkvTrackProps decodes the typed fields and keeps every property raw as
+// well, so the colour properties, whose keys mkvmerge has spelled two ways
+// and whose values must be validated one by one, can be read leniently
+// without a wrong type in one of them failing the whole identification.
+type mkvTrackProps struct {
+	mkvTrackFields
+	raw map[string]json.RawMessage
+}
+
+func (p *mkvTrackProps) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &p.mkvTrackFields); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(b, &p.raw)
+	return nil
 }
 
 // IdentifyMkv runs mkvmerge -J and returns the raw parsed output plus the
@@ -415,6 +426,10 @@ func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 		s.Original = s.Original || t.Properties.Original
 		if typ == "subtitle" {
 			s.TextSubtitle = s.TextSubtitle || t.Properties.TextSubtitles
+		}
+		if typ == "video" && t.Properties.raw != nil {
+			s.Color.merge(colorFromMkv(t.Properties.raw))
+			s.HDR = addLabel(s.HDR, transferLabel(s.Color.Transfer))
 		}
 	}
 }
