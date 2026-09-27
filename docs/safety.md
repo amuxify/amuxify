@@ -22,13 +22,25 @@ SECURITY.md.
 
 1. **Never overwrite.** Output is placed with a link-then-unlink that fails if
    the destination exists. A collision is `FAIL OUTPUT_EXISTS`.
-   Test: `fsutil.TestPlaceNoClobberRefusesExisting`, `remux.TestOutputExistsBeforeAnyTool`.
+   Under `--jobs` every worker claims its destination in a run-wide set
+   before it creates anything, so two sources that rebuild to one name give
+   exactly one output and `OUTPUT_EXISTS` for the other, and two blocked
+   files that would quarantine under one name give one move and one
+   `quarantine failed`.
+   Test: `fsutil.TestPlaceNoClobberRefusesExisting`, `remux.TestOutputExistsBeforeAnyTool`,
+   `pool.TestClaimsExactlyOneWinner`, `remux.TestClaimExactlyOneWinner`,
+   `remux.TestParallelSameDestinationOnce`, `remux.TestClaimReleasedWhenNothingPlaced`,
+   `scan.TestQuarantineSameNameFromTwoRootsOnce`, `cli.TestJobsSameDestinationRace`,
+   `cli.TestJobsSameQuarantineNameRace`.
 2. **Temp, fsync, rename.** Output is written as `.amuxify-<name>.tmp` in the
    destination directory, fsynced, then renamed. Same filesystem always; a
    crash leaves at most a temp file, which the next run ignores. Only a name
    of exactly that shape is ignored: a file that borrows the `.amuxify-`
    prefix without the `.tmp` suffix is scanned like any other.
-   Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`.
+   An interrupt under `--jobs` starts no further file, waits for the files
+   already running, and leaves no temp file behind them either.
+   Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`,
+   `pool.TestRunCancelStartsNothingNew`, `cli.TestJobsInterruptLeavesNoTemp`.
 3. **Symlinks are never followed.** Each symlink is reported `WARN SYMLINK` and
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
    A symlink swapped onto the temp name during a run is refused before the
@@ -76,6 +88,18 @@ edited by the same mkvpropedit call `clean` uses, or left alone, and a
 hard-linked file is never edited in place. Every guarantee above applies to
 them unchanged. A hook never turns a client job into a failed one for a WARN
 or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
+
+`--jobs` changes how many files are in flight, not what happens to any one of
+them. The worker pool never runs two names of one inode at the same time, nor
+two sources that map to one output or quarantine name; such files run one
+after the other in walk order, so a parallel run makes the same decisions as
+a sequential one. Paths given on the command line are still processed one
+after the other. The hook adapters always use one job, because the download
+client decides how many scripts run at once.
+Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
+`remux.TestParallelHardLinksSerialised`, `scan.TestScanPathParallelOrderAndCancel`,
+`exec.TestPathConcurrentCallers`, `cli.TestJobsParallelMatchesSequential`,
+`cli.TestJobsUsageErrors`, `cli.TestHookIgnoresJobs`.
 
 ## What scan looks at
 

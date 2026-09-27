@@ -288,7 +288,10 @@ not change the exit code.
 
 The global flags apply before the subcommand as everywhere: `--profile`,
 `--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`, `--state-dir`,
-`--allow-root` and `--trace`. `--dry-run` reports what each file would get
+`--allow-root`, `--trace` and `--jobs`. A hook accepts `--jobs` but always
+processes one file at a time, whatever value is given: the download client
+decides how many scripts run at once, and one script that fans out would take
+the machine away from the others. `--dry-run` reports what each file would get
 (`ROUTE` under `--verbose` shows the plan) and changes nothing. `AMUXIFY_PROFILE`
 sets the default profile; every wrapper passes it through with `homelab` as the
 fallback, so setting that variable in the client's environment is enough to
