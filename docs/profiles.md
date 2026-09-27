@@ -118,6 +118,35 @@ is never silently made silent.
   `ignore` there.
 - `clamav` — `off`, `optional` (scan when clamscan is installed), `required`
   (`doctor` fails without it; infected files are `BLOCK CLAMAV_INFECTED`).
+  See the section on ClamAV below for what each value means at run time.
+
+### ClamAV
+
+When the scan is on, every media file is handed to `clamscan` after the
+content checks and before it is probed. The verdict comes from the exit
+status of clamscan alone: exit 0 is clean, exit 1 is `BLOCK CLAMAV_INFECTED`,
+and any other exit, a scanner that cannot start or one that runs past the
+timeout is `WARN CLAMAV_ERROR`, after which the file is probed and verified
+like any other. What clamscan printed is kept only as the lines that name the
+scanned file, cut to a few lines and passed through the report sanitiser, so
+a scanner's output can neither raise nor lower a verdict nor reshape a
+report line.
+
+The three values of `safety.clamav` and the `scan --clamav` flag combine as
+follows.
+
+| `safety.clamav` | without `--clamav` | with `--clamav` | clamscan missing |
+|---|---|---|---|
+| `off` | ⏭️ not run | ▶️ run | ⏭️ carries on |
+| `optional` | ▶️ run | ▶️ run | ⏭️ carries on |
+| `required` | ▶️ run | ▶️ run | ⛔ `FAIL CLAMAV_MISSING` |
+
+`--clamav` turns an `off` profile into an optional scan for that run; it never
+lowers a `required` profile, and no flag turns a `required` profile's missing
+scanner into a pass. With `required` the file is failed before it is probed,
+`ingest` and the hook adapters refuse it even with `--force`, and `doctor`
+exits 2. The clamscan call runs under the run's `--timeout` when one is
+given and under a 30 minute limit otherwise.
 
 ### `[sidecars]`
 
