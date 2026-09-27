@@ -22,7 +22,7 @@ it writes only the skipping line, to stdout normally and to stderr under
 
 | Adapter | What it reads | When it skips | Exit codes |
 |---|---|---|---|
-| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's eight positional parameters (completed directory first, post-processing status seventh) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
+| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's seven or eight positional parameters (completed directory first, post-processing status seventh; see the accepted forms below) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook nzbget` | `NZBPP_TOTALSTATUS`, `NZBPP_FINALDIR` or `NZBPP_DIRECTORY` (the first non-empty one), `NZBPP_NZBNAME`, `NZBPP_CATEGORY`, `NZBPP_STATUS` | `NZBPP_TOTALSTATUS` is not `SUCCESS`, or the category does not match `--category`; exits 95 | 93 when the verdict is below `--fail-on`, 94 at or above it, 95 when skipped, 94 for a usage error or an interruption |
 | `hook sonarr` | `sonarr_eventtype`, `sonarr_episodefile_path` or `sonarr_episodefile_paths`, `sonarr_series_originallanguage`, `sonarr_series_title`, `sonarr_release_title` | every event other than `Download` and `Test`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook radarr` | `radarr_eventtype`, `radarr_moviefile_path`, `radarr_movie_originallanguage`, `radarr_movie_title` | every event other than `Download` and `Test`; exits 0 | as `hook sonarr` |
@@ -78,6 +78,54 @@ directory in `SAB_COMPLETE_DIR` and the post-processing status in
 (failed verification, unpack or repair); the adapter prints a skipping line
 that quotes `SAB_FAIL_MSG` when SABnzbd set it, and exits 0 so the failure
 stays SABnzbd's own.
+
+### Accepted forms
+
+The adapter reads the job in one of two forms, and refuses everything else
+with exit code 2 and a message that names the problem.
+
+The environment form applies whenever `SAB_COMPLETE_DIR` is set, which every
+supported SABnzbd does. The adapter then also requires `SAB_PP_STATUS`; a
+job with the directory but no status is refused rather than assumed
+successful. `SAB_FINAL_NAME`, `SAB_CAT` and `SAB_FAIL_MSG` are optional. When
+the environment form applies the positional parameters are not read, but
+they are still checked for shape, since SABnzbd sets both and a wrong shape
+means the wrapper line is wrong.
+
+The positional form applies when `SAB_COMPLETE_DIR` is not set, and accepts
+exactly the parameters SABnzbd passes to a script, in SABnzbd's order: the
+final directory of the job, the name of the original NZB file, the clean job
+name, the indexer's report number, the category, the newsgroup, the
+post-processing status, and, from the SABnzbd version that added it, the
+failure URL. Seven parameters are read as an older SABnzbd's call and eight
+as a current one's. The status must not be empty. The directory comes from
+the first parameter, the label from the third (or the second when the third
+is empty), the category from the fifth and the status from the seventh;
+the others are ignored.
+
+No other count of positional arguments is accepted. In particular a lone
+directory is not a way to name the directory to ingest: `hook sabnzbd
+/downloads/job` is a usage error, and so are six, nine or more parameters.
+A directory in front of or after SABnzbd's own parameters is not read as
+one of them either. A wrapper that writes `hook sabnzbd /q "$@"` or `hook
+sabnzbd "$@" /q` gives eight or nine arguments; the nine are refused on
+count, and the eight are refused because SABnzbd's second parameter is an
+NZB file name and its eighth is a URL or empty, so an existing directory in
+either place shows that a directory was added. The message names the
+argument, and when a bare `--quarantine` is set it says to write
+`--quarantine=<dir>`, because that is the usual reason for the stray
+directory. The check inspects only those two positions: the first parameter
+is not required to exist, since a job directory may be gone by the time the
+script runs, and the failure URL is never opened.
+
+Flags such as `--quarantine=DIR`, `--fail-on`, `--category` and
+`--remove-blocked-sidecars` are recognised in any position before the first
+positional parameter, and the global flags go before `hook`. After the first
+positional parameter, or after `--`, every argument is a parameter, so a
+directory named like a flag is a directory. Every value in either form is
+carried as data: nothing is split, expanded or executed, control characters
+are escaped in the log lines, and a directory that is a symlink is reported
+as `WARN SYMLINK` and never followed.
 
 SABnzbd only fails a job on a non-zero script exit when its `script_can_fail`
 setting is on; turn it on. With it, every non-zero exit fails the job: 1 for a
@@ -249,8 +297,8 @@ names the directory; a bare `--quarantine` uses `<state-dir>/quarantine`
 turns it off again. The directory form must use `=`, because the flag also
 works without a value. A directory written after a bare `--quarantine` is not
 read as its value: `hook sonarr`, `hook radarr` and `hook nzbget` take no
-positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's eight
-parameters, so the stray word is a usage error, and the message says to write
+positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's seven or
+eight parameters, so the stray word is a usage error, and the message says to write
 `--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
 cleared under `--dry-run`. The quarantine directory must lie outside the
 paths being processed: a path that is the quarantine directory or lies inside
