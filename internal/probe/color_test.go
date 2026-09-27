@@ -373,9 +373,8 @@ func TestMkvTrackPropsKeepRawOnOddColourTypes(t *testing.T) {
 // field seen by either tool stays malformed.
 func TestColorMergeFillsOnlyMissing(t *testing.T) {
 	c := Color{Primaries: "bt709", Mastering: &MasteringDisplay{HasLuminance: true, MinLuminance: 0.01, MaxLuminance: 500}}
-	mk := Color{Primaries: "bt2020", Transfer: "smpte2084", Malformed: []string{"max_cll"},
-		Mastering: &MasteringDisplay{HasPrimaries: true, RedX: 0.708, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329, HasLuminance: true, MinLuminance: 0, MaxLuminance: 1000},
-		Light:     &ContentLight{MaxCLL: 1, MaxFALL: 1}}
+	mk := Color{Primaries: "bt2020", Transfer: "smpte2084", Malformed: []string{"max_fall"},
+		Mastering: &MasteringDisplay{HasPrimaries: true, RedX: 0.708, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329, HasLuminance: true, MinLuminance: 0, MaxLuminance: 1000}}
 	c.merge(mk)
 	if c.Primaries != "bt709" || c.Transfer != "smpte2084" {
 		t.Fatalf("description %+v", c)
@@ -383,12 +382,144 @@ func TestColorMergeFillsOnlyMissing(t *testing.T) {
 	if !c.Mastering.HasPrimaries || c.Mastering.RedX != 0.708 || c.Mastering.MaxLuminance != 500 || c.Mastering.MinLuminance != 0.01 {
 		t.Fatalf("mastering %+v", c.Mastering)
 	}
-	if c.Light == nil || c.Light.MaxCLL != 1 || !reflect.DeepEqual(c.Malformed, []string{"max_cll"}) {
+	if c.Light != nil || !reflect.DeepEqual(c.Malformed, []string{"max_fall"}) {
 		t.Fatalf("light %+v malformed %v", c.Light, c.Malformed)
 	}
 	c.merge(mk)
-	if !reflect.DeepEqual(c.Malformed, []string{"max_cll"}) {
+	if !reflect.DeepEqual(c.Malformed, []string{"max_fall"}) {
 		t.Fatalf("malformed duplicated: %v", c.Malformed)
+	}
+}
+
+// Guarantee 5: a field one tool rejected is never filled from the other
+// tool and never kept from the other tool, so a merged Color carries each
+// name once. The stream in the case is hostile ffprobe output (a transfer
+// name with a trailing newline, an oversized content light level) or a
+// hostile track header (a luminance mkvmerge could not parse) beside a
+// clean value from the other tool. Two Colors merged the same way must
+// then compare equal, and a merged Color against a clean one must report
+// the malformed field rather than a value it never validated.
+func TestColorMergeKeepsRejectedFieldMalformed(t *testing.T) {
+	clean := probeJSON(t, hdr10Stream).Streams[0].Color
+	cases := []struct {
+		name    string
+		ff, mk  Color
+		want    Color
+		against []string // ColorDiff(merged, clean)
+	}{
+		{"ffprobe transfer rejected, header valid",
+			func() Color {
+				var s colorSetter
+				s.c.Transfer = s.enum("transfer", "smpte2084\n")
+				return s.done()
+			}(),
+			Color{Transfer: "smpte2084"},
+			Color{Malformed: []string{"transfer"}},
+			[]string{"mastering display metadata gained", "content light level gained", "transfer changed from malformed to smpte2084",
+				"primaries gained (now bt2020)", "matrix gained (now bt2020nc)", "range gained (now tv)"}},
+		{"header transfer rejected, ffprobe valid",
+			Color{Transfer: "smpte2084"},
+			Color{Malformed: []string{"transfer"}},
+			Color{Malformed: []string{"transfer"}},
+			[]string{"mastering display metadata gained", "content light level gained", "transfer changed from malformed to smpte2084",
+				"primaries gained (now bt2020)", "matrix gained (now bt2020nc)", "range gained (now tv)"}},
+		{"ffprobe content light rejected, header valid",
+			Color{Malformed: []string{"max_cll"}},
+			Color{Light: &ContentLight{MaxCLL: 1000, MaxFALL: 400}},
+			Color{Malformed: []string{"max_cll"}},
+			[]string{"mastering display metadata gained", "content light level gained", "primaries gained (now bt2020)", "transfer gained (now smpte2084)", "matrix gained (now bt2020nc)", "range gained (now tv)"}},
+		{"header content light rejected, ffprobe valid",
+			Color{Light: &ContentLight{MaxCLL: 1000, MaxFALL: 400}},
+			Color{Malformed: []string{"max_cll", "max_fall"}},
+			Color{Malformed: []string{"max_cll", "max_fall"}},
+			[]string{"mastering display metadata gained", "content light level gained", "primaries gained (now bt2020)", "transfer gained (now smpte2084)",
+				"matrix gained (now bt2020nc)", "range gained (now tv)"}},
+		{"ffprobe chromaticity rejected, header valid",
+			Color{Malformed: []string{"chromaticity_coordinates", "red_x"}},
+			Color{Mastering: &MasteringDisplay{HasPrimaries: true, RedX: 0.708, RedY: 0.292, GreenX: 0.17, GreenY: 0.797,
+				BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329, HasLuminance: true, MinLuminance: 0.0001, MaxLuminance: 1000}},
+			Color{Mastering: &MasteringDisplay{HasLuminance: true, MinLuminance: 0.0001, MaxLuminance: 1000},
+				Malformed: []string{"chromaticity_coordinates", "red_x"}},
+			[]string{"content light level gained", "chromaticity_coordinates lost (was malformed)", "red_x changed from malformed to 0.708",
+				"primaries gained (now bt2020)", "transfer gained (now smpte2084)", "matrix gained (now bt2020nc)", "range gained (now tv)",
+				"red_y gained (now 0.292)", "green_x gained (now 0.17)", "green_y gained (now 0.797)", "blue_x gained (now 0.131)",
+				"blue_y gained (now 0.046)", "white_x gained (now 0.3127)", "white_y gained (now 0.329)"}},
+		{"header luminance rejected, ffprobe valid",
+			Color{Mastering: &MasteringDisplay{HasLuminance: true, MinLuminance: 0.0001, MaxLuminance: 1000}},
+			Color{Malformed: []string{"luminance"}},
+			Color{Malformed: []string{"luminance"}},
+			[]string{"mastering display metadata gained", "content light level gained", "luminance lost (was malformed)",
+				"primaries gained (now bt2020)", "transfer gained (now smpte2084)", "matrix gained (now bt2020nc)", "range gained (now tv)"}},
+		{"ffprobe dolby vision rejected",
+			Color{Malformed: []string{"dv_level"}},
+			Color{},
+			Color{Malformed: []string{"dv_level"}},
+			[]string{"mastering display metadata gained", "content light level gained", "dv_level lost (was malformed)",
+				"primaries gained (now bt2020)", "transfer gained (now smpte2084)", "matrix gained (now bt2020nc)", "range gained (now tv)"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := tc.ff, tc.mk
+			a.merge(b)
+			if !reflect.DeepEqual(a, tc.want) {
+				t.Fatalf("merged\n got %+v\nwant %+v", a, tc.want)
+			}
+			names := map[string]int{}
+			for _, f := range a.fields() {
+				names[f.name]++
+			}
+			for n, k := range names {
+				if k > 1 {
+					t.Fatalf("field %s listed %d times: %s", n, k, a.String())
+				}
+			}
+			// The same hostile output on both sides of a remux is no difference.
+			c, d := tc.ff, tc.mk
+			c.merge(d)
+			if diffs := ColorDiff(&a, &c); len(diffs) != 0 {
+				t.Fatalf("two identical merges differ: %v", diffs)
+			}
+			if diffs := ColorDiff(&a, &clean); !reflect.DeepEqual(diffs, tc.against) {
+				t.Fatalf("against a clean output\n got %q\nwant %q", diffs, tc.against)
+			}
+		})
+	}
+}
+
+// Guarantee 5: the comparison tolerance is no wider than the single
+// precision rounding of the Matroska header, so a value nudged by a tenth
+// of a percent, or by ten parts per million, is a change, while the
+// rationals ffprobe prints for the stored floats are not.
+func TestCloseEnough(t *testing.T) {
+	cases := []struct {
+		a, b float64
+		same bool
+	}{
+		{0.708, 11878269.0 / 16777216, true},     // float32 of 0.708 read back as a rational
+		{0.0001, 209800.0 / 2098000053, true},    // float32 of 0.0001
+		{0.046, 12348031.0 / 268435456, true},    // float32 of 0.046
+		{0.797, 13371441.0 / 16777216, true},     // float32 of 0.797, the largest error in the fixture
+		{0.3127, float64(float32(0.3127)), true}, // any float32 rounding
+		{1000, float64(float32(1000)), true},
+		{0, 0, true},
+		{0, 1e-10, true},
+		{1000, 1000.9, false},   // a tenth of a percent
+		{1000, 1000.01, false},  // ten parts per million
+		{1000, 1000.002, false}, // two parts per million
+		{0.708, 0.7087, false},
+		{0.708, 0.70801, false},
+		{0.0001, 0.00010002, false}, // near zero, still relative
+		{0, 1e-8, false},
+		{0, 0.0001, false},
+		{1000, 0, false},
+	}
+	for _, tc := range cases {
+		if got := closeEnough(tc.a, tc.b); got != tc.same {
+			t.Errorf("closeEnough(%v, %v) = %v want %v", tc.a, tc.b, got, tc.same)
+		}
+		if got := closeEnough(tc.b, tc.a); got != tc.same {
+			t.Errorf("closeEnough(%v, %v) = %v want %v", tc.b, tc.a, got, tc.same)
+		}
 	}
 }
 
@@ -424,6 +555,14 @@ func TestColorDiff(t *testing.T) {
 		{"max luminance changed", hdr, func() Color { c := clone(hdr); c.Mastering.MaxLuminance = 4000; return c }, []string{"max_luminance changed from 1000 to 4000"}},
 		{"min luminance doubled", hdr, func() Color { c := clone(hdr); c.Mastering.MinLuminance = 0.0002; return c }, []string{"min_luminance changed from 0.0001 to 0.0002"}},
 		{"chromaticity changed", hdr, func() Color { c := clone(hdr); c.Mastering.WhiteY = 0.3; return c }, []string{"white_y changed from 0.329 to 0.3"}},
+		{"values nudged below a tenth of a percent", hdr, func() Color {
+			c := clone(hdr)
+			c.Mastering.MaxLuminance = 1000.9
+			c.Mastering.RedX = 0.7087
+			return c
+		}, []string{"red_x changed from 0.708 to 0.7087", "max_luminance changed from 1000 to 1000.9"}},
+		{"value nudged by ten parts per million", hdr, func() Color { c := clone(hdr); c.Mastering.MaxLuminance = 1000.01; return c },
+			[]string{"max_luminance changed from 1000 to 1000.01"}},
 		{"luminance half lost", hdr, func() Color { c := clone(hdr); c.Mastering.HasLuminance = false; return c },
 			[]string{"min_luminance lost (was 0.0001)", "max_luminance lost (was 1000)"}},
 		{"max cll changed", hdr, func() Color { c := clone(hdr); c.Light.MaxCLL = 999; return c }, []string{"max_cll changed from 1000 to 999"}},

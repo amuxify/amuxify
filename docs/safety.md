@@ -59,13 +59,22 @@ SECURITY.md.
    from the output, and any value that was lost, gained or changed is
    `FAIL HDR_LOST` with the value named; the output is deleted like any
    other verification failure. An SDR file is compared as strictly, so an
-   output that gained signalling fails too. Every number read from a tool
-   is validated before it is compared: a value that is not a number, not
-   finite, negative, or beyond what the format can express is recorded as
-   malformed rather than trusted, and a malformed value in the source that
-   is missing in the output is still a difference.
+   output that gained signalling fails too. Names, light levels and the
+   Dolby Vision fields must match exactly. The chromaticity and luminance
+   values are compared with a tolerance of one part in a million, which is
+   about sixteen times the rounding of the single precision floats the
+   Matroska header stores them in and is the only reason two readings of
+   one value can differ; a value nudged by a tenth of a percent is reported
+   as changed. Every number read from a tool is validated before it is
+   compared: a value that is not a number, not finite, negative, or beyond
+   what the format can express is recorded as malformed rather than
+   trusted, and a malformed value in the source that is missing in the
+   output is still a difference. A field that either tool rejected stays
+   malformed when the two tools' readings are combined, so a clean value
+   from the other tool never stands in for it.
    Test: `remux.TestHashMismatchDeletesOutput`, `remux.TestHDRPropertyStrippedDeletesOutput`,
-   `remux.TestSDRGainedHDRFails`, `remux.TestHdrDiffDolbyVision`,
+   `remux.TestSDRGainedHDRFails`, `remux.TestHdrDiffDolbyVision`, `probe.TestCloseEnough`,
+   `probe.TestColorMergeKeepsRejectedFieldMalformed`,
    `probe.TestColorHostileFFprobeJSON`, `probe.TestColorHostileMkvmergeJSON`.
 6. **In place preserves identity.** `--in-place` copies mode, owner, group and
    modification time from the source to the output before the rename.
