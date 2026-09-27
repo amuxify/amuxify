@@ -8,9 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -51,8 +49,12 @@ type Cleaner struct {
 	DryRun                bool
 	RemoveBlockedSidecars bool
 	StripAudioTags        bool
-	Hardlinks             string
-	Timeout               time.Duration
+	// Command names the command the cleaner runs under, so advice about
+	// flags only names flags that command has. Empty means clean, which
+	// has --strip-audio-tags; ingest sets "ingest" and has no such flag.
+	Command   string
+	Hardlinks string
+	Timeout   time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
 }
@@ -77,23 +79,9 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	fi, err := os.Lstat(abs)
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	if fi.IsDir() {
-		_ = filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
-				return nil
-			}
-			paths = append(paths, p)
-			return nil
-		})
-		sort.Strings(paths)
-	} else {
-		paths = []string{abs}
-	}
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	paths, walkErr := scan.Walk(abs)
 	var out []report.FileResult
 	for _, p := range paths {
 		if ctx.Err() != nil {
@@ -105,7 +93,7 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // CleanFile cleans one path.
@@ -125,24 +113,7 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 	}
 	ext := fsutil.Ext(path)
 	if !scan.IsMedia(path) {
-		if contains(c.Profile.Sidecars.Block, ext) {
-			if c.RemoveBlockedSidecars {
-				if c.DryRun {
-					fr.Addf(CodeDryRun, report.Pass, "would remove blocked sidecar .%s", ext)
-				} else if err := os.Remove(path); err != nil {
-					fr.Addf(CodeCleanFail, report.Fail, "remove: %v", err)
-				} else {
-					fr.Addf(CodeSidecarRemove, report.Pass, "blocked sidecar removed")
-				}
-				return fr
-			}
-			fr.Addf(CodeSkipped, report.Warn, "blocked sidecar .%s left in place (use --remove-blocked-sidecars)", ext)
-			return fr
-		}
-		c.stripXattrs(&fr, path)
-		if len(fr.Findings) == 0 {
-			fr.Addf(CodeNothing, report.Pass, "sidecar; nothing to clean")
-		}
+		c.cleanSidecar(&fr, path, ext)
 		return fr
 	}
 	if n := fsutil.Nlink(fi); n > 1 && c.hardlinks() == "skip" {
@@ -155,28 +126,91 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 		fr.Addf(CodeCleanFail, report.Fail, "probe: %v", err)
 		return fr
 	}
+	c.cleanMedia(ctx, &fr, path, ext, info)
+	return fr
+}
+
+// CleanScanned cleans one file that scan has already probed, without probing
+// again. The result carries only the cleaner's findings; ingest merges them.
+func (c *Cleaner) CleanScanned(ctx context.Context, sc scan.Result) report.FileResult {
+	start := time.Now()
+	path := sc.File.Path
+	fr := report.FileResult{Path: path, Info: map[string]string{}}
+	defer func() { fr.Duration = time.Since(start) }()
+
+	fi, err := os.Lstat(path)
+	if err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "%v", err)
+		return fr
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
+		return fr
+	}
+	ext := fsutil.Ext(path)
+	if !scan.IsMedia(path) {
+		c.cleanSidecar(&fr, path, ext)
+		return fr
+	}
+	if n := fsutil.Nlink(fi); n > 1 && c.hardlinks() == "skip" {
+		fr.Addf(CodeHardlinked, report.Warn, "file has %d hard links; skipped (safety.hardlinks = skip)", n)
+		return fr
+	}
+	if sc.Info == nil {
+		fr.Addf(CodeCleanFail, report.Fail, "no probe result; scan did not parse this file")
+		return fr
+	}
+	c.cleanMedia(ctx, &fr, path, ext, sc.Info)
+	return fr
+}
+
+// cleanSidecar removes a blocked sidecar when asked to, or strips its
+// extended attributes.
+func (c *Cleaner) cleanSidecar(fr *report.FileResult, path, ext string) {
+	if contains(c.Profile.Sidecars.Block, ext) {
+		if c.RemoveBlockedSidecars {
+			if c.DryRun {
+				fr.Addf(CodeDryRun, report.Pass, "would remove blocked sidecar .%s", ext)
+			} else if err := os.Remove(path); err != nil {
+				fr.Addf(CodeCleanFail, report.Fail, "remove: %v", err)
+			} else {
+				fr.Addf(CodeSidecarRemove, report.Pass, "blocked sidecar removed")
+			}
+			return
+		}
+		fr.Addf(CodeSkipped, report.Warn, "blocked sidecar .%s left in place (use --remove-blocked-sidecars)", ext)
+		return
+	}
+	c.stripXattrs(fr, path)
+	if len(fr.Findings) == 0 {
+		fr.Addf(CodeNothing, report.Pass, "sidecar; nothing to clean")
+	}
+}
+
+// cleanMedia picks the cleaner for a probed media file and strips extended
+// attributes afterwards.
+func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, ext string, info *probe.MediaInfo) {
 	switch {
 	case info.IsMatroska():
-		c.cleanMatroska(ctx, &fr, info)
+		c.cleanMatroska(ctx, fr, info)
 	case info.Container == "mp4":
-		c.cleanRewrite(ctx, &fr, info, mp4Muxer(ext))
+		c.cleanRewrite(ctx, fr, info, mp4Muxer(ext))
 	case info.Container == "avi":
-		c.cleanRewrite(ctx, &fr, info, "avi")
+		c.cleanRewrite(ctx, fr, info, "avi")
 	case info.Container == "flv":
-		c.cleanRewrite(ctx, &fr, info, "flv")
+		c.cleanRewrite(ctx, fr, info, "flv")
 	case info.Container == "mpegts", info.Container == "mpegps":
 		fr.Addf(CodeNothing, report.Pass, "%s carries no writable metadata; use remux to convert", info.Container)
 	case info.Container == "mp3", info.Container == "flac", info.Container == "ogg", info.Container == "wav":
 		if c.StripAudioTags {
-			c.cleanRewrite(ctx, &fr, info, audioMuxer(info.Container))
+			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container))
 		} else {
-			fr.Addf(CodeSkipped, report.Pass, "audio tags left alone (use --strip-audio-tags)")
+			fr.Addf(CodeSkipped, report.Pass, "%s", c.audioTagsAdvice())
 		}
 	default:
 		fr.Addf(CodeSkipped, report.Warn, "no cleaner for container %s", info.Container)
 	}
-	c.stripXattrs(&fr, path)
-	return fr
+	c.stripXattrs(fr, path)
 }
 
 func mp4Muxer(ext string) string {
@@ -251,6 +285,43 @@ func (c *Cleaner) cleanMatroska(ctx context.Context, fr *report.FileResult, info
 
 // cleanRewrite stream-copies into a temp file with all container metadata
 // dropped, verifies stream hashes, then replaces the original.
+// inertFormatTags counts the format tags that ffprobe reports for every
+// MP4-family file and that a rewrite can never remove: the ftyp brand
+// fields. Counting them would make the rewrite run again on a file it has
+// just cleaned. The encoder tag is not on this list: ffmpeg does not write
+// it back under -bitexact, so its presence means the file was not cleaned.
+func inertFormatTags(tags map[string]string) int {
+	n := 0
+	for k := range tags {
+		switch strings.ToLower(k) {
+		case "major_brand", "minor_version", "compatible_brands":
+			n++
+		}
+	}
+	return n
+}
+
+// inertStreamTag reports whether a stream tag is one the MP4 muxer writes
+// on its own with a fixed value (the default handler names and ffmpeg's own
+// vendor id), so it survives every rewrite. Any other value, including a
+// handler name that carries text of someone's choosing, still counts as
+// metadata to strip.
+func inertStreamTag(key, value string) bool {
+	switch strings.ToLower(key) {
+	case "handler_name":
+		switch value {
+		case "VideoHandler", "SoundHandler", "SubtitleHandler", "DataHandler":
+			return true
+		}
+	case "vendor_id":
+		switch value {
+		case "FFMP", "[0][0][0][0]":
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo, muxer string) {
 	var what []string
 	if info.Container == "mp4" {
@@ -267,12 +338,12 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 			}
 		}
 	}
-	if len(info.Tags) > 0 {
-		what = append(what, fmt.Sprintf("%d format tag(s)", len(info.Tags)))
+	if n := len(info.Tags) - inertFormatTags(info.Tags); n > 0 {
+		what = append(what, fmt.Sprintf("%d format tag(s)", n))
 	}
 	for _, s := range info.Streams {
-		for k := range s.Tags {
-			if strings.EqualFold(k, "language") {
+		for k, v := range s.Tags {
+			if strings.EqualFold(k, "language") || inertStreamTag(k, v) {
 				continue
 			}
 			what = append(what, fmt.Sprintf("stream #%d tag %s", s.Index, k))
@@ -286,8 +357,25 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		fr.Addf(CodeDryRun, report.Pass, "would rewrite without %s", strings.Join(what, ", "))
 		return
 	}
+	// The temp file is created here, empty and exclusively, before its name
+	// is handed to ffmpeg, and the identity recorded is what the replacement
+	// below requires of the file it opens: the source's mode, ownership and
+	// time are written through that descriptor, never through the name, so
+	// a symlink swapped onto the temp name cannot have its target's identity
+	// rewritten (guarantee 3). ffmpeg writes into the existing file rather
+	// than unlinking and recreating it, so the identity survives the
+	// rewrite. os.Remove never follows a link, so the cleanup on every
+	// failure removes a planted link and leaves its target alone. The handle
+	// stays open until the replacement has been checked, so the inode
+	// number cannot be freed and reused by a file swapped onto the name.
 	tmp := fsutil.TempName(info.Path)
-	_ = os.Remove(tmp)
+	own, err := fsutil.CreateTemp(tmp)
+	if err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "temp file: %v", err)
+		return
+	}
+	defer own.Close()
+	created := own.Info()
 	args := []string{"-v", "error", "-i", info.Path, "-map", "0", "-c", "copy", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags", "+bitexact"}
 	if c.Profile.Chapters.Keep {
 		args = append(args, "-map_chapters", "0")
@@ -345,8 +433,12 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 			}
 		}
 	}
-	if err := fsutil.Fsync(tmp); err == nil {
-		err = fsutil.ReplaceInPlace(tmp, info.Path)
+	// The replacement's error is assigned to the function-level err on
+	// purpose: an if-scoped err here would be discarded and a failed
+	// replacement reported as a successful rewrite.
+	err = fsutil.Fsync(tmp)
+	if err == nil {
+		err = fsutil.ReplaceInPlaceOwn(tmp, info.Path, created)
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -354,6 +446,16 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		return
 	}
 	fr.Addf(CodeMetadata, report.Pass, "rewritten without %s", strings.Join(what, ", "))
+}
+
+// audioTagsAdvice is the SKIPPED text for an audio file whose tags are left
+// alone. It names --strip-audio-tags only for the clean command, which has
+// that flag; ingest and the hook that runs it do not (review C10).
+func (c *Cleaner) audioTagsAdvice() string {
+	if c.Command == "ingest" {
+		return "audio tags left alone; ingest does not strip audio tags"
+	}
+	return "audio tags left alone (use --strip-audio-tags)"
 }
 
 // xattrPrefixes are the only namespaces amuxify removes. Security labels,
@@ -368,6 +470,20 @@ func xattrPrefixes() []string {
 	return nil
 }
 
+// inNamespace reports whether the attribute name lies in one of the
+// namespaces amuxify may remove: an exact, case-sensitive prefix match with
+// a non-empty attribute name after it. "user." alone, "USER.x",
+// "trusted.user.x", "com.applex.y" and a name that merely contains a prefix
+// somewhere after its start are all outside (guarantee 7).
+func inNamespace(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && len(name) > len(p) && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
 	prefixes := xattrPrefixes()
 	if prefixes == nil {
@@ -379,13 +495,7 @@ func (c *Cleaner) stripXattrs(fr *report.FileResult, path string) {
 	}
 	var removed, failed []string
 	for _, n := range names {
-		match := false
-		for _, p := range prefixes {
-			if strings.HasPrefix(n, p) {
-				match = true
-			}
-		}
-		if !match {
+		if !inNamespace(n, prefixes) {
 			continue
 		}
 		if c.DryRun {

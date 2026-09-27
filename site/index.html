@@ -32,7 +32,7 @@
   "description": "Command-line ingest gate for self-hosted media. Verifies, sanitizes and remuxes downloaded or purchased video into clean MKV files, with per-stream hash verification and exit codes for SABnzbd, NZBGet, Sonarr and Radarr.",
   "applicationCategory": "MultimediaApplication",
   "operatingSystem": "Linux, macOS",
-  "softwareVersion": "0.2.0",
+  "softwareVersion": "0.3.0",
   "license": "https://opensource.org/licenses/BSD-3-Clause",
   "codeRepository": "https://github.com/amuxify/amuxify",
   "downloadUrl": "https://github.com/amuxify/amuxify/releases",
@@ -136,6 +136,8 @@ package names per distro, pinning a version and the Docker image.</p>
 <tr><td><code>amuxify scan</code></td><td>Inspect files and sidecars, report findings, verdict per file</td><td>nothing</td></tr>
 <tr><td><code>amuxify remux</code></td><td>Rebuild any supported container into a sanitized MKV with mkvmerge, verify, place</td><td><code>&lt;root&gt;__remuxed/</code>, <code>--output</code> or <code>--in-place</code></td></tr>
 <tr><td><code>amuxify clean</code></td><td>Strip metadata, provenance atoms and extended attributes in place, tracks untouched</td><td>the file, after verification</td></tr>
+<tr><td><code>amuxify ingest</code></td><td>Scan, then rebuild into a verified MKV or clean in place, one pass per file</td><td>the file in place, after verification</td></tr>
+<tr><td><code>amuxify hook</code></td><td>Run ingest from SABnzbd, NZBGet, Sonarr or Radarr and exit the way that caller expects</td><td>as ingest</td></tr>
 <tr><td><code>amuxify doctor</code></td><td>Check tools, version floors, profile and environment</td><td>nothing</td></tr>
 <tr><td><code>amuxify profile</code></td><td>List or print built-in profiles</td><td>nothing</td></tr>
 </tbody>
@@ -190,7 +192,7 @@ amuxify --profile ./my.toml remux ~/incoming</code></pre>
 <li>Every kept stream's SHA-256 matches source and output, or the output is deleted.</li>
 <li>In-place mode preserves owner, group, mode and mtime.</li>
 <li>Extended attribute removal touches only <code>user.*</code> (Linux) and <code>com.apple.*</code> (macOS).</li>
-<li><code>--verify none</code> is refused together with <code>--in-place</code>.</li>
+<li><code>--verify none</code> is refused together with <code>--in-place</code>, and <code>ingest</code> and every hook adapter refuse verify tier <code>none</code> whether it comes from the flag or from the profile.</li>
 <li><code>BLOCK</code> cannot be overridden by any flag.</li>
 <li>Refuses to modify files as root unless <code>--allow-root</code>.</li>
 </ol>
@@ -204,10 +206,11 @@ protects against and what happens when it fires.</p>
 <p>amuxify does not replace anything in a typical self-hosted stack. It runs after the download client and
 before the library:</p>
 <ul>
-<li><strong>Download clients:</strong> SABnzbd, NZBGet, qBittorrent, Transmission, Deluge. Call amuxify from
-the post-processing script and use the exit code to fail the job.</li>
-<li><strong>Managers:</strong> Sonarr and Radarr custom scripts. Run on import and reject files that
-<code>FAIL</code> or <code>BLOCK</code>.</li>
+<li><strong>Download clients:</strong> SABnzbd and NZBGet run the built-in hook adapters and fail the job on
+the verdict. qBittorrent, Transmission and Deluge call <code>amuxify ingest</code> from their run-on-completion
+script and use the exit code.</li>
+<li><strong>Managers:</strong> Sonarr and Radarr custom scripts run the hook adapter after import to sanitise
+the imported file. They cannot block an import, so gate in the download client when you need a hard stop.</li>
 <li><strong>Media servers:</strong> Plex, Jellyfin, Emby, Kodi. They only ever see files that passed.</li>
 <li><strong>Storage:</strong> TrueNAS, Unraid, Synology and any NFS or SMB share. Ownership, mode and mtime
 are preserved in place, hardlinked files are skipped instead of broken, and the tool refuses to run as root
@@ -218,9 +221,9 @@ unless told to.</li>
 <section>
 <h2>Unattended use</h2>
 <p>amuxify never asks a question. Tracks with no language tag are handled by the <code>languages.und</code>
-profile key. Call it from your post-processing script and check the exit code. Built-in hook adapters for
-SABnzbd, NZBGet, Sonarr and Radarr are planned for 0.3.</p>
-<pre><code>amuxify remux --in-place "$SAB_COMPLETE_DIR" || exit 1</code></pre>
+profile key. Built-in hook adapters for SABnzbd, NZBGet, Sonarr and Radarr read the caller's environment,
+run ingest and exit the way that caller expects.</p>
+<pre><code>exec amuxify --profile homelab hook sabnzbd "$@"</code></pre>
 <p>Example scripts for each tool are in <a href="https://github.com/amuxify/amuxify/blob/main/docs/hooks.md">docs/hooks.md</a>.</p>
 </section>
 

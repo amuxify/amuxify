@@ -22,7 +22,7 @@ archives:
   - id: default
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-    files: [LICENSE, README.md, CHANGELOG.md, docs/*]
+    files: [LICENSE, README.md, CHANGELOG.md, docs/*, contrib/hooks/*]
 checksum:
   name_template: checksums.txt
   algorithm: sha256

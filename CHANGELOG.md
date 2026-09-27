@@ -2,6 +2,106 @@
 
 All notable changes to amuxify will be documented in this file.
 
+## 0.3.0
+
+### Added
+
+- `amuxify ingest`: scan, then rebuild into a verified MKV or clean in place, one
+  pass per file, always in place, with `--force`, `--hardlinks`, `--verify`,
+  `--quarantine`, `--remove-blocked-sidecars` and `--original-language`. A
+  hard-linked file is never edited in place. New finding `ROUTE`.
+- `amuxify hook sabnzbd | nzbget | sonarr | radarr`: adapters that read the
+  caller's environment, run ingest and exit the caller's way (0/1 or 93/94/95),
+  with `--fail-on warn|fail|block`, `--category` and `--json-out`. The Sonarr and
+  Radarr Test button runs a tool check. Wrapper scripts live under
+  `contrib/hooks/` and in the Docker image.
+- `--quarantine` without a value uses `<state-dir>/quarantine` for `ingest` and
+  the hook adapters; `scan --quarantine <dir>` is unchanged.
+- Kodi NFO awareness: allowed `.nfo` sidecars are classified (`NFO_KODI`,
+  `NFO_TEXT`); links outside scraper and artwork fields are `LINK_IN_SIDECAR`
+  (WARN or FAIL per `metadata.links`). NFO files are never modified.
+- Report schema `amuxify.report/1` with a `schema` field and an optional `hook`
+  object; golden and reflection tests freeze it; `docs/report.md` states the
+  compatibility policy.
+- A named test for every guarantee in docs/safety.md, and integration tests over
+  the fixture corpus that skip when tools are missing and fail in CI.
+- Hardening: every directory in a quarantine or output path is checked for
+  symlinks before a file is placed under it; the tools run with a UTF-8 locale
+  and English messages so that their output is read the same everywhere; decode verification checks
+  the streams ffprobe reported rather than a fixed set; cleaning an MP4 twice
+  leaves it unchanged; a tool named by a `tools.*` override must be executable
+  or `doctor` reports it; a cancelled or timed-out run reports the cancellation
+  as such instead of a tool failure; `amuxify help` lists the global flags;
+  `ingest` skips a symlink with a warning and never follows it.
+- The terminal report escapes control characters (other than tab) and Unicode
+  bidirectional, zero-width and line separator controls in paths, messages,
+  details and the hook adapters' own lines as `\xNN` or `\uNNNN`, so a file
+  name cannot forge or overwrite a line. The JSON report carries the raw value.
+
+### Changed
+
+- JSON: `started` and `finished` are UTC with whole seconds; `files`, `findings`
+  and `errors` are `[]` rather than absent or `null`; `profile` is always present.
+- `docs/report.md` code table corrected to match the code (`HARDLINKED` is PASS in
+  scan, `NO_VIDEO` and `NO_AUDIO` are FAIL, `QUARANTINED` is BLOCK on success,
+  `XATTR` warns on failure, `DOUBLE_EXT` fires on a blocked penultimate extension).
+
+### Fixed
+
+- The `--timeout` help text listed the wrong probe default.
+- Review fixes. An in-place rebuild places its output through the same
+  no-clobber path as every other write and never overwrites a file at the
+  destination. An `ingest` run whose root is a single file quarantines that
+  file correctly. A quarantine move across devices copies the file safely
+  instead of failing or leaving two copies. A directory that cannot be read
+  fails the run instead of being silently skipped. A hook run
+  under `--json` writes exactly one JSON document to stdout and its own log
+  lines to stderr, reports an interruption on stderr, and refuses a positional
+  argument the adapter does not take, with a hint when a directory was written
+  after a bare `--quarantine`. The SABnzbd adapter accepts exactly seven or
+  eight positional parameters, so a directory written after a bare
+  `--quarantine` in front of SABnzbd's own parameters is refused with the same
+  hint instead of being silently ignored. The NZBGet wrapper honours `AMUXIFY_PROFILE`
+  behind its own `NZBPO_PROFILE` option like the other wrappers. The release
+  workflow tags the image `0.3.0` as well as `v0.3.0`, and the derived
+  `Dockerfile.sabnzbd` installs the wrapper under
+  `/usr/local/share/amuxify/hooks/`, where a `/config` mount cannot hide it.
+- Verification fixes. An in-place rebuild checks, right before it replaces or
+  removes the source, that the file at that path is still the one it rebuilt
+  and verified, and refuses with `REMUX_FAIL` when the file was swapped while
+  mkvmerge ran; the temp file is created by amuxify itself and checked after
+  mkvmerge returns and again before placement, so a symlink planted at the
+  temp name is never followed. The entry placed at the destination is checked
+  to be the file the run built, and the ownership, mode and time copy onto an
+  in-place output, in `remux` and in the MP4 rewrite of `clean`, goes through
+  the open descriptor of that file rather than through its name, so a symlink
+  swapped onto the temp name after the last check cannot have its target's
+  mode or time rewritten; a failed replacement in the MP4 rewrite is now
+  reported as `CLEAN_FAIL` instead of being lost. A dry run of `remux`
+  predicts the `OUTPUT_EXISTS` collision two files of one run produce when
+  they rebuild to the same destination, as an `ingest` dry run already did,
+  and the prediction treats `Ep.mkv` and `ep.mkv` as one entry on a
+  case-insensitive filesystem. A placement failure in output mode that is not
+  an existing destination is reported as `REMUX_FAIL` with the reason instead
+  of `OUTPUT_EXISTS`. A quarantine move on the same filesystem now refuses a
+  source that is not a regular file and checks that the entry it placed is the
+  very file it started with, so a symlink swapped in during the move can never
+  leave a hard link to its target in the quarantine tree; an entry that fails
+  that check is removed only when it is not the last name of a file. A
+  quarantine directory that sits inside the scanned tree is skipped by the
+  walk, and a path that is the quarantine directory or lies inside it is
+  refused as a usage error before anything runs, so a file is quarantined once
+  rather than moved a level deeper on every run; both checks compare
+  directories by identity, so another spelling or letter case of the same
+  directory does not defeat them. The human report sanitiser and the
+  `BIDI_NAME` check now cover every Unicode format character, including U+061C
+  and the tag characters, rather than a fixed list of code points.
+- The temp file that a rebuild or an MP4 rewrite creates stays open until the
+  run's last identity check has passed. An open descriptor keeps the inode
+  allocated, so a filesystem that reuses a freed inode number at once, as ext4
+  does, cannot give that number to a file swapped onto the temp name, which
+  would otherwise pass as the run's own.
+
 ## 0.2.0
 
 Rewrite in Go. One binary, four built-in profiles, every common container as

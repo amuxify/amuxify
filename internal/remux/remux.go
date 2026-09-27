@@ -6,6 +6,7 @@ package remux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +60,17 @@ type Remuxer struct {
 	Timeout    time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
 	Progress func(report.FileResult)
+
+	// planned holds, per directory, the names earlier files of a dry run
+	// would write, so that a later file mapping to one of them is reported
+	// with the OUTPUT_EXISTS the live run would produce, such as sample.mp4
+	// and sample.avi both becoming sample.mkv. One Remuxer is one run, and
+	// RemuxPath does not reset it because the command calls RemuxPath once
+	// per path named on the command line. caseFold caches, per directory,
+	// whether its filesystem folds case, which decides whether Ep.mkv and
+	// ep.mkv are one name there.
+	planned  map[string][]string
+	caseFold map[string]bool
 }
 
 func (r *Remuxer) hardlinks() string {
@@ -82,6 +94,20 @@ func (r *Remuxer) timeout() time.Duration {
 	return r.Timeout
 }
 
+// Roots returns the tree relative paths are computed against and the output
+// tree used by output mode and by the copy hard-link mode.
+func (r *Remuxer) Roots(abs string, isDir bool) (inputRoot, outRoot string) {
+	inputRoot = abs
+	if !isDir {
+		inputRoot = filepath.Dir(abs)
+	}
+	outRoot = r.OutputRoot
+	if outRoot == "" {
+		outRoot = filepath.Join(filepath.Dir(inputRoot), filepath.Base(inputRoot)+"__remuxed")
+	}
+	return inputRoot, outRoot
+}
+
 // RemuxPath processes a file or a directory tree.
 func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResult, error) {
 	abs, err := fsutil.Abs(root)
@@ -92,14 +118,7 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	if err != nil {
 		return nil, err
 	}
-	inputRoot := abs
-	if !fi.IsDir() {
-		inputRoot = filepath.Dir(abs)
-	}
-	outRoot := r.OutputRoot
-	if outRoot == "" {
-		outRoot = filepath.Join(filepath.Dir(inputRoot), filepath.Base(inputRoot)+"__remuxed")
-	}
+	inputRoot, outRoot := r.Roots(abs, fi.IsDir())
 	if !r.InPlace && !r.DryRun {
 		if err := os.MkdirAll(outRoot, 0o755); err != nil {
 			return nil, err
@@ -108,25 +127,29 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	if r.tier() == "none" && r.InPlace {
 		return nil, fmt.Errorf("refusing --in-place together with verify tier none")
 	}
-	results, err := r.Scanner.ScanPath(ctx, abs)
-	if err != nil {
-		return nil, err
+	// A tree with an unreadable corner still yields every readable file;
+	// the scan error naming the corner is returned after them so the run is
+	// reported as FAIL at run level, the same as scan, clean and ingest do.
+	results, scanErr := r.Scanner.ScanPath(ctx, abs)
+	if scanErr != nil && len(results) == 0 {
+		return nil, scanErr
 	}
 	var out []report.FileResult
 	for _, sc := range results {
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		fr := r.remuxScanned(ctx, sc, inputRoot, outRoot)
+		fr := r.RemuxScanned(ctx, sc, inputRoot, outRoot)
 		if r.Progress != nil {
 			r.Progress(fr)
 		}
 		out = append(out, fr)
 	}
-	return out, nil
+	return out, scanErr
 }
 
-func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, outRoot string) report.FileResult {
+// RemuxScanned remuxes one already scanned file. r.Scanner may be nil.
+func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, outRoot string) report.FileResult {
 	start := time.Now()
 	fr := sc.File
 	defer func() { fr.Duration = time.Since(start) }()
@@ -175,15 +198,32 @@ func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeHardlinked, report.Warn, "hard-linked; replacing in place breaks the link")
 		}
 	}
+	// sameEntry is set when dest and fr.Path are two spellings of one
+	// directory entry, which is what X.MKV against X.mkv is on a
+	// case-insensitive filesystem. That is not a collision: the verified
+	// output replaces the source under its own name and takes the .mkv
+	// spelling last. A hard-linked twin that really is spelled X.mkv is a
+	// distinct entry and stays a collision.
+	sameEntry := false
 	if inPlace {
 		dest = filepath.Join(filepath.Dir(fr.Path), strings.TrimSuffix(filepath.Base(fr.Path), filepath.Ext(fr.Path))+".mkv")
 		if dest != fr.Path {
-			if _, err := os.Lstat(dest); err == nil {
-				fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
-				return fr
+			if dfi, err := os.Lstat(dest); err == nil {
+				if fi != nil && os.SameFile(fi, dfi) && !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
+					sameEntry = true
+				} else {
+					fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
+					return fr
+				}
 			}
 		}
 	} else if _, err := os.Lstat(dest); err == nil {
+		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
+		return fr
+	}
+	// A dry run never writes, so the disk cannot tell it that an earlier
+	// file of this run has already taken dest; the run's own plan does.
+	if r.DryRun && r.plannedCollision(dest) {
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
@@ -197,17 +237,63 @@ func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	}
 	r.describe(&fr, d)
 	if r.DryRun {
+		r.plan(dest)
 		fr.Addf(CodeDryRun, report.Pass, "would write %s", dest)
 		fr.Output = dest
 		return fr
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	// The scan refused symlinks, but a remux takes minutes and mkvmerge
+	// opens whatever the path names when it starts, so the source is
+	// checked again right before it is handed over (guarantee 3). The
+	// check also pins the file's identity: fi is what sat at the path when
+	// this remux began, and every later check requires the same file.
+	if err := sourceUnchanged(fr.Path, fi); err != nil {
 		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 		return fr
 	}
+
+	// In place, the destination sits beside the source in a directory that
+	// exists and was walked without following symlinks. Otherwise the
+	// mirrored directory chain is created component by component so a
+	// symlink planted inside the output tree cannot redirect the remuxed
+	// file outside the root the user named (guarantee 3). The refusal is
+	// reported as REMUX_FAIL because the finding codes are frozen and, from
+	// the caller's point of view, the remux of this file did not happen; the
+	// message carries the reason.
+	if !inPlace {
+		if err := fsutil.MkdirAllUnder(outRoot, filepath.Dir(dest)); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
+	}
+	// The temp file is created here, empty and exclusively, before its name
+	// is handed to mkvmerge, so a symlink planted at the name in the
+	// meantime can only get there by replacing this run's own entry, which
+	// tempUnchanged notices after mkvmerge returns and again before the
+	// output is placed. The handle from the creation stays open until this
+	// function returns, which keeps the inode allocated: a filesystem that
+	// reuses a freed inode number at once (ext4 does) could otherwise give
+	// it to a file created at the name after a removal, and that file would
+	// pass every identity check as this run's own. In place, the output then
+	// takes the source's mode,
+	// ownership and time through a descriptor that takeIdentity opens
+	// without following a link and checks against the same identity, so no
+	// metadata write ever goes through the temp name; placedOwn and
+	// replacedOwn examine the placed entry afterwards, because the
+	// placement primitive uses the name once more after that last check.
+	// mkvmerge writing through a planted link would
+	// otherwise be verified through that link and the link itself placed.
+	// cleanup removes whatever sits at the name; os.Remove never follows a
+	// link, so a planted one is removed and its target is left alone.
 	tmp := fsutil.TempName(dest)
-	_ = os.Remove(tmp)
+	own, err := createTemp(tmp)
+	if err != nil {
+		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+		return fr
+	}
+	defer own.Close()
+	created := own.Info()
 	cleanup := func() { _ = os.Remove(tmp) }
 
 	args := r.mkvmergeArgs(tmp, sc.Info, d)
@@ -220,6 +306,11 @@ func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	if res.ExitCode >= 2 {
 		cleanup()
 		fr.Add(report.Finding{Code: CodeRemuxFail, Severity: report.Fail, Message: "mkvmerge failed", Detail: strings.TrimSpace(string(res.Stdout) + string(res.Stderr))})
+		return fr
+	}
+	if err := tempUnchanged(tmp, created); err != nil {
+		cleanup()
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 		return fr
 	}
 	if res.ExitCode == 1 {
@@ -256,26 +347,424 @@ func (r *Remuxer) remuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		fr.Addf(CodeRemuxFail, report.Fail, "fsync: %v", err)
 		return fr
 	}
-	if inPlace {
-		if err := fsutil.ReplaceInPlace(tmp, fr.Path); err != nil {
+	// Verification read the temp file by name, so the name must still lead
+	// to the file this run created before that file is placed anywhere.
+	if err := tempUnchanged(tmp, created); err != nil {
+		cleanup()
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
+		return fr
+	}
+	if !inPlace {
+		// Only a file that appeared at dest is OUTPUT_EXISTS; any other
+		// placement failure, such as a directory that became unwritable,
+		// is a failed remux and says so.
+		if beforePlace != nil {
+			beforePlace(tmp, dest)
+		}
+		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
+			cleanup()
+			if errors.Is(err, fsutil.ErrExists) {
+				fr.Addf(CodeOutputExists, report.Fail, "%v", err)
+			} else {
+				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
+			}
+			return fr
+		}
+		// tempUnchanged looked at the name and PlaceNoClobber then used
+		// it again, so the entry now at dest is checked against the file
+		// this run created before it is reported as placed.
+		if err := placedOwn(dest, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
+		fr.Output = dest
+		fr.Addf(CodePlaced, report.Pass, "written and verified")
+		return fr
+	}
+	// In place. The source is checked once more before it is replaced or
+	// removed: a symlink planted during the run is never followed, and a
+	// different file renamed onto the path after the last read of the
+	// source is never replaced or deleted, because what was rebuilt and
+	// verified is not that file.
+	if err := sourceUnchanged(fr.Path, fi); err != nil {
+		cleanup()
+		fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the unplaced output was discarded", err)
+		return fr
+	}
+	switch {
+	case dest == fr.Path || sameEntry:
+		// The verified output replaces the source under the source's own
+		// name. When only the extension case differs the entry is renamed
+		// to the .mkv spelling last; it is the same entry, so that rename
+		// cannot replace any other file.
+		//
+		// The output first takes the source's mode, ownership and time
+		// through a descriptor of the file this run created; a symlink
+		// swapped onto the temp name is refused there and its target is
+		// never touched.
+		//
+		// The rename over the source cannot be checked before it happens
+		// without renameat2 or renamex_np, which amuxify does not use, so
+		// a window stays open between that identity copy and the rename:
+		// it needs write access to the source's directory, and a symlink
+		// swapped onto the temp name in it is renamed over the source as a
+		// link. The entry is examined right after the rename; when it is
+		// not the file this run built the source is already gone, so the
+		// entry is reported and left alone, never followed and never
+		// removed.
+		if beforeIdentity != nil {
+			beforeIdentity(tmp, fr.Path)
+		}
+		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
+			return fr
+		}
+		if beforePlace != nil {
+			beforePlace(tmp, fr.Path)
+		}
+		if err := os.Rename(tmp, fr.Path); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "replace: %v", err)
 			return fr
 		}
-		if dest != fr.Path {
+		if err := replacedOwn(fr.Path, created); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
+		if sameEntry {
 			if err := os.Rename(fr.Path, dest); err != nil {
-				fr.Addf(CodeRemuxFail, report.Fail, "rename to .mkv: %v", err)
+				fr.Output = fr.Path
+				fr.Addf(CodeRemuxFail, report.Fail, "rename to %s: %v; the rebuilt file was left under its original name", dest, err)
 				return fr
 			}
+			if !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
+				// The filesystem kept the original spelling; report the
+				// name that is really there.
+				dest = fr.Path
+			}
 		}
-	} else if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
-		cleanup()
-		fr.Addf(CodeOutputExists, report.Fail, "%v", err)
-		return fr
+	default:
+		// The source keeps a different name (a.mp4 becomes a.mkv). The
+		// output takes the source's identity and is placed under the new
+		// name with the no-clobber primitive, and only then is the source
+		// removed: a file that appeared at dest during the run is never
+		// replaced (guarantee 1), and a crash leaves the source or the
+		// placed output, never Matroska content under the old name. The
+		// identity is copied through a descriptor of the file this run
+		// created, so a symlink swapped onto the temp name is refused and
+		// its target keeps its own mode and time.
+		if beforeIdentity != nil {
+			beforeIdentity(tmp, dest)
+		}
+		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
+			return fr
+		}
+		if beforePlace != nil {
+			beforePlace(tmp, dest)
+		}
+		if err := fsutil.PlaceNoClobber(tmp, dest); err != nil {
+			cleanup()
+			if errors.Is(err, fsutil.ErrExists) {
+				fr.Addf(CodeOutputExists, report.Fail, "%s appeared while the file was being rebuilt; the source was left untouched and the unplaced output was discarded", dest)
+			} else {
+				fr.Addf(CodeRemuxFail, report.Fail, "place: %v", err)
+			}
+			return fr
+		}
+		// The entry at dest must be the file this run created before the
+		// source is removed on its account; a foreign entry is discarded
+		// and the source stays.
+		if err := placedOwn(dest, created); err != nil {
+			cleanup()
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched", err)
+			return fr
+		}
+		// The source is checked one last time now that the output sits at
+		// dest: were it replaced in the meantime, removing it would delete
+		// a file that was never rebuilt. The output is then taken back
+		// again, provided dest still is the file this run placed there.
+		if err := sourceUnchanged(fr.Path, fi); err != nil {
+			if rerr := removeOwn(dest, created); rerr != nil {
+				fr.Output = dest
+				fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the rebuilt file stays at %s: %v", err, dest, rerr)
+				return fr
+			}
+			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the placed output was removed again", err)
+			return fr
+		}
+		if err := os.Remove(fr.Path); err != nil {
+			fr.Output = dest
+			fr.Addf(CodeRemuxFail, report.Fail, "the rebuilt file was placed at %s but the source could not be removed: %v", dest, err)
+			return fr
+		}
 	}
 	fr.Output = dest
 	fr.Addf(CodePlaced, report.Pass, "written and verified")
 	return fr
+}
+
+// sourceUnchanged reports an error when path no longer names the regular
+// file described by was: a symlink planted after the scan, a directory, a
+// device, nothing at all, or another regular file renamed onto the path,
+// which is told apart by inode, size and modification time. The scan's own
+// symlink check does not cover the time a remux takes, so this runs right
+// before the source is opened by a tool and right before it is replaced or
+// removed. A nil was means the file could not be examined when the remux
+// began, and nothing can be proven about it since.
+func sourceUnchanged(path string, was os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("source changed since the scan: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it (changed since the scan)", path)
+	}
+	if !now.Mode().IsRegular() {
+		return fmt.Errorf("%s is no longer a regular file (changed since the scan)", path)
+	}
+	if was == nil {
+		return fmt.Errorf("%s could not be examined when the remux began; nothing was placed", path)
+	}
+	if !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
+		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
+	}
+	return nil
+}
+
+// createTemp clears tmp and creates it empty and exclusively, so that the
+// name mkvmerge writes to belongs to this run before the tool starts. A
+// leftover entry that cannot be removed is an error, as is anything that
+// appears at the name between the removal and the creation. The file gets
+// the mode mkvmerge would give a file it created itself, 0666 under the
+// umask, because in output mode the file is placed as it is; in place,
+// takeIdentity gives it the source's mode before placement. The handle
+// keeps the file open so its inode number cannot be reused by a file
+// swapped onto the name; the caller closes it after the last identity
+// check.
+func createTemp(tmp string) (*fsutil.Temp, error) {
+	own, err := fsutil.CreateTemp(tmp)
+	if err != nil {
+		return nil, fmt.Errorf("temp file: %v", err)
+	}
+	return own, nil
+}
+
+// tempUnchanged reports an error when tmp no longer names the file
+// createTemp made: a symlink or another entry renamed onto the name, or a
+// hard link added to the file, any of which would let the verification or
+// the placement reach a file this run did not create. mkvmerge and
+// mkvpropedit write into the existing file rather than unlinking and
+// recreating it (checked against mkvmerge and mkvpropedit v102, which keep
+// the inode), so the identity survives both tools.
+func tempUnchanged(tmp string, created os.FileInfo) error {
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		return fmt.Errorf("temp file: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", tmp)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+		return fmt.Errorf("%s is not the file this run created", tmp)
+	}
+	if n := fsutil.Nlink(now); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
+	}
+	return nil
+}
+
+// takeIdentity gives the temp file the mode, ownership and modification
+// time of the source at src. The temp name is opened without following a
+// symlink and the open file must be the regular file created describes with
+// no other name; the metadata is then written through that descriptor and
+// the descriptor is closed. Nothing is written by name, so a symlink or a
+// different file swapped onto the temp name after the last tempUnchanged
+// check is refused rather than followed, and the swap is reported in the
+// words tempUnchanged uses.
+func takeIdentity(tmp, src string, created os.FileInfo) error {
+	f, err := fsutil.OpenOwn(tmp, created)
+	if err != nil {
+		return err
+	}
+	if err := fsutil.CopyIdentityTo(f, src); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("identity: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("identity: %v", err)
+	}
+	return nil
+}
+
+// placedOwn reports an error when the entry PlaceNoClobber left at dest is
+// not the regular file described by created. tempUnchanged checks the temp
+// name before placement, but PlaceNoClobber then uses the name again, and
+// os.Link follows a symlink on some systems (macOS among them), so a
+// symlink swapped onto the temp name between the check and the link would
+// place a hard link to the link's target at dest; on the rename fallback
+// the symlink itself would land there. The foreign entry is removed only
+// when removing it cannot delete the last name of any file: a symlink, or
+// a regular file that still has another name, which is what a hard link to
+// a symlink's target is. A regular file whose only name is dest is left in
+// place, because on a filesystem whose inode numbers change across a rename
+// this run's own output would look foreign after the rename fallback, and
+// removing it would delete the only copy of the output. The error says
+// which happened.
+func placedOwn(dest string, created os.FileInfo) error {
+	now, err := os.Lstat(dest)
+	if err != nil {
+		return fmt.Errorf("the output placed at %s could not be examined: %v", dest, err)
+	}
+	if now.Mode().IsRegular() && os.SameFile(created, now) {
+		return nil
+	}
+	if now.Mode()&os.ModeSymlink != 0 || (now.Mode().IsRegular() && fsutil.Nlink(now) >= 2) {
+		_ = os.Remove(dest)
+		return fmt.Errorf("the output was swapped before placement; the entry placed at %s was discarded", dest)
+	}
+	return fmt.Errorf("the entry placed at %s is not the file this run built; it was left in place", dest)
+}
+
+// replacedOwn reports an error when the entry the in-place rename left at path
+// is not the regular file described by created. Unlike placedOwn it never
+// removes anything: the rename has already replaced the source, so whatever
+// sits at path is the only entry left under that name, and a symlink there
+// is reported rather than followed or deleted.
+func replacedOwn(path string, created os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("the entry placed at %s could not be examined: %v; the source it replaced is gone", path, err)
+	}
+	if now.Mode().IsRegular() && os.SameFile(created, now) {
+		return nil
+	}
+	return fmt.Errorf("the entry placed at %s is not the file this run built; the source it replaced is gone and the entry was left in place", path)
+}
+
+// removeOwn removes path only when it still is the regular file described
+// by own, so that a file someone else put there in the meantime is left
+// alone.
+func removeOwn(path string, own os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(own, now) {
+		return fmt.Errorf("%s is not the file this run placed", path)
+	}
+	return os.Remove(path)
+}
+
+// plan records dest as a destination this dry run would write.
+func (r *Remuxer) plan(dest string) {
+	if r.planned == nil {
+		r.planned = map[string][]string{}
+	}
+	dir := filepath.Dir(dest)
+	r.planned[dir] = append(r.planned[dir], filepath.Base(dest))
+}
+
+// plannedCollision reports whether an earlier file of this dry run already
+// plans to write dest. Names are compared exactly, and without regard to
+// case as well when the destination directory's filesystem folds case,
+// because there Ep.mkv and ep.mkv are one entry and the live run fails the
+// second file with OUTPUT_EXISTS.
+func (r *Remuxer) plannedCollision(dest string) bool {
+	dir, base := filepath.Dir(dest), filepath.Base(dest)
+	names := r.planned[dir]
+	if len(names) == 0 {
+		return false
+	}
+	fold := r.foldsCase(dir)
+	for _, n := range names {
+		if n == base || (fold && strings.EqualFold(n, base)) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldsCase reports whether the filesystem holding dir treats two spellings
+// of a name that differ only in case as one entry, as APFS does by default
+// and Windows filesystems do, and caches the answer per directory for the
+// run. Nothing is written to find out, since a dry run changes nothing:
+// starting at dir, or at its nearest existing ancestor when dir does not
+// exist yet (an output tree is not created by a dry run, and a directory
+// is created on the filesystem of its parent), the entry's own name is
+// looked up under a case-flipped spelling and compared with the entry
+// itself. A name without an ASCII letter cannot be flipped, so the walk
+// continues upward; when it reaches the root without an answer the
+// filesystem is taken to be case-sensitive, which compares names exactly.
+func (r *Remuxer) foldsCase(dir string) bool {
+	if v, ok := r.caseFold[dir]; ok {
+		return v
+	}
+	if r.caseFold == nil {
+		r.caseFold = map[string]bool{}
+	}
+	v := foldsCase(dir)
+	r.caseFold[dir] = v
+	return v
+}
+
+func foldsCase(dir string) bool {
+	cur := filepath.Clean(dir)
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		if fi, err := os.Lstat(cur); err == nil {
+			if flipped := flipCase(filepath.Base(cur)); flipped != "" {
+				other, err := os.Lstat(filepath.Join(parent, flipped))
+				return err == nil && os.SameFile(fi, other)
+			}
+		}
+		cur = parent
+	}
+}
+
+// flipCase swaps the case of every ASCII letter in name and returns the
+// empty string when name holds none.
+func flipCase(name string) string {
+	b := []byte(name)
+	found := false
+	for i, c := range b {
+		switch {
+		case 'a' <= c && c <= 'z':
+			b[i] = c - 'a' + 'A'
+			found = true
+		case 'A' <= c && c <= 'Z':
+			b[i] = c - 'A' + 'a'
+			found = true
+		}
+	}
+	if !found {
+		return ""
+	}
+	return string(b)
+}
+
+// hasEntry reports whether dir holds an entry spelled exactly name. On a
+// case-insensitive filesystem Lstat resolves X.mkv to the entry X.MKV, and
+// only the directory listing tells two spellings of one entry from two
+// hard-linked files with different names. When the listing cannot be read
+// the answer is true, which callers treat as a collision.
+func hasEntry(dir, name string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if e.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 func warningsOf(out []byte) string {
@@ -479,15 +968,10 @@ func (r *Remuxer) verifyOutput(ctx context.Context, fr *report.FileResult, src *
 		}
 		fr.Addf(CodeHashOK, report.Pass, "%d stream(s) verified identical to source", n)
 	}
-	switch r.tier() {
-	case "none":
-	case "full":
-		if err := r.Verifier.DecodeFull(ctx, tmp); err != nil {
-			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
-			return false
-		}
-	default:
-		if err := r.Verifier.DecodeHeadTail(ctx, tmp); err != nil {
+	// The output carries the source's video and audio streams, so the
+	// source probe decides whether there is anything to decode.
+	if tier := r.tier(); tier != "none" {
+		if err := r.Verifier.Decode(ctx, tmp, src, tier == "full"); err != nil {
 			fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
 			return false
 		}
@@ -505,8 +989,8 @@ func orNone(s string) string {
 // sameStream compares packet hashes first and falls back to decoded hashes
 // when the source container frames packets differently from Matroska.
 func (r *Remuxer) sameStream(ctx context.Context, src *probe.MediaInfo, s probe.Stream, out *probe.MediaInfo, o probe.Stream) (bool, string, error) {
-	h1, err1 := r.Verifier.StreamHash(ctx, src.Path, s.Index)
-	h2, err2 := r.Verifier.StreamHash(ctx, out.Path, o.Index)
+	h1, err1 := streamHash(ctx, r.Verifier, src.Path, s.Index)
+	h2, err2 := streamHash(ctx, r.Verifier, out.Path, o.Index)
 	if err1 == nil && err2 == nil && h1 != "" && h1 == h2 {
 		return true, "packet", nil
 	}
@@ -514,11 +998,11 @@ func (r *Remuxer) sameStream(ctx context.Context, src *probe.MediaInfo, s probe.
 		return false, "packet", nil
 	}
 	// Different framing is expected across containers; compare samples.
-	d1, err := r.Verifier.DecodedHash(ctx, src.Path, s)
+	d1, err := decodedHash(ctx, r.Verifier, src.Path, s)
 	if err != nil {
 		return false, "", err
 	}
-	d2, err := r.Verifier.DecodedHash(ctx, out.Path, o)
+	d2, err := decodedHash(ctx, r.Verifier, out.Path, o)
 	if err != nil {
 		return false, "", err
 	}

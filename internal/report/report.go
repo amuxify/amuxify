@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Severity orders verdicts from best to worst. The numeric values are the
@@ -115,29 +117,59 @@ func (r *FileResult) Has(code string) bool {
 	return false
 }
 
-// Summary is the run-level report.
+// SchemaID identifies the report shape. It changes only for a breaking change.
+const SchemaID = "amuxify.report/1"
+
+// HookInfo records the adapter that started an ingest run (hook runs only).
+type HookInfo struct {
+	Adapter  string `json:"adapter"`
+	Event    string `json:"event"`
+	Label    string `json:"label,omitempty"`
+	Category string `json:"category,omitempty"`
+	FailOn   string `json:"fail_on"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// Summary is the run-level report. Its JSON form is the wire format that
+// docs/report.md documents and that TestFieldSetFrozen pins: fields are only
+// ever added, and the arrays and maps are present and empty rather than
+// absent or null.
 type Summary struct {
+	Schema   string         `json:"schema"`
 	Tool     string         `json:"tool"`
 	Version  string         `json:"version"`
 	Command  string         `json:"command"`
-	Profile  string         `json:"profile,omitempty"`
+	Profile  string         `json:"profile"`
+	Hook     *HookInfo      `json:"hook,omitempty"`
 	Started  time.Time      `json:"started"`
 	Finished time.Time      `json:"finished"`
 	Verdict  Severity       `json:"verdict"`
 	Counts   map[string]int `json:"counts"`
 	Files    []FileResult   `json:"files"`
-	Errors   []string       `json:"errors,omitempty"`
+	Errors   []string       `json:"errors"`
 }
+
+// now returns the current time in UTC with whole seconds, so timestamps
+// marshal as RFC 3339 with a Z suffix and no fraction.
+func now() time.Time { return time.Now().UTC().Truncate(time.Second) }
 
 // NewSummary starts a report for one run.
 func NewSummary(tool, version, command, profile string) *Summary {
-	return &Summary{Tool: tool, Version: version, Command: command, Profile: profile,
-		Started: time.Now(), Counts: map[string]int{}}
+	return &Summary{Schema: SchemaID, Tool: tool, Version: version, Command: command, Profile: profile,
+		Started: now(), Counts: map[string]int{}, Files: []FileResult{}, Errors: []string{}}
 }
 
-// Append records a file result and updates counts and the run verdict.
+// Append records a file result and updates counts and the run verdict. A
+// result without findings is stored with an empty findings slice so that it
+// marshals as an empty array.
 func (s *Summary) Append(r FileResult) {
 	r.Millis = r.Duration.Milliseconds()
+	if r.Findings == nil {
+		r.Findings = []Finding{}
+	}
+	if s.Counts == nil {
+		s.Counts = map[string]int{}
+	}
 	s.Files = append(s.Files, r)
 	s.Counts[r.Verdict.String()]++
 	s.Verdict = Worst(s.Verdict, r.Verdict)
@@ -150,9 +182,33 @@ func (s *Summary) Error(msg string) {
 }
 
 // Close stamps the finish time.
-func (s *Summary) Close() { s.Finished = time.Now() }
+func (s *Summary) Close() { s.Finished = now() }
 
-// WriteJSON emits the machine-readable form.
+// MarshalJSON normalises the collections so that a Summary assembled by hand,
+// without NewSummary or Append, still marshals with present, empty arrays and
+// maps rather than null. The caller's slices are never modified.
+func (s Summary) MarshalJSON() ([]byte, error) {
+	type plain Summary
+	p := plain(s)
+	if p.Counts == nil {
+		p.Counts = map[string]int{}
+	}
+	if p.Errors == nil {
+		p.Errors = []string{}
+	}
+	files := make([]FileResult, len(p.Files))
+	for i, f := range p.Files {
+		if f.Findings == nil {
+			f.Findings = []Finding{}
+		}
+		files[i] = f
+	}
+	p.Files = files
+	return json.Marshal(p)
+}
+
+// WriteJSON emits the machine-readable form: one indented object followed by
+// a newline.
 func (s *Summary) WriteJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -170,25 +226,28 @@ func (s *Summary) WriteHuman(w io.Writer, verbose bool) {
 
 // WriteHuman prints one file's verdict line and its findings. Used both for
 // the final report and for streaming a result as soon as the file is done.
+// Every value that came from a file or a caller goes through Sanitize, so
+// the line structure of the terminal form is amuxify's own: a file name
+// cannot end a line early, forge a verdict line or hide characters.
 func (f *FileResult) WriteHuman(w io.Writer, verbose bool) {
-	fmt.Fprintf(w, "%-5s %s\n", f.Verdict, f.Path)
+	fmt.Fprintf(w, "%-5s %s\n", f.Verdict, Sanitize(f.Path))
 	for _, fd := range f.Findings {
 		if fd.Severity == Pass && !verbose {
 			continue
 		}
-		fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, fd.Message)
+		fmt.Fprintf(w, "      %-5s %-18s %s\n", fd.Severity, fd.Code, Sanitize(fd.Message))
 		if verbose && fd.Detail != "" {
 			for _, line := range strings.Split(fd.Detail, "\n") {
-				fmt.Fprintf(w, "            %s\n", line)
+				fmt.Fprintf(w, "            %s\n", Sanitize(line))
 			}
 		}
 	}
 	if f.Output != "" {
-		fmt.Fprintf(w, "      -> %s\n", f.Output)
+		fmt.Fprintf(w, "      -> %s\n", Sanitize(f.Output))
 	}
 	if verbose {
 		for _, a := range f.Actions {
-			fmt.Fprintf(w, "      * %s\n", a)
+			fmt.Fprintf(w, "      * %s\n", Sanitize(a))
 		}
 	}
 }
@@ -196,7 +255,7 @@ func (f *FileResult) WriteHuman(w io.Writer, verbose bool) {
 // WriteHumanTail prints run-level errors and the count line.
 func (s *Summary) WriteHumanTail(w io.Writer) {
 	for _, e := range s.Errors {
-		fmt.Fprintf(w, "ERROR %s\n", e)
+		fmt.Fprintf(w, "ERROR %s\n", Sanitize(e))
 	}
 	keys := make([]string, 0, len(s.Counts))
 	for k := range s.Counts {
@@ -208,4 +267,68 @@ func (s *Summary) WriteHumanTail(w io.Writer) {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, s.Counts[k]))
 	}
 	fmt.Fprintf(w, "\n%s: %d file(s) %s\n", s.Verdict, len(s.Files), strings.Join(parts, " "))
+}
+
+// Sanitize returns s with every character that could reshape terminal or
+// log output replaced by a visible escape: a control character other than
+// tab (0x00-0x1F, 0x7F and the C1 range 0x80-0x9F) becomes \xNN, and every
+// Unicode format character (general category Cf: the bidirectional
+// controls, zero-width characters, the byte order mark, the soft hyphen,
+// the tag characters and the other invisible ones) and the line and
+// paragraph separators become \uNNNN, or \UNNNNNNNN above U+FFFF so the
+// escape cannot be confused with a shorter one followed by a hex digit. The
+// human report writers and the hook log lines use it, so a file name
+// carrying an escape sequence, a carriage return, a newline or a bidi
+// override cannot overwrite, split or reorder a line. Bytes that are not
+// valid UTF-8 pass through unchanged, as the terminal form promises. The
+// JSON form is untouched: it carries the raw value with JSON escaping.
+func Sanitize(s string) string {
+	i := 0
+	for i < len(s) {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if !(r == utf8.RuneError && n == 1) && sanitized(r) {
+			break
+		}
+		i += n
+	}
+	if i >= len(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	b.WriteString(s[:i])
+	for i < len(s) {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n == 1:
+			b.WriteByte(s[i])
+		case !sanitized(r):
+			b.WriteString(s[i : i+n])
+		case r < 0x100:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		case r > 0xFFFF:
+			fmt.Fprintf(&b, `\U%08x`, r)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+		i += n
+	}
+	return b.String()
+}
+
+// sanitized reports whether Sanitize replaces r: the C0 and C1 controls and
+// DEL except tab, every format character (unicode.Cf, which holds the bidi
+// controls, the zero-width characters, the byte order mark, the soft
+// hyphen, the tag characters and the rest of the invisible ones), and the
+// line and paragraph separators. The category test, rather than a list of
+// code points, is what keeps a newly noticed invisible character from
+// slipping through.
+func sanitized(r rune) bool {
+	switch {
+	case r == '\t':
+		return false
+	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		return true
+	}
+	return unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029
 }
