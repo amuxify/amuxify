@@ -28,7 +28,8 @@ SECURITY.md.
    crash leaves at most a temp file, which the next run ignores. Only a name
    of exactly that shape is ignored: a file that borrows the `.amuxify-`
    prefix without the `.tmp` suffix is scanned like any other.
-   Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`.
+   Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`,
+   `cli.TestWatchInterruptedExitsClean` (a watcher stopped mid-pass leaves none).
 3. **Symlinks are never followed.** Each symlink is reported `WARN SYMLINK` and
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
    A symlink swapped onto the temp name during a run is refused before the
@@ -37,9 +38,14 @@ SECURITY.md.
    temp file is held open from its creation until the last of those checks,
    so its inode number cannot be freed and handed to a file swapped onto the
    name, as ext4 would do at once.
+   `watch` lists symlinks without following them, refuses a directory that
+   was replaced by a symlink between two passes, and checks the whole path
+   again right before each ingest.
    Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
    `fsutil.TestCreateTempPinsInode`, `remux.TestTempSwappedBeforePlacementRefused`,
-   `clean.TestMp4RewriteRefusesSwappedTemp`.
+   `clean.TestMp4RewriteRefusesSwappedTemp`, `watch.TestSymlinkIsSkippedAndNoticedOnce`,
+   `watch.TestDirectoryReplacedBySymlinkIsNotFollowed`, `watch.TestRecheckRefusesEveryChange`,
+   `watch.TestRootSwappedForSymlinkIsRefused`, `cli.TestWatchSymlinkIsSkipped`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make
@@ -59,22 +65,30 @@ SECURITY.md.
    `security.*` are never touched.
    Test: `clean.TestStripXattrsOnlyListedNamespaces`.
 8. **No unverified in-place writes.** `--verify none` with `--in-place` is a
-   usage error, and `ingest` and every hook adapter refuse verify tier `none`
-   whether it comes from the flag or from the profile.
-   Test: `remux.TestInPlaceVerifyNoneRefused`, `ingest.TestVerifyNoneRefusedFromFlagAndProfile`.
+   usage error, and `ingest`, `watch` and every hook adapter refuse verify
+   tier `none` whether it comes from the flag or from the profile.
+   Test: `remux.TestInPlaceVerifyNoneRefused`, `ingest.TestVerifyNoneRefusedFromFlagAndProfile`,
+   `cli.TestWatchUsage`.
 9. **BLOCK is final.** No flag, profile key or environment variable turns a
    BLOCK into anything else.
    Test: `remux.TestBlockRefusedEvenWithForce`, `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`.
 10. **No root by accident.** Modifying commands refuse to run as uid 0 unless
     `--allow-root`, because a hook container running as root would leave
     root-owned files in the library.
-    Test: `cli.TestSetupRefusesRoot`.
+    Test: `cli.TestSetupRefusesRoot`, `cli.TestWatchRefusesRoot`.
 
-`ingest` and the hook adapters are compositions of scan, remux and clean and
-add no write path of their own; a file is rebuilt by the same remux code,
-edited by the same mkvpropedit call `clean` uses, or left alone, and a
+`ingest`, `watch` and the hook adapters are compositions of scan, remux and
+clean and add no write path of their own; a file is rebuilt by the same remux
+code, edited by the same mkvpropedit call `clean` uses, or left alone, and a
 hard-linked file is never edited in place. Every guarantee above applies to
-them unchanged. A hook never turns a client job into a failed one for a WARN
+them unchanged. `watch` adds only a decision about when to hand a file to
+ingest: a file is handed over once it has been seen unchanged in size,
+modification time and identity for the settle window, and is checked again
+right before the hand-over (`watch.TestGrowingFileIsNotIngested`,
+`watch.TestSwappedFileIsNew`, `watch.TestChangedDuringIngestIsIngestedAgain`).
+The quarantine directory is excluded from the walk as in ingest and refused
+as the watched directory (`cli.TestWatchQuarantineAndSidecarWiring`), and a
+hostile file name reaches the terminal escaped (`cli.TestWatchEscapesHostileNames`). A hook never turns a client job into a failed one for a WARN
 or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
 
 ## What scan looks at
