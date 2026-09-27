@@ -447,6 +447,16 @@ func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *p
 				Message: fmt.Sprintf("stream #%d subtitle text contains %d link(s): %s", st.Index, len(links), strings.Join(links, ", ")),
 				Detail:  strings.Join(links, "\n")})
 		}
+		if res.OutputTruncated {
+			// The runner kept only the first part of the track, so a link
+			// placed after the cut was never seen. The track is reported at
+			// the same severity as a link, because a text track longer than
+			// the runner keeps is not something a subtitle needs to be and a
+			// file padded to reach the cut is exactly how a link would hide.
+			fr.Add(report.Finding{Code: CodeLinkInSubs, Severity: ssev,
+				Message: fmt.Sprintf("stream #%d subtitle text is longer than the runner keeps and was not fully checked for links", st.Index),
+				Detail:  fmt.Sprintf("only the first %d bytes of the extracted track were inspected", len(res.Stdout))})
+		}
 	}
 }
 
@@ -500,12 +510,15 @@ const DefaultClamTimeout = 30 * time.Minute
 
 // The bounds on what a finding keeps of the clamscan output. A scanner
 // that floods its output, or an output crafted to look like a report,
-// cannot grow the finding beyond these.
+// cannot grow the finding beyond these. The per-line and message bounds
+// are applied to the raw text before it is sanitised, so an escaped
+// control byte can make a kept line up to six times longer; the bound on
+// the whole detail counts the sanitised lines and holds as written.
 const (
 	clamDetailLines  = 8    // lines kept in the finding detail
 	clamLineBytes    = 512  // bytes kept of each line, before sanitising
-	clamDetailBytes  = 4096 // bytes kept in the whole detail, before sanitising
-	clamMessageBytes = 200  // bytes kept of the error line in the message
+	clamDetailBytes  = 4096 // bytes of sanitised lines kept in the whole detail
+	clamMessageBytes = 200  // bytes kept of the error line in the message, before sanitising
 )
 
 func (s *Scanner) clamTimeout() time.Duration {
@@ -521,6 +534,15 @@ func (s *Scanner) clamTimeout() time.Duration {
 // scanner can raise or lower it. What is kept of the output for the
 // finding is bounded and sanitised by clamDetail. It returns true when the
 // scan of this file should stop here.
+//
+// A scanner that produced no verdict, because it could not start, was
+// killed at the timeout or exited with a status other than 0 or 1, is
+// WARN CLAMAV_ERROR under an optional scan and the file is probed like
+// any other. Under a required scan the same outcome is FAIL CLAMAV_ERROR
+// and the scan of the file stops there, the same as a missing scanner:
+// a profile that requires the scan must not let a file through that was
+// never scanned, and both a short --timeout and a scanner without a
+// signature database would otherwise turn "required" into a pass.
 func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
@@ -536,12 +558,16 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 		}
 		return false
 	}
+	sev, stop := report.Warn, false
+	if mode == "required" {
+		sev, stop = report.Fail, true
+	}
 	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, "--no-summary", "--infected", "--", path)
 	if err != nil {
 		// A start failure or a timeout: the child was killed or never ran,
 		// so there is no exit status to read a verdict from.
-		fr.Addf(CodeClamError, report.Warn, "%s", clamText(err.Error(), clamMessageBytes))
-		return false
+		fr.Addf(CodeClamError, sev, "%s", clamText(err.Error(), clamMessageBytes))
+		return stop
 	}
 	switch res.ExitCode {
 	case 0:
@@ -550,38 +576,63 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 		fr.Add(report.Finding{Code: CodeClamInfected, Severity: report.Block, Message: "clamscan reports infected", Detail: clamDetail(res, path)})
 		return true
 	default:
-		fr.Add(report.Finding{Code: CodeClamError, Severity: report.Warn,
-			Message: fmt.Sprintf("clamscan exit %d: %s", res.ExitCode, clamText(firstLine(res.Stderr), clamMessageBytes)),
+		fr.Add(report.Finding{Code: CodeClamError, Severity: sev,
+			Message: clamErrorMessage(res, path),
 			Detail:  clamDetail(res, path)})
-		return false
+		return stop
 	}
+}
+
+// clamErrorMessage is the message of a CLAMAV_ERROR finding for a scanner
+// that exited with a status other than 0 or 1. It carries the first line
+// of standard error, where libclamav reports a failure to load the
+// signature database, or, when that is empty, the first line about the
+// scanned file on standard output, where clamscan reports a file it could
+// not open ("<path>: Can't open file ERROR"). When neither says anything
+// the message says so rather than ending in a bare colon.
+func clamErrorMessage(res *exec.Result, path string) string {
+	line := firstLine(res.Stderr)
+	if line == "" {
+		line = firstLineWithPrefix(res.Stdout, path+":")
+	}
+	if line == "" {
+		return fmt.Sprintf("clamscan exit %d with no message", res.ExitCode)
+	}
+	return fmt.Sprintf("clamscan exit %d: %s", res.ExitCode, clamText(line, clamMessageBytes))
 }
 
 // clamDetail returns the lines of the clamscan output that refer to the
 // scanned file, which clamscan prints as "<path>: <signature> FOUND" or
 // "<path>: <reason> ERROR", each cut to clamLineBytes and sanitised, at
-// most clamDetailLines of them and clamDetailBytes in all. Every other
-// line is dropped: a summary block, a line about some other path, or text
-// crafted to read like a verdict never reaches the report. When no line
-// refers to the file the detail says so rather than carrying anything
-// else the scanner printed.
+// most clamDetailLines of them and clamDetailBytes of sanitised text in
+// all. Every other line is dropped: a summary block, a line about some
+// other path, or text crafted to read like a verdict never reaches the
+// report. When no line refers to the file the detail says so rather than
+// carrying anything else the scanner printed.
+//
+// The output is walked in place, one line at a time, and nothing of it is
+// copied until a line has passed the prefix test, so the memory the call
+// takes is bounded by the detail it returns and not by what the scanner
+// printed: the runner keeps up to its MaxOutput of each stream, and
+// splitting that into lines first would cost a string header per newline.
 func clamDetail(res *exec.Result, path string) string {
-	prefix := path + ":"
+	prefix := []byte(path + ":")
 	var lines []string
 	total, more := 0, 0
 	for _, raw := range [][]byte{res.Stdout, res.Stderr} {
-		for _, line := range strings.Split(string(raw), "\n") {
-			if !strings.HasPrefix(line, prefix) {
-				continue
+		eachLine(raw, func(line []byte) bool {
+			if !bytes.HasPrefix(line, prefix) {
+				return true
 			}
 			if len(lines) >= clamDetailLines || total >= clamDetailBytes {
 				more++
-				continue
+				return true
 			}
-			line = clamText(line, clamLineBytes)
-			total += len(line)
-			lines = append(lines, line)
-		}
+			s := clamText(string(line), clamLineBytes)
+			total += len(s)
+			lines = append(lines, s)
+			return true
+		})
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "no line of the clamscan output refers to this file")
@@ -593,6 +644,22 @@ func clamDetail(res *exec.Result, path string) string {
 		lines = append(lines, "clamscan output was longer than the runner keeps and was cut")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// eachLine calls fn with every newline-separated line of b, without the
+// trailing newline and without copying b, until fn returns false.
+func eachLine(b []byte, fn func(line []byte) bool) {
+	for len(b) > 0 {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			fn(b)
+			return
+		}
+		if !fn(b[:i]) {
+			return
+		}
+		b = b[i+1:]
+	}
 }
 
 // clamText bounds s to max bytes, cut on a rune boundary, and passes it
@@ -612,14 +679,28 @@ func clamText(s string, max int) string {
 }
 
 // firstLine returns the first non-blank line of b, or "" when there is
-// none.
+// none. Like clamDetail it walks b in place so a flood of blank lines
+// costs nothing to skip.
 func firstLine(b []byte) string {
-	for _, line := range strings.Split(string(b), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return line
+	return firstLineWithPrefix(b, "")
+}
+
+// firstLineWithPrefix returns the first non-blank line of b that starts
+// with prefix, trimmed, or "" when there is none.
+func firstLineWithPrefix(b []byte, prefix string) string {
+	var found string
+	p := []byte(prefix)
+	eachLine(b, func(line []byte) bool {
+		if !bytes.HasPrefix(line, p) {
+			return true
 		}
-	}
-	return ""
+		if t := bytes.TrimSpace(line); len(t) > 0 {
+			found = string(t)
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 var polySigs = [][]byte{

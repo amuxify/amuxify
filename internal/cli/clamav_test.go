@@ -32,12 +32,19 @@ func noClamscan(t *testing.T) {
 // scanned file (its last argument) as infected and exits 1.
 func fakeClamscan(t *testing.T) {
 	t.Helper()
+	fakeClamscanScript(t, `printf '%s: Eicar-Test-Signature FOUND\n' "$last"; exit 1`)
+}
+
+// fakeClamscanScript installs a POSIX shell script as clamscan with the
+// given body, in which "$last" is the scanned path.
+func fakeClamscanScript(t *testing.T, body string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake clamscan is a POSIX shell script")
 	}
 	noClamscan(t)
 	p := filepath.Join(t.TempDir(), "clamscan")
-	script := "#!/bin/sh\nfor last; do :; done\nprintf '%s: Eicar-Test-Signature FOUND\\n' \"$last\"\nexit 1\n"
+	script := "#!/bin/sh\nfor last; do :; done\n" + body + "\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -233,4 +240,71 @@ func TestClamscanInfectedBlocksEverywhere(t *testing.T) {
 		}
 	}
 	unchanged(t, before, tree(t, dir))
+}
+
+// Guarantee 9, from the command line: under the strict profile a
+// --timeout short enough to kill clamscan does not turn the scan into a
+// pass. scan and ingest report FAIL CLAMAV_ERROR and exit 3, --force does
+// not rebuild the file, every hook adapter reports its caller's failure
+// code under the default --fail-on, and nothing under the directory
+// changes. A clamscan with no signature database is the same FAIL at run
+// time, and doctor --profile strict exits 2 for it with the database row
+// marked missing, so the two states doctor reports as ready and the scan
+// lets through agree.
+func TestClamscanErrorFailsStrictEverywhere(t *testing.T) {
+	testutil.Stubs(t)
+	asUser(t, 1000)
+	dir := t.TempDir()
+	media := write(t, filepath.Join(dir, "a.mkv"), ebml)
+	before := tree(t, dir)
+	fakeClamscanScript(t, `exec sleep 5`)
+	for _, args := range [][]string{
+		{"--profile", "strict", "--timeout", "300ms", "scan", media},
+		{"--profile", "strict", "--timeout", "300ms", "scan", "--clamav", media},
+		{"--profile", "strict", "--timeout", "300ms", "ingest", media},
+		{"--profile", "strict", "--timeout", "300ms", "ingest", "--force", media},
+	} {
+		code, out, errs := run(t, args...)
+		if code != 3 || !strings.HasPrefix(out, "FAIL  "+media+"\n      FAIL  CLAMAV_ERROR       clamscan: timed out after 300ms\n") {
+			t.Errorf("%v: exit %d\nstdout: %s\nstderr: %s", args, code, out, errs)
+		}
+		if strings.Contains(out, "UNPARSEABLE") {
+			t.Errorf("%v: the file was probed after the scanner was killed:\n%s", args, out)
+		}
+	}
+	for _, a := range adapters {
+		want := 1
+		if a == "nzbget" {
+			want = 94
+		}
+		hookEnv(t, jobEnv(a, media)...)
+		code, out, errs := run(t, "--profile", "strict", "--timeout", "300ms", "hook", a)
+		if code != want || !strings.Contains(out, "FAIL  CLAMAV_ERROR") {
+			t.Errorf("hook %s: exit %d, want %d\nstdout: %s\nstderr: %s", a, code, want, out, errs)
+		}
+	}
+	unchanged(t, before, tree(t, dir))
+	// The archive profile under the same timeout warns and carries on.
+	code, out, _ := run(t, "--profile", "archive", "--timeout", "300ms", "--json", "scan", media)
+	codes := findingCodes(t, out)
+	if code != 3 || !hasCode(codes, scan.CodeClamError) || !hasCode(codes, scan.CodeUnparseable) {
+		t.Errorf("archive: exit %d codes %v", code, codes)
+	}
+
+	fakeClamscanScript(t, `case "$1" in --version) printf 'ClamAV 1.4.2\n'; exit 0;; esac; printf 'LibClamAV Error: cli_loaddbdir: No supported database files found in /var/lib/clamav\n' >&2; exit 2`)
+	code, out, _ = run(t, "--profile", "strict", "--verbose", "scan", media)
+	if code != 3 || !strings.Contains(out, "      FAIL  CLAMAV_ERROR       clamscan exit 2: LibClamAV Error: cli_loaddbdir: No supported database files found in /var/lib/clamav\n") {
+		t.Errorf("no database: exit %d\n%s", code, out)
+	}
+	code, out, _ = run(t, "--profile", "strict", "doctor")
+	if code != 2 || !strings.Contains(out, "MISSING  clamav-db    profile requires clamscan but it has no signature database; run freshclam to download one\n") {
+		t.Errorf("doctor without a database: exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "PASS     clamscan     ") || strings.Contains(out, "MISSING  clamav       ") {
+		t.Errorf("doctor tool rows:\n%s", out)
+	}
+	code, out, _ = run(t, "--profile", "archive", "doctor")
+	if strings.Contains(out, "MISSING  clamav-db") || !strings.Contains(out, "PASS     clamav-db    no signature database version") {
+		t.Errorf("archive doctor without a database: exit %d\n%s", code, out)
+	}
 }

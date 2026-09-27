@@ -2132,12 +2132,20 @@ func TestIngestQuarantineInsideTree(t *testing.T) {
 // tool stays missing.
 func fakeClamscan(t *testing.T) {
 	t.Helper()
+	fakeClamscanScript(t, `printf '%s: Eicar-Test-Signature FOUND\n' "$last"; exit 1`)
+}
+
+// fakeClamscanScript installs a POSIX shell script as clamscan with the
+// given body, in which "$last" is the scanned path. Every other tool stays
+// missing.
+func fakeClamscanScript(t *testing.T, body string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake clamscan is a POSIX shell script")
 	}
 	noTools(t)
 	p := filepath.Join(t.TempDir(), "clamscan")
-	script := "#!/bin/sh\nfor last; do :; done\nprintf '%s: Eicar-Test-Signature FOUND\\n' \"$last\"\nexit 1\n"
+	script := "#!/bin/sh\nfor last; do :; done\n" + body + "\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2234,6 +2242,77 @@ func TestClamscanInfectedRefusedEvenWithForce(t *testing.T) {
 					t.Errorf("force=%v: not in quarantine: %v", force, err)
 				}
 			}
+		}
+	}
+}
+
+// Guarantee 9: under the strict profile a clamscan that produced no
+// verdict, whether it ran past a short timeout or exited 2 because no
+// signature database is loaded, is FAIL CLAMAV_ERROR and the file is
+// refused with or without --force: only clamscan ran on it, nothing under
+// the directory changed, and the sidecar next to it is unaffected. Under
+// the archive profile the same scanner is a WARN and the file goes on to
+// the probe, which is what the lenient tests elsewhere pin.
+func TestClamscanErrorRefusedUnderStrict(t *testing.T) {
+	cases := []struct {
+		name, body string
+		timeout    time.Duration
+	}{
+		{"timeout", `exec sleep 5`, 300 * time.Millisecond},
+		{"no database", `printf 'LibClamAV Error: cli_loaddbdir: No supported database files found\n' >&2; exit 2`, 10 * time.Second},
+	}
+	for _, tc := range cases {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s force=%v", tc.name, force), func(t *testing.T) {
+				fakeClamscanScript(t, tc.body)
+				dir := t.TempDir()
+				media := write(t, filepath.Join(dir, "a.mkv"), ebml+strings.Repeat("x", 100))
+				write(t, filepath.Join(dir, "a.srt"), "1\n00:00:01,000 --> 00:00:02,000\nhello\n")
+				in, tr := newIngester(t, &exec.Runner{Timeout: 2 * time.Minute, WaitDelay: time.Second}, mustProfile(t, "strict"))
+				in.Force = force
+				in.Scanner.Timeout = tc.timeout
+				in.apply(t)
+				before := snapshot(t, dir)
+				res, err := in.IngestPath(context.Background(), dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := byBase(res)
+				fr := got["a.mkv"]
+				if fr.Verdict != report.Fail || !fr.Has(scan.CodeClamError) || !fr.Has(remux.CodeRefused) || fr.Has(scan.CodeUnparseable) {
+					t.Errorf("%s %v", fr.Verdict, codes(fr))
+				}
+				if f, _ := finding(fr, scan.CodeClamError); f.Severity != report.Fail {
+					t.Errorf("finding %s %q", f.Severity, f.Message)
+				}
+				if r, _ := route(t, fr); r != RouteSkip {
+					t.Errorf("route %s", r)
+				}
+				if srt := got["a.srt"]; srt.Verdict != report.Pass || srt.Has(scan.CodeClamError) {
+					t.Errorf("sidecar %s %v", srt.Verdict, codes(srt))
+				}
+				for _, line := range tr.all() {
+					if !strings.Contains(line, "clamscan") {
+						t.Errorf("a tool other than clamscan ran: %s", line)
+					}
+				}
+				sameSnapshot(t, before, snapshot(t, dir))
+				if _, err := os.Lstat(media); err != nil {
+					t.Error(err)
+				}
+				// The archive profile keeps the file usable and probes it.
+				in, _ = newIngester(t, &exec.Runner{Timeout: 2 * time.Minute, WaitDelay: time.Second}, mustProfile(t, "archive"))
+				in.Scanner.Timeout = tc.timeout
+				in.apply(t)
+				res, err = in.IngestPath(context.Background(), dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fr = byBase(res)["a.mkv"]
+				if f, _ := finding(fr, scan.CodeClamError); f.Severity != report.Warn || !fr.Has(scan.CodeUnparseable) {
+					t.Errorf("archive: %s %v", fr.Verdict, codes(fr))
+				}
+			})
 		}
 	}
 }

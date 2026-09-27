@@ -144,12 +144,15 @@ Whether a scan runs is decided by the profile's `safety.clamav` key and the
 The `strict` profile requires clamscan: without it `doctor` exits 2 with
 `MISSING  clamav  profile requires clamscan but it is not installed`, and
 `scan`, `ingest` and the hook adapters fail every media file with
-`CLAMAV_MISSING`. One clamscan call is bounded by `--timeout` when given and
+`CLAMAV_MISSING`, and a clamscan that has no signature database makes
+`doctor` exit 2 with `MISSING  clamav-db` and fails every media file with
+`CLAMAV_ERROR`. One clamscan call is bounded by `--timeout` when given and
 by 30 minutes otherwise; a scanner that runs past it is killed and the file
-is reported `WARN CLAMAV_ERROR` rather than blocking the run. Every call
-loads the whole signature database before it reads the file, which takes
-several seconds on a slow machine, so a large tree scans noticeably slower
-with ClamAV on.
+is reported `WARN CLAMAV_ERROR` under an optional scan, which does not block
+the run, and `FAIL CLAMAV_ERROR` under a required one, which refuses the
+file. Every call loads the whole signature database before it reads the
+file, which takes several seconds on a slow machine, so a large tree scans
+noticeably slower with ClamAV on.
 
 The `locale` line shows the locale every tool is run under. amuxify keeps your
 own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale (messages are

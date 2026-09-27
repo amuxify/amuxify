@@ -265,3 +265,65 @@ func TestClamscanMissingWithRequiredProfile(t *testing.T) {
 		t.Fatal("optional profile produced the required-clamscan row")
 	}
 }
+
+// Under a profile that requires the scan, a clamscan with no signature
+// database is a missing requirement (exit 2 in the CLI), because every
+// scan would exit 2 and fail every media file; with a database, old or
+// not, the row passes as it does for an optional profile. The row is
+// keyed on the version line, so a scanner whose version cannot be parsed
+// for a database counts as having none.
+func TestClamscanDatabaseRequiredByProfile(t *testing.T) {
+	cases := []struct {
+		name, line string
+		want       report.Severity
+	}{
+		{"no database", "ClamAV 1.2.1", report.Usage},
+		{"blank version", "", report.Usage},
+		{"hostile version", "ClamAV 1.2.1\x1b[2K\r‮/27000/Sat Sep 26 08:33:45 2026", report.Pass},
+		{"stale database", "ClamAV 1.4.0/26900/Mon May 11 07:46:16 2026", report.Pass},
+		{"fresh database", "ClamAV 1.2.1/27000/Sat Sep 26 08:33:45 2026", report.Pass},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeTool(t, exec.ClamScan, tc.line, "", 0)
+			checks, worst := runProfile(t, "strict", exec.ClamScan, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract, exec.FFmpeg, exec.FFprobe)
+			db, ok := checkOf(checks, "clamav-db")
+			if !ok || db.Status != tc.want || db.Required != (tc.want == report.Usage) {
+				t.Fatalf("clamav-db row %+v, want %s", db, tc.want)
+			}
+			if _, ok := checkOf(checks, "clamav"); ok {
+				t.Fatal("clamav row present although clamscan is installed")
+			}
+			if tc.want == report.Usage {
+				if db.Detail != "profile requires clamscan but it has no signature database; run freshclam to download one" {
+					t.Fatalf("detail %q", db.Detail)
+				}
+				if !strings.Contains(Format(checks), "MISSING  clamav-db    profile requires clamscan but it has no signature database") {
+					t.Fatalf("terminal form:\n%s", Format(checks))
+				}
+			}
+			// Only the database row can raise the status here: the required
+			// tools resolve to real or stubbed executables whose version
+			// lines the doctor may or may not accept, so the worst status is
+			// checked against every other row rather than against a fixed
+			// value.
+			other := report.Pass
+			for _, c := range checks {
+				if c.Name != "clamav-db" && c.Status > other {
+					other = c.Status
+				}
+			}
+			if tc.want == report.Usage && worst != report.Usage {
+				t.Fatalf("worst %s", worst)
+			}
+			if tc.want == report.Pass && worst != other {
+				t.Fatalf("worst %s with the database row passing (other rows %s)", worst, other)
+			}
+			// An optional profile keeps the same version line informational.
+			checks, _ = runProfile(t, "archive", exec.ClamScan)
+			if db, _ := checkOf(checks, "clamav-db"); db.Status != report.Pass || db.Required {
+				t.Fatalf("archive clamav-db row %+v", db)
+			}
+		})
+	}
+}

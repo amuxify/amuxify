@@ -60,10 +60,15 @@ const DefaultWaitDelay = 5 * time.Second
 // bound. A tool that floods its output, such as an antivirus scanner
 // naming every signature it tried or a probe dumping every frame, cannot
 // grow the process without limit; what it printed past the bound is read
-// and dropped. The largest legitimate output amuxify reads back is a probe
-// of a file with thousands of chapters and tags, which stays far below
-// this. Streaming runs (RunStreaming) hand standard output to the caller's
-// writer and are not bounded here.
+// and dropped. The largest legitimate outputs amuxify reads back are a
+// probe of a file with thousands of chapters and tags and a text subtitle
+// track extracted as SRT for the link check, both of which stay far below
+// this for any real file. Every consumer that reads back a whole output
+// checks Result.OutputTruncated and reports a cut rather than treating the
+// part it kept as the whole: a cut probe is an unparseable file and a cut
+// subtitle track is reported as not fully checked. Streaming runs
+// (RunStreaming) hand standard output to the caller's writer and are not
+// bounded here.
 const DefaultMaxOutput = 16 << 20
 
 // Runner locates and runs tools. Zero value is usable.

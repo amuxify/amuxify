@@ -1,7 +1,9 @@
 package scan
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -102,10 +104,11 @@ func TestClamscanInfectedBlocks(t *testing.T) {
 	}
 }
 
-// A scanner error (exit 2) is WARN CLAMAV_ERROR, the run carries on to
-// the probe, and the garbage on stderr reaches the message bounded and
-// sanitised: the first line only, cut to a bounded length, every control
-// byte escaped.
+// A scanner error (exit 2) under an optional scan is WARN CLAMAV_ERROR,
+// the run carries on to the probe, and the garbage on stderr reaches the
+// message bounded and sanitised: the first line only, cut to a bounded
+// length, every control byte escaped. The required profile's FAIL for the
+// same exit is TestClamscanErrorFailsUnderRequiredProfile.
 func TestClamscanErrorWarnsAndContinues(t *testing.T) {
 	garbage := filepath.Join(t.TempDir(), "garbage")
 	long := strings.Repeat("LibClamAV Error: ", 400)
@@ -224,9 +227,11 @@ func TestClamscanHostileOutputSanitised(t *testing.T) {
 }
 
 // Guarantee 4: a hung clamscan is killed at the run's timeout and reported
-// as WARN CLAMAV_ERROR; the file is not blocked and the run carries on.
-// The timeout is the scanner's, which the command line sets from
-// --timeout, and defaults to DefaultClamTimeout.
+// as WARN CLAMAV_ERROR under an optional scan; the file is not blocked and
+// the run carries on. The timeout is the scanner's, which the command line
+// sets from --timeout, and defaults to DefaultClamTimeout. Under a required
+// scan the kill is a FAIL instead, see
+// TestClamscanErrorFailsUnderRequiredProfile.
 func TestClamscanHangIsKilledAtTimeout(t *testing.T) {
 	fakeClamscan(t, `sleep 5; printf '%s: Eicar FOUND\n' "$last"; exit 1`)
 	s, media := clamScanner(t, "archive")
@@ -382,5 +387,154 @@ func TestClamAVFlagForcesAndNeverDowngrades(t *testing.T) {
 	fr := scanOne(t, s, media)
 	if fr.Verdict != report.Fail || !fr.Has(CodeClamMissing) {
 		t.Fatalf("strict with a non-executable clamscan: %s %v", fr.Verdict, codes(fr))
+	}
+}
+
+// Guarantee 9, and guarantee 4 for the timeout: under a profile that
+// requires the scan, a clamscan that produced no verdict is FAIL
+// CLAMAV_ERROR and the scan of the file stops there, so the file is never
+// probed, rebuilt or imported unscanned. That covers a scanner killed at a
+// short --timeout, a scanner that exits 2 because no signature database
+// is loaded, one that exits 2 with nothing to say, and one that cannot
+// start. --clamav does not lower any of it. The same stubs under an
+// optional profile stay WARN and the run carries on to the probe.
+func TestClamscanErrorFailsUnderRequiredProfile(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+		timeout          time.Duration
+	}{
+		{"timeout", `exec sleep 5`, "timed out", 300 * time.Millisecond},
+		{"no database", `printf 'LibClamAV Error: cli_loaddbdir: No supported database files found in /var/lib/clamav\n' >&2; exit 2`, "clamscan exit 2: LibClamAV Error: cli_loaddbdir", 10 * time.Second},
+		{"silent error", `exit 2`, "clamscan exit 2 with no message", 10 * time.Second},
+		{"cannot start", "", "clamscan: ", 10 * time.Second},
+	}
+	for _, tc := range cases {
+		for _, flag := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s clamav=%v", tc.name, flag), func(t *testing.T) {
+				if tc.body == "" {
+					// An executable whose interpreter does not exist is a start
+					// failure: there is no child and no exit status.
+					noTools(t)
+					p := filepath.Join(t.TempDir(), "clamscan")
+					if err := os.WriteFile(p, []byte("#!"+filepath.Join(t.TempDir(), "no-such-shell")+"\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("AMUXIFY_CLAMSCAN", p)
+				} else {
+					fakeClamscan(t, tc.body)
+				}
+				s, media := clamScanner(t, "strict")
+				s.ClamAV = flag
+				s.Timeout = tc.timeout
+				s.Runner.WaitDelay = time.Second
+				fr := scanOne(t, s, media)
+				if fr.Verdict != report.Fail || !fr.Has(CodeClamError) {
+					t.Fatalf("strict: verdict %s %v", fr.Verdict, codes(fr))
+				}
+				if fr.Has(CodeUnparseable) || fr.Has(CodeClamInfected) || fr.Has(CodeClamMissing) {
+					t.Fatalf("strict: the scan carried on past the scanner error: %v", codes(fr))
+				}
+				f := finding(fr, CodeClamError)
+				if f.Severity != report.Fail || !strings.Contains(f.Message, tc.want) || !cleanOf(f.Message) {
+					t.Fatalf("strict: finding %s %q", f.Severity, f.Message)
+				}
+				// The optional profile keeps the file usable and probes it.
+				s, media = clamScanner(t, "archive")
+				s.Timeout = tc.timeout
+				s.Runner.WaitDelay = time.Second
+				fr = scanOne(t, s, media)
+				f = finding(fr, CodeClamError)
+				if f.Severity != report.Warn || !fr.Has(CodeUnparseable) {
+					t.Fatalf("archive: %s %v", fr.Verdict, codes(fr))
+				}
+			})
+		}
+	}
+}
+
+// The CLAMAV_ERROR message is a complete sentence whatever the scanner
+// printed: the first line of standard error when there is one, otherwise
+// the first line about the scanned file on standard output, which is
+// where clamscan reports a file it could not open, otherwise a fixed
+// sentence. A standard output line about another path or a summary line
+// is never used, and the line that is used is bounded and sanitised.
+func TestClamscanErrorMessageWithoutStderr(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       func(media string) string
+	}{
+		{"file error on stdout", `printf '%s: Can'"'"'t open file ERROR\n' "$last"; exit 2`,
+			func(m string) string { return "clamscan exit 2: " + m + ": Can't open file ERROR" }},
+		{"nothing printed", `exit 2`,
+			func(string) string { return "clamscan exit 2 with no message" }},
+		{"only lines about other paths", `printf 'Infected files: 0\n/etc/passwd: Can'"'"'t open file ERROR\n\n\n' ; exit 3`,
+			func(string) string { return "clamscan exit 3 with no message" }},
+		{"stderr wins", `printf '%s: Can'"'"'t open file ERROR\n' "$last"; printf 'LibClamAV Error: database\n' >&2; exit 2`,
+			func(string) string { return "clamscan exit 2: LibClamAV Error: database" }},
+		{"hostile stdout line", `printf '\n\n%s: \033[31mERROR\033[0m \342\200\256evil\r\n' "$last"; exit 2`,
+			func(m string) string { return "clamscan exit 2: " + m + ": \\x1b[31mERROR\\x1b[0m \\u202eevil" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClamscan(t, tc.body)
+			s, media := clamScanner(t, "archive")
+			fr := scanOne(t, s, media)
+			f := finding(fr, CodeClamError)
+			if f.Message != tc.want(media) {
+				t.Fatalf("message %q, want %q", f.Message, tc.want(media))
+			}
+			if strings.HasSuffix(f.Message, ": ") || !cleanOf(f.Message) {
+				t.Fatalf("message %q", f.Message)
+			}
+		})
+	}
+	// A long stdout line about the file is cut to the message bound.
+	fakeClamscan(t, `printf '%s: ' "$last"; i=0; while [ $i -lt 100 ]; do printf 'ERRORERROR'; i=$((i+1)); done; printf '\n'; exit 2`)
+	s, media := clamScanner(t, "archive")
+	f := finding(scanOne(t, s, media), CodeClamError)
+	if len(f.Message) > clamMessageBytes+len("clamscan exit 2: ")+4 || !strings.HasSuffix(f.Message, "...") {
+		t.Fatalf("message not bounded: %d bytes %q", len(f.Message), f.Message)
+	}
+}
+
+// Guarantee 4: the memory clamDetail takes is bounded by the detail it
+// returns, not by what the scanner printed. Sixteen MiB of bare newlines
+// on each stream, which is the most the runner keeps and would cost a
+// string header per line if the output were split first, is walked in
+// place: the call allocates a few kilobytes and still finds the one line
+// about the file at the very end. The same flood from a stub scanner
+// completes and reports the empty detail.
+func TestClamDetailMemoryBounded(t *testing.T) {
+	const n = 16 << 20
+	// The path is longer than the compiler's stack buffer for a small
+	// string-to-bytes conversion, so a conversion done once per line would
+	// show up in the measurement.
+	path := "/srv/media/" + strings.Repeat("d/", 40) + "movie.mkv"
+	stdout := append(bytes.Repeat([]byte{'\n'}, n), []byte(path+": Eicar FOUND")...)
+	stderr := bytes.Repeat([]byte{'\n'}, n)
+	res := &exec.Result{Stdout: stdout, Stderr: stderr, ExitCode: 1}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	detail := clamDetail(res, path)
+	msg := clamErrorMessage(res, path)
+	first := firstLine(stderr)
+	runtime.ReadMemStats(&after)
+	if detail != path+": Eicar FOUND" || msg != "clamscan exit 1: "+path+": Eicar FOUND" || first != "" {
+		t.Fatalf("detail %q message %q first %q", detail, msg, first)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("clamDetail allocated %d bytes for %d bytes of newline-only output", grew, 2*n)
+	}
+	// The same flood from the scanner itself, through the runner.
+	fakeClamscan(t, `pad='
+'; i=0; while [ $i -lt 20 ]; do pad="$pad$pad"; i=$((i+1)); done; i=0; while [ $i -lt 4 ]; do printf '%s' "$pad"; printf '%s' "$pad" >&2; i=$((i+1)); done; exit 1`)
+	s, media := clamScanner(t, "archive")
+	s.Runner.MaxOutput = 2 << 20
+	fr := scanOne(t, s, media)
+	expect(t, fr, report.Block, CodeClamInfected)
+	f := finding(fr, CodeClamInfected)
+	if f.Detail != "no line of the clamscan output refers to this file\nclamscan output was longer than the runner keeps and was cut" {
+		t.Fatalf("detail %q", f.Detail)
 	}
 }
