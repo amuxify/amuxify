@@ -67,6 +67,13 @@ non-destructive path and `--dry-run` shows the plan.
 The worst verdict of the run is the exit code. `--json` prints the full report on
 stdout with the same codes; the schema is documented in [docs/report.md](docs/report.md).
 
+`--jobs <n>` processes up to `n` files at the same time, from 1 to 64; the
+default is 1 and behaves exactly as before. Each file's lines are printed as
+soon as that file is finished, so they appear in completion order, while the
+JSON report keeps walk order. Two names of one inode, or two sources that
+would produce one output, are never processed at the same time, so the
+result matches a sequential run. The hook adapters always use one job.
+
 ## Profiles
 
 A profile is a TOML file. Four are built in; `homelab` is the default.

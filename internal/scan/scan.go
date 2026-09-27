@@ -426,6 +426,16 @@ func (s *Scanner) checkMP4(fr *report.FileResult, path string) {
 	}
 }
 
+// sortedKeys returns the keys of m in sorted order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo) {
 	sev := report.Warn
 	if s.Profile.Metadata.Links == "fail" {
@@ -437,17 +447,19 @@ func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *p
 			hits = append(hits, where+": "+l)
 		}
 	}
+	// Tags are maps; their keys are visited in sorted order so the finding
+	// reads the same on every run of the same file.
 	add("title", info.Title)
-	for k, v := range info.Tags {
-		add("tag "+k, v)
+	for _, k := range sortedKeys(info.Tags) {
+		add("tag "+k, info.Tags[k])
 	}
 	for _, st := range info.Streams {
 		add(fmt.Sprintf("stream #%d title", st.Index), st.Title)
-		for k, v := range st.Tags {
+		for _, k := range sortedKeys(st.Tags) {
 			if strings.EqualFold(k, "title") || strings.EqualFold(k, "language") {
 				continue
 			}
-			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), v)
+			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), st.Tags[k])
 		}
 	}
 	for i, c := range info.Chapters {
