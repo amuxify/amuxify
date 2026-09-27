@@ -12,6 +12,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/amuxify/amuxi
 FROM alpine:3.21
 RUN apk add --no-cache ffmpeg mkvtoolnix exiftool tini
 COPY --from=build /out/amuxify /usr/local/bin/amuxify
+COPY contrib/hooks /usr/share/amuxify/hooks
 ENV XDG_STATE_HOME=/state
 RUN mkdir -p /state /data && chmod 1777 /state
 WORKDIR /data

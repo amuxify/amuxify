@@ -65,7 +65,7 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&g.DryRun, "dry-run", g.DryRun, "decide and report, change nothing")
 	fs.BoolVar(&g.Verbose, "verbose", g.Verbose, "show PASS-level findings and per-track actions")
 	fs.BoolVar(&g.Quiet, "quiet", g.Quiet, "suppress the human report; exit code only")
-	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 1h probe/verify, 6h remux)")
+	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean)")
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "directory for quarantine and run logs")
 	fs.BoolVar(&g.AllowRoot, "allow-root", g.AllowRoot, "run even as root (files would be root-owned)")
 	fs.BoolVar(&g.Trace, "trace", g.Trace, "print every external command line to stderr")
@@ -85,7 +85,12 @@ func defaultStateDir() string {
 	return filepath.Join(home, ".local", "state", "amuxify")
 }
 
-const usageText = `amuxify %s - the ingest gate for self-hosted media
+// usageText is assembled once from usageHead, the global flag block and
+// usageTail. The flag block is generated from the same definitions bind
+// installs, so the help page and the flag help strings cannot drift apart.
+var usageText = usageHead + globalFlagHelp() + usageTail
+
+const usageHead = `amuxify %s - the ingest gate for self-hosted media
 
 Usage:
   amuxify [global flags] <command> [command flags] <path>...
@@ -94,21 +99,46 @@ Commands:
   scan      verify and inspect files, change nothing (default verify: quick)
   remux     rebuild into a sanitized MKV with mkvmerge, then prove it
   clean     strip metadata and extended attributes in place, tracks untouched
+  ingest    scan, then rebuild into a verified MKV or clean in place, in one pass
+  hook      run ingest for sabnzbd | nzbget | sonarr | radarr and exit the way they expect
   doctor    check tools, versions, profile, and environment
   profile   list built-in profiles or print one:  amuxify profile show homelab
   version   print the version
 
 Global flags (before or after the command):
-  --profile <name|path>   homelab (default) | archive | anime | strict | file.toml
-                          (AMUXIFY_PROFILE sets the default)
-  --json                  machine-readable report on stdout
-  --dry-run               report what would happen, change nothing
-  --verbose, --quiet, --timeout <dur>, --state-dir <dir>, --allow-root, --trace
+`
+
+const usageTail = `
+The built-in profiles are homelab (the default), archive, anime and strict;
+AMUXIFY_PROFILE sets the default profile.
 
 Exit status: 0 PASS, 1 WARN, 2 usage error, 3 FAIL, 4 BLOCK, 130 interrupted.
 doctor exits 0 when usable (warnings shown), 2 when required tools are missing.
 Tool paths can be overridden with AMUXIFY_FFMPEG, AMUXIFY_MKVMERGE, and so on.
 `
+
+// globalFlagHelp renders one line per global flag from the definitions in
+// bind: the flag name, a placeholder for its value when it takes one, and
+// its help string. Percent signs are doubled because usageText is a format
+// string.
+func globalFlagHelp() string {
+	fs := flag.NewFlagSet("amuxify", flag.ContinueOnError)
+	(&Global{}).bind(fs)
+	placeholders := map[string]string{"profile": "name|path", "state-dir": "dir", "timeout": "duration"}
+	var b strings.Builder
+	fs.VisitAll(func(f *flag.Flag) {
+		name, usage := flag.UnquoteUsage(f)
+		if p, ok := placeholders[f.Name]; ok {
+			name = p
+		}
+		col := "--" + f.Name
+		if name != "" {
+			col += " <" + name + ">"
+		}
+		fmt.Fprintf(&b, "  %-24s%s\n", col, strings.ReplaceAll(usage, "%", "%%"))
+	})
+	return b.String()
+}
 
 // Main runs the program and returns the exit code.
 func Main(args []string, stdout, stderr io.Writer) int {
@@ -151,6 +181,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		code = g.remux(ctx, rest)
 	case "clean":
 		code = g.clean(ctx, rest)
+	case "ingest":
+		code = g.ingest(ctx, rest)
+	case "hook":
+		code = g.hook(ctx, rest)
 	default:
 		fmt.Fprintf(stderr, "amuxify: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -327,6 +361,11 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 	}
 	if *tier != "" && *tier != "quick" && *tier != "full" && *tier != "none" {
 		return g.usageErr("scan: --verify must be quick, full or none")
+	}
+	if !g.DryRun {
+		if msg := checkQuarantineRoots("scan", *quarantine, fs.Args()); msg != "" {
+			return g.usageErr("%s", msg)
+		}
 	}
 	t, err := g.setup(*quarantine != "")
 	if err != nil {

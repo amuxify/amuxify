@@ -41,7 +41,7 @@ PREFIX=$HOME/.local sh install.sh
 
 The script downloads the archive for your OS and CPU, verifies it against the
 `checksums.txt` published with the release, and installs `amuxify` under
-`$PREFIX/bin`. Set `VERSION=0.2.0` to pin a version.
+`$PREFIX/bin`. Set `VERSION=0.3.0` to pin a version.
 
 ### Homebrew
 
@@ -66,7 +66,9 @@ runs as root and amuxify refuses to modify files (`--allow-root` overrides, but
 the resulting files would be root-owned).
 
 The image is Alpine with ffmpeg, MKVToolNix and exiftool. Mount a state
-directory at `/state` if you want quarantine and logs to persist.
+directory at `/state` if you want quarantine and logs to persist. To run amuxify
+from inside a download client or arr container, build a derived image as shown
+in [docs/hooks.md](hooks.md).
 
 ### From source
 
@@ -87,7 +89,7 @@ checks use Unix `stat` fields), so no Windows binary is published.
 
 ```
 $ amuxify doctor
-amuxify 0.2.0
+amuxify 0.3.0
 PASS     mkvmerge     /usr/bin/mkvmerge (mkvmerge v85.0 ('Nightingale') 64-bit)
 PASS     mkvpropedit  /usr/bin/mkvpropedit (...)
 PASS     mkvextract   /usr/bin/mkvextract (...)
@@ -95,6 +97,7 @@ PASS     ffmpeg       /usr/bin/ffmpeg (ffmpeg version 6.1.1 ...)
 PASS     ffprobe      /usr/bin/ffprobe (...)
 WARN     exiftool     not found (optional: deep metadata reports)
 WARN     clamscan     not found (optional: safety.clamav = optional|required)
+PASS     locale       en_US.UTF-8
 PASS     profile      homelab: Keep all languages, chapters and fonts; ...
 PASS     user         uid 1000
 PASS     state-dir    /home/me/.local/state/amuxify
@@ -107,8 +110,20 @@ Exit code 0 means amuxify is usable, even when optional tools are missing and
 reported as `WARN`. Exit code 2 means a required tool is missing or too old, or
 the active profile is invalid.
 
+The `locale` line shows the locale every tool is run under. amuxify keeps your
+own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale (messages are
+still requested in English through `LC_MESSAGES=C`) and falls back
+to `C.UTF-8` otherwise. Some older systems, for example those with glibc before
+2.35, do not ship a `C.UTF-8` locale, and mkvmerge then refuses to start with
+"The locale could not be set properly". The check runs `mkvmerge --version`
+under that locale and reports `WARN` when mkvmerge rejects it; the fix is to
+export a UTF-8 locale that exists on the host, such as `LANG=en_US.UTF-8`,
+before running amuxify.
+
 ## State directory
 
 `$XDG_STATE_HOME/amuxify` (default `~/.local/state/amuxify`), overridable with
-`--state-dir` or `AMUXIFY_STATE_DIR`. Used for quarantine when `--quarantine`
-is given without a path in 0.3; today it is only checked by `doctor`.
+`--state-dir` or `AMUXIFY_STATE_DIR`. Used for quarantine when `ingest` or a
+hook adapter is given `--quarantine` without a directory
+(`<state-dir>/quarantine`), and checked by `doctor`, which verifies that it is
+writable.

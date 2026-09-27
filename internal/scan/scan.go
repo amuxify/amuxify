@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -79,49 +80,39 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	scanRoot := abs
 	if !fi.IsDir() {
-		r := s.ScanFile(ctx, abs, filepath.Dir(abs))
-		if s.Progress != nil {
-			s.Progress(r)
-		}
-		return []Result{r}, nil
+		scanRoot = filepath.Dir(abs)
 	}
-	var paths []string
-	walkErr := filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".amuxify-") {
-			return nil
-		}
-		paths = append(paths, p)
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
+	if err := CheckQuarantineRoot(abs, s.Quarantine); err != nil {
+		return nil, err
 	}
-	sort.Strings(paths)
+	// Walk lists every readable entry and names the unreadable ones in
+	// walkErr; those are reported at run level after the readable files.
+	// A quarantine directory inside the tree is not entered.
+	paths, walkErr := Walk(abs, QuarantineExcludes(s.Quarantine)...)
 	var out []Result
 	for _, p := range paths {
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		r := s.ScanFile(ctx, p, abs)
+		r := s.ScanFile(ctx, p, scanRoot)
 		if s.Progress != nil {
 			s.Progress(r)
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, walkErr
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
-func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
+//
+// The result is named so that the deferred quarantine step, which runs after
+// the verdict is final, records its QUARANTINED finding and the duration in
+// the value the caller receives.
+func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 	start := time.Now()
-	r := Result{File: report.FileResult{Path: path, Info: map[string]string{}}}
+	r = Result{File: report.FileResult{Path: path, Info: map[string]string{}}}
 	defer func() {
 		r.File.Duration = time.Since(start)
 		if r.File.Verdict == report.Block && s.Quarantine != "" {
@@ -175,7 +166,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
 
 	category, isMedia := MediaExts[ext]
 	if !isMedia {
-		s.checkSidecar(fr, ext, kindRes)
+		s.checkSidecar(fr, path, ext, kindRes)
 		return r
 	}
 
@@ -227,11 +218,11 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) Result {
 	if fr.Verdict >= report.Fail {
 		return r
 	}
-	s.decodeCheck(ctx, fr, path)
+	s.decodeCheck(ctx, fr, path, info)
 	return r
 }
 
-func (s *Scanner) checkSidecar(fr *report.FileResult, ext string, k sniff.Result) {
+func (s *Scanner) checkSidecar(fr *report.FileResult, path, ext string, k sniff.Result) {
 	switch {
 	case contains(s.Profile.Sidecars.Block, ext):
 		fr.Addf(CodeSidecarBlocked, report.Block, "blocked sidecar type .%s", ext)
@@ -243,6 +234,9 @@ func (s *Scanner) checkSidecar(fr *report.FileResult, ext string, k sniff.Result
 			return
 		}
 		fr.Addf(CodeSidecarOK, report.Pass, "allowed sidecar .%s", ext)
+		if ext == "nfo" {
+			s.checkNfo(fr, path)
+		}
 	default:
 		fr.Addf(CodeSidecarUnknown, report.Warn, "unrecognised sidecar type .%s (%s)", ext, k.Kind)
 	}
@@ -480,17 +474,15 @@ func (s *Scanner) checkProvenanceInfo(fr *report.FileResult, info *probe.MediaIn
 	}
 }
 
-func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path string) {
-	var err error
-	switch s.tier() {
-	case "none":
+// decodeCheck runs the tiered decode pass. It is skipped for a container
+// with no video or audio stream, such as a subtitle-only .mks, because
+// ffmpeg cannot decode anything there and would fail a healthy file.
+func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path string, info *probe.MediaInfo) {
+	tier := s.tier()
+	if tier == "none" {
 		return
-	case "full":
-		err = s.Verifier.DecodeFull(ctx, path)
-	default:
-		err = s.Verifier.DecodeHeadTail(ctx, path)
 	}
-	if err != nil {
+	if err := s.Verifier.Decode(ctx, path, info, tier == "full"); err != nil {
 		fr.Addf(CodeDecodeFail, report.Fail, "%v", err)
 	}
 }
@@ -564,29 +556,136 @@ func (s *Scanner) polyglot(path string, size int64) string {
 	return ""
 }
 
+// quarantineAbs returns the cleaned absolute path of the quarantine
+// directory, or "" when no quarantine is set.
+func quarantineAbs(quarantine string) string {
+	if quarantine == "" {
+		return ""
+	}
+	abs, err := fsutil.Abs(quarantine)
+	if err != nil {
+		return filepath.Clean(quarantine)
+	}
+	return abs
+}
+
+// QuarantineExcludes returns the directories a walk must not enter for the
+// given quarantine directory: its cleaned absolute path, which Walk matches
+// by identity when the directory exists, so a quarantine named through a
+// symlink, a ".." component, a relative path or a different letter case on
+// a case-insensitive filesystem is still recognised. It is nil when
+// quarantine is empty.
+func QuarantineExcludes(quarantine string) []string {
+	q := quarantineAbs(quarantine)
+	if q == "" {
+		return nil
+	}
+	return []string{q}
+}
+
+// escapes reports whether a relative path leaves the directory it is
+// relative to: it is "..", starts with "../", or is absolute.
+func escapes(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
+}
+
+// CheckQuarantineRoot returns an error when root is the quarantine
+// directory or lies inside it, in which case quarantined files would be
+// scanned again and moved one level deeper on every run. The two paths are
+// first compared in their cleaned absolute form, which also covers a
+// quarantine directory that does not exist yet. When the directory exists
+// it is then compared by identity (os.SameFile) with root and with each of
+// root's ancestors, in the spelling given and in the symlink-resolved
+// spelling, so a trailing slash, a ".." component, a relative path, a
+// symlink or a different letter case on a case-insensitive filesystem
+// cannot slip past. It returns nil when quarantine is empty.
+func CheckQuarantineRoot(root, quarantine string) error {
+	q := quarantineAbs(quarantine)
+	if q == "" {
+		return nil
+	}
+	isQ := fmt.Errorf("%s is the quarantine directory; the quarantine directory must lie outside the tree it serves", root)
+	inQ := fmt.Errorf("%s lies inside the quarantine directory %s; the quarantine directory must lie outside the tree it serves", root, quarantine)
+	r := quarantineAbs(root)
+	if rel, err := filepath.Rel(q, r); err == nil {
+		if rel == "." {
+			return isQ
+		}
+		if !escapes(rel) {
+			return inQ
+		}
+	}
+	qfi, err := os.Stat(q)
+	if err != nil || !qfi.IsDir() {
+		return nil
+	}
+	starts := []string{r}
+	if real, err := filepath.EvalSymlinks(r); err == nil && real != r {
+		starts = append(starts, real)
+	}
+	for _, start := range starts {
+		for p, depth := start, 0; ; p, depth = filepath.Dir(p), depth+1 {
+			if fi, err := os.Stat(p); err == nil && os.SameFile(fi, qfi) {
+				if depth == 0 {
+					return isQ
+				}
+				return inQ
+			}
+			if filepath.Dir(p) == p {
+				break
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 	rel, err := filepath.Rel(root, fr.Path)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "" || rel == "." || escapes(rel) {
+		// A caller that hands the file itself as the root, or a root the
+		// file does not sit under, still gets the file placed under the
+		// quarantine directory by its base name; the destination is never
+		// the quarantine root itself. The test is on the first path
+		// component, so a directory whose name merely starts with two dots
+		// keeps its mirrored place.
 		rel = filepath.Base(fr.Path)
 	}
 	dest := filepath.Join(s.Quarantine, rel)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if dest == filepath.Clean(s.Quarantine) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
+		return
+	}
+	// Create the mirrored directory chain without following symlinks so a
+	// planted link inside the quarantine tree cannot redirect the file
+	// elsewhere (guarantee 3).
+	if err := fsutil.MkdirAllUnder(s.Quarantine, filepath.Dir(dest)); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
-	if err := fsutil.PlaceNoClobber(fr.Path, dest); err != nil {
+	// The quarantine directory often sits on another filesystem than the
+	// media tree (the bare --quarantine form uses the state directory), so
+	// the move copies and verifies across devices; it never replaces a
+	// file that already sits at the destination.
+	if err := fsutil.MoveNoClobber(fr.Path, dest); err != nil {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", err)
 		return
 	}
 	fr.Addf(CodeQuarantined, report.Block, "moved to %s", dest)
 }
 
+// bidiChars names the first character of name that can hide or reorder
+// what a file is called: a bidirectional control (unicode.Bidi_Control,
+// which includes U+061C) or any other Unicode format character (unicode.Cf:
+// zero-width characters, the byte order mark, the soft hyphen, the tag
+// characters and the rest of the invisible ones). It returns "" for a clean
+// name. The property tests, rather than a list of code points, keep a
+// newly noticed invisible character from slipping through.
 func bidiChars(name string) string {
 	for _, r := range name {
-		switch r {
-		case 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x200E, 0x200F, 0x2066, 0x2067, 0x2068, 0x2069:
+		switch {
+		case unicode.Is(unicode.Bidi_Control, r):
 			return fmt.Sprintf("bidi control U+%04X", r)
-		case 0x200B, 0x200C, 0x200D, 0xFEFF, 0x2060:
+		case unicode.Is(unicode.Cf, r):
 			return fmt.Sprintf("zero-width character U+%04X", r)
 		}
 	}

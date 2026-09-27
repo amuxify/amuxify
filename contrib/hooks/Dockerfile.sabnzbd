@@ -1,0 +1,4 @@
+FROM lscr.io/linuxserver/sabnzbd:latest
+RUN apk add --no-cache ffmpeg mkvtoolnix
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
+COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/
