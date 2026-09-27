@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -33,8 +34,12 @@ type Scanner struct {
 	Profile  *policy.Profile
 	// VerifyTier overrides the profile's verify.tier when non-empty.
 	VerifyTier string
-	// ClamAV forces a clamscan pass regardless of profile.
+	// ClamAV forces a clamscan pass when the profile says off. It never
+	// lowers a profile that says required.
 	ClamAV bool
+	// Timeout bounds the clamscan call; zero means DefaultClamTimeout. The
+	// command line sets it from --timeout, as for the prober and verifier.
+	Timeout time.Duration
 	// Quarantine, when set, moves BLOCK files under this directory.
 	Quarantine string
 	// Progress, when set, receives each result as soon as the file is done.
@@ -487,6 +492,35 @@ func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path s
 	}
 }
 
+// DefaultClamTimeout bounds one clamscan call when the run sets no
+// --timeout. Loading the signature database and scanning a file of several
+// gigabytes takes minutes on slow hardware; half an hour leaves room for
+// that without letting a hung scanner hold the run forever.
+const DefaultClamTimeout = 30 * time.Minute
+
+// The bounds on what a finding keeps of the clamscan output. A scanner
+// that floods its output, or an output crafted to look like a report,
+// cannot grow the finding beyond these.
+const (
+	clamDetailLines  = 8    // lines kept in the finding detail
+	clamLineBytes    = 512  // bytes kept of each line, before sanitising
+	clamDetailBytes  = 4096 // bytes kept in the whole detail, before sanitising
+	clamMessageBytes = 200  // bytes kept of the error line in the message
+)
+
+func (s *Scanner) clamTimeout() time.Duration {
+	if s.Timeout > 0 {
+		return s.Timeout
+	}
+	return DefaultClamTimeout
+}
+
+// clamav runs clamscan when the profile or the --clamav flag asks for it
+// and reports the outcome. The verdict rests on the exit status alone
+// (0 clean, 1 infected, anything else an error): nothing printed by the
+// scanner can raise or lower it. What is kept of the output for the
+// finding is bounded and sanitised by clamDetail. It returns true when the
+// scan of this file should stop here.
 func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
@@ -502,21 +536,90 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 		}
 		return false
 	}
-	res, err := s.Runner.RunWithTimeout(ctx, 30*time.Minute, exec.ClamScan, "--no-summary", "--infected", "--", path)
+	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, "--no-summary", "--infected", "--", path)
 	if err != nil {
-		fr.Addf(CodeClamError, report.Warn, "%v", err)
+		// A start failure or a timeout: the child was killed or never ran,
+		// so there is no exit status to read a verdict from.
+		fr.Addf(CodeClamError, report.Warn, "%s", clamText(err.Error(), clamMessageBytes))
 		return false
 	}
 	switch res.ExitCode {
 	case 0:
 		return false
 	case 1:
-		fr.Add(report.Finding{Code: CodeClamInfected, Severity: report.Block, Message: "clamscan reports infected", Detail: strings.TrimSpace(string(res.Stdout))})
+		fr.Add(report.Finding{Code: CodeClamInfected, Severity: report.Block, Message: "clamscan reports infected", Detail: clamDetail(res, path)})
 		return true
 	default:
-		fr.Addf(CodeClamError, report.Warn, "clamscan exit %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		fr.Add(report.Finding{Code: CodeClamError, Severity: report.Warn,
+			Message: fmt.Sprintf("clamscan exit %d: %s", res.ExitCode, clamText(firstLine(res.Stderr), clamMessageBytes)),
+			Detail:  clamDetail(res, path)})
 		return false
 	}
+}
+
+// clamDetail returns the lines of the clamscan output that refer to the
+// scanned file, which clamscan prints as "<path>: <signature> FOUND" or
+// "<path>: <reason> ERROR", each cut to clamLineBytes and sanitised, at
+// most clamDetailLines of them and clamDetailBytes in all. Every other
+// line is dropped: a summary block, a line about some other path, or text
+// crafted to read like a verdict never reaches the report. When no line
+// refers to the file the detail says so rather than carrying anything
+// else the scanner printed.
+func clamDetail(res *exec.Result, path string) string {
+	prefix := path + ":"
+	var lines []string
+	total, more := 0, 0
+	for _, raw := range [][]byte{res.Stdout, res.Stderr} {
+		for _, line := range strings.Split(string(raw), "\n") {
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			if len(lines) >= clamDetailLines || total >= clamDetailBytes {
+				more++
+				continue
+			}
+			line = clamText(line, clamLineBytes)
+			total += len(line)
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "no line of the clamscan output refers to this file")
+	}
+	if more > 0 {
+		lines = append(lines, fmt.Sprintf("%d more line(s) about this file not shown", more))
+	}
+	if res.OutputTruncated {
+		lines = append(lines, "clamscan output was longer than the runner keeps and was cut")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clamText bounds s to max bytes, cut on a rune boundary, and passes it
+// through the report sanitiser so a control character, an ANSI escape
+// sequence or a bidirectional override in the scanner's output cannot
+// reshape a report line.
+func clamText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "..."
+	}
+	return report.Sanitize(s)
+}
+
+// firstLine returns the first non-blank line of b, or "" when there is
+// none.
+func firstLine(b []byte) string {
+	for _, line := range strings.Split(string(b), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 var polySigs = [][]byte{
