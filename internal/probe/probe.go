@@ -125,6 +125,12 @@ func (p *Prober) Probe(ctx context.Context, path string) (*MediaInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if res.OutputTruncated {
+		// The runner kept only the first part of the document, which would
+		// fail to parse below; the reason is named instead so the report
+		// does not call a file unparseable for the wrong reason.
+		return nil, fmt.Errorf("ffprobe: output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout))
+	}
 	var fp ffprobeOut
 	if jerr := json.Unmarshal(res.Stdout, &fp); jerr != nil {
 		return nil, fmt.Errorf("ffprobe: unparseable output: %v", jerr)
@@ -333,6 +339,12 @@ func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 	res, err := p.Runner.RunWithTimeout(ctx, to, exec.MKVMerge, "-J", m.Path)
 	if err != nil {
 		m.MkvErrors = append(m.MkvErrors, err.Error())
+		return
+	}
+	if res.OutputTruncated {
+		if m.IsMatroska() {
+			m.MkvErrors = append(m.MkvErrors, fmt.Sprintf("mkvmerge -J output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout)))
+		}
 		return
 	}
 	var mk mkvOut
