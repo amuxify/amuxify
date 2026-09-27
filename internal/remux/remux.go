@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/scan"
@@ -59,17 +61,26 @@ type Remuxer struct {
 	Original   string // original language hint for default-audio selection
 	Timeout    time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(report.FileResult)
+	// Jobs is the number of files RemuxPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
 
-	// planned holds, per directory, the names earlier files of a dry run
-	// would write, so that a later file mapping to one of them is reported
-	// with the OUTPUT_EXISTS the live run would produce, such as sample.mp4
-	// and sample.avi both becoming sample.mkv. One Remuxer is one run, and
-	// RemuxPath does not reset it because the command calls RemuxPath once
-	// per path named on the command line. caseFold caches, per directory,
-	// whether its filesystem folds case, which decides whether Ep.mkv and
-	// ep.mkv are one name there.
-	planned  map[string][]string
+	// claimed holds, per directory, the output names this run has taken:
+	// in a dry run the names earlier files would write, in a live run the
+	// names of outputs being built or already placed. A later file mapping
+	// to one of them is reported with the OUTPUT_EXISTS the disk would
+	// produce, such as sample.mp4 and sample.avi both becoming sample.mkv,
+	// and with parallel jobs it is what keeps two workers from building the
+	// same output through the same temp name at the same time. One Remuxer
+	// is one run, and RemuxPath does not reset it because the command calls
+	// RemuxPath once per path named on the command line. caseFold caches,
+	// per directory, whether its filesystem folds case, which decides
+	// whether Ep.mkv and ep.mkv are one name there. mu guards both.
+	mu       sync.Mutex
+	claimed  map[string][]string
 	caseFold map[string]bool
 }
 
@@ -127,25 +138,75 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	if r.tier() == "none" && r.InPlace {
 		return nil, fmt.Errorf("refusing --in-place together with verify tier none")
 	}
-	// A tree with an unreadable corner still yields every readable file;
-	// the scan error naming the corner is returned after them so the run is
-	// reported as FAIL at run level, the same as scan, clean and ingest do.
-	results, scanErr := r.Scanner.ScanPath(ctx, abs)
-	if scanErr != nil && len(results) == 0 {
-		return nil, scanErr
+	if err := scan.CheckQuarantineRoot(abs, r.Scanner.Quarantine); err != nil {
+		return nil, err
 	}
-	var out []report.FileResult
-	for _, sc := range results {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
+	scanRoot := abs
+	if !fi.IsDir() {
+		scanRoot = filepath.Dir(abs)
+	}
+	// A tree with an unreadable corner still yields every readable file;
+	// the walk error naming the corner is returned after them so the run is
+	// reported as FAIL at run level, the same as scan, clean and ingest do.
+	// Each file is scanned and then remuxed by the same worker, so a
+	// parallel run streams one finished result per file just as a
+	// sequential one does.
+	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(r.Scanner.Quarantine)...)
+	if walkErr != nil && len(paths) == 0 {
+		return nil, walkErr
+	}
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = r.SerialKeys(p, inputRoot, outRoot)
+	}
+	results := make([]report.FileResult, len(paths))
+	ran := pool.Run(ctx, r.Jobs, len(paths), keys, func(i int) {
+		sc := r.Scanner.ScanFile(ctx, paths[i], scanRoot)
+		if r.Scanner.Progress != nil {
+			r.Scanner.Progress(sc)
 		}
 		fr := r.RemuxScanned(ctx, sc, inputRoot, outRoot)
 		if r.Progress != nil {
 			r.Progress(fr)
 		}
-		out = append(out, fr)
+		results[i] = fr
+	})
+	var out []report.FileResult
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
 	}
-	return out, scanErr
+	if len(out) < len(paths) {
+		return out, ctx.Err()
+	}
+	return out, walkErr
+}
+
+// SerialKeys lists what keeps path from running beside another file of the
+// same walk: its inode when it has other hard links, so two names of one
+// file are handled one after the other, and the outputs it could map to,
+// spelled in lower case, so files that would collide on one destination are
+// decided in walk order and the earlier one wins, as in a sequential run.
+// The claim set guards the destinations whatever the keys say; the keys make
+// the outcome deterministic.
+func (r *Remuxer) SerialKeys(path, inputRoot, outRoot string) []string {
+	var keys []string
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if k := fsutil.InodeKey(fi); k != "" {
+			keys = append(keys, "inode:"+k)
+		}
+	}
+	rel, err := filepath.Rel(inputRoot, path)
+	if err != nil {
+		rel = filepath.Base(path)
+	}
+	stem := strings.TrimSuffix(rel, filepath.Ext(rel)) + ".mkv"
+	keys = append(keys, "dest:"+strings.ToLower(filepath.Join(outRoot, stem)))
+	if r.InPlace {
+		keys = append(keys, "dest:"+strings.ToLower(filepath.Join(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))+".mkv")))
+	}
+	return keys
 }
 
 // RemuxScanned remuxes one already scanned file. r.Scanner may be nil.
@@ -221,12 +282,24 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
-	// A dry run never writes, so the disk cannot tell it that an earlier
-	// file of this run has already taken dest; the run's own plan does.
-	if r.DryRun && r.plannedCollision(dest) {
+	// The run's own claim set is asked before the disk is touched: a dry
+	// run never writes, so only the claims tell it that an earlier file of
+	// this run has taken dest, and in a live run with parallel jobs the
+	// claim is what keeps a second worker from creating the same temp name
+	// while the first is still building the output (guarantee 1). The claim
+	// is given back on every path that leaves nothing behind, so a file
+	// whose remux failed does not block a later file with the same
+	// destination, as it would not in a sequential run.
+	if !r.claim(dest) {
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			r.release(dest)
+		}
+	}()
 
 	d := r.Profile.Decide(sc.Info, policy.Options{OriginalLanguage: r.Original})
 	for _, f := range d.Findings {
@@ -237,7 +310,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	}
 	r.describe(&fr, d)
 	if r.DryRun {
-		r.plan(dest)
+		keep = true
 		fr.Addf(CodeDryRun, report.Pass, "would write %s", dest)
 		fr.Output = dest
 		return fr
@@ -378,6 +451,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
 		}
+		keep = true
 		fr.Output = dest
 		fr.Addf(CodePlaced, report.Pass, "written and verified")
 		return fr
@@ -429,6 +503,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "replace: %v", err)
 			return fr
 		}
+		keep = true
 		if err := replacedOwn(fr.Path, created); err != nil {
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
@@ -483,6 +558,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched", err)
 			return fr
 		}
+		keep = true
 		// The source is checked one last time now that the output sits at
 		// dest: were it replaced in the meantime, removing it would delete
 		// a file that was never rebuilt. The output is then taken back
@@ -659,27 +735,69 @@ func removeOwn(path string, own os.FileInfo) error {
 	return os.Remove(path)
 }
 
-// plan records dest as a destination this dry run would write.
+// plan records dest as a destination this run has taken, whether or not it
+// was free. claim is the checked form RemuxScanned uses.
 func (r *Remuxer) plan(dest string) {
-	if r.planned == nil {
-		r.planned = map[string][]string{}
-	}
-	dir := filepath.Dir(dest)
-	r.planned[dir] = append(r.planned[dir], filepath.Base(dest))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.planLocked(dest)
 }
 
-// plannedCollision reports whether an earlier file of this dry run already
-// plans to write dest. Names are compared exactly, and without regard to
-// case as well when the destination directory's filesystem folds case,
-// because there Ep.mkv and ep.mkv are one entry and the live run fails the
-// second file with OUTPUT_EXISTS.
-func (r *Remuxer) plannedCollision(dest string) bool {
+func (r *Remuxer) planLocked(dest string) {
+	if r.claimed == nil {
+		r.claimed = map[string][]string{}
+	}
+	dir := filepath.Dir(dest)
+	r.claimed[dir] = append(r.claimed[dir], filepath.Base(dest))
+}
+
+// claim takes dest for the calling file and reports whether it was free.
+// The check and the record happen under one lock, so two workers that map
+// to the same name cannot both succeed.
+func (r *Remuxer) claim(dest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.collisionLocked(dest) {
+		return false
+	}
+	r.planLocked(dest)
+	return true
+}
+
+// release gives dest back after a remux that placed nothing, so a later
+// file with the same destination gets its turn. Only the exact spelling the
+// claim recorded is removed.
+func (r *Remuxer) release(dest string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir, base := filepath.Dir(dest), filepath.Base(dest)
-	names := r.planned[dir]
+	names := r.claimed[dir]
+	for i, n := range names {
+		if n == base {
+			r.claimed[dir] = append(names[:i:i], names[i+1:]...)
+			return
+		}
+	}
+}
+
+// plannedCollision reports whether an earlier file of this run already
+// took dest. Names are compared exactly, and without regard to case as well
+// when the destination directory's filesystem folds case, because there
+// Ep.mkv and ep.mkv are one entry and the live run fails the second file
+// with OUTPUT_EXISTS.
+func (r *Remuxer) plannedCollision(dest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.collisionLocked(dest)
+}
+
+func (r *Remuxer) collisionLocked(dest string) bool {
+	dir, base := filepath.Dir(dest), filepath.Base(dest)
+	names := r.claimed[dir]
 	if len(names) == 0 {
 		return false
 	}
-	fold := r.foldsCase(dir)
+	fold := r.foldsCaseLocked(dir)
 	for _, n := range names {
 		if n == base || (fold && strings.EqualFold(n, base)) {
 			return true
@@ -700,6 +818,12 @@ func (r *Remuxer) plannedCollision(dest string) bool {
 // continues upward; when it reaches the root without an answer the
 // filesystem is taken to be case-sensitive, which compares names exactly.
 func (r *Remuxer) foldsCase(dir string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.foldsCaseLocked(dir)
+}
+
+func (r *Remuxer) foldsCaseLocked(dir string) bool {
 	if v, ok := r.caseFold[dir]; ok {
 		return v
 	}

@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,8 +57,14 @@ type Runner struct {
 	// WaitDelay bounds the wait for the child's output pipes after the child
 	// was killed or exited; zero means DefaultWaitDelay.
 	WaitDelay time.Duration
-	// Trace, when set, receives each command line before it runs.
+	// Trace, when set, receives each command line before it runs. With
+	// parallel jobs it is called from several goroutines at once.
 	Trace func(string)
+
+	// mu guards paths, the resolved tool locations, which several workers
+	// read and fill at the same time in a parallel run. A Runner must not
+	// be copied once it is in use.
+	mu    sync.Mutex
 	paths map[string]string
 }
 
@@ -73,6 +80,8 @@ var ErrNotFound = errors.New("tool not found")
 
 // Path resolves a tool, honouring AMUXIFY_<TOOL> overrides, and caches it.
 func (r *Runner) Path(tool string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.paths == nil {
 		r.paths = map[string]string{}
 	}
