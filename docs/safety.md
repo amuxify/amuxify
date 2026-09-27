@@ -76,8 +76,17 @@ SECURITY.md.
    difference deletes the output and fails the file.
    Test: `remux.TestHashMismatchDeletesOutput`.
 6. **In place preserves identity.** `--in-place` copies mode, owner, group and
-   modification time from the source to the output before the rename.
-   Test: `fsutil.TestReplaceInPlacePreservesModeAndMtime`, `remux.TestInPlacePreservesIdentity`.
+   modification time from the source to the output before the rename. The
+   copy goes through the descriptor of the file this run created, so it
+   cannot land on anything swapped onto the temp name. On Linux the
+   modification time is set with `utimensat` on that descriptor, which does
+   not need `/proc`; the `/proc/self/fd` form the Go standard library uses
+   is the second attempt, and only when both are refused is the file's own
+   name used, after a check that the name still leads to the open file and
+   with a call that never follows a symlink.
+   Test: `fsutil.TestReplaceInPlacePreservesModeAndMtime`, `remux.TestInPlacePreservesIdentity`,
+   `fsutil.TestFutimesFallsBackWithoutProc`, `fsutil.TestFutimesPathFallbackRefusesSwappedFile`,
+   `fsutil.TestFutimesDescriptorCallIgnoresTheName` (Linux only).
 7. **Extended attributes are scoped.** Only `user.*` (Linux, FreeBSD) and
    `com.apple.*` (macOS) are removed. ACLs, SELinux labels, capabilities and
    `security.*` are never touched.

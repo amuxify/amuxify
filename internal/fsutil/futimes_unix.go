@@ -1,4 +1,4 @@
-//go:build unix
+//go:build unix && !linux
 
 package fsutil
 
@@ -10,7 +10,7 @@ import (
 
 // futimes sets the access and modification times of the open file f through
 // its descriptor, never through a name. On macOS and the BSDs futimes(2) is
-// a real descriptor call.
+// a real descriptor call; Linux has its own file.
 func futimes(f *os.File, atime, mtime time.Time) error {
 	tv := []syscall.Timeval{
 		syscall.NsecToTimeval(atime.UnixNano()),
