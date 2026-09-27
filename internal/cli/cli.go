@@ -65,7 +65,7 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&g.DryRun, "dry-run", g.DryRun, "decide and report, change nothing")
 	fs.BoolVar(&g.Verbose, "verbose", g.Verbose, "show PASS-level findings and per-track actions")
 	fs.BoolVar(&g.Quiet, "quiet", g.Quiet, "suppress the human report; exit code only")
-	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean)")
+	fs.DurationVar(&g.Timeout, "timeout", g.Timeout, "per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean, 30m clamscan)")
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "directory for quarantine and run logs")
 	fs.BoolVar(&g.AllowRoot, "allow-root", g.AllowRoot, "run even as root (files would be root-owned)")
 	fs.BoolVar(&g.Trace, "trace", g.Trace, "print every external command line to stderr")
@@ -372,7 +372,7 @@ func (g *Global) scan(ctx context.Context, args []string) int {
 		return g.usageErr("%v", err)
 	}
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		VerifyTier: *tier, ClamAV: *clam, Quarantine: *quarantine}
+		VerifyTier: *tier, ClamAV: *clam, Quarantine: *quarantine, Timeout: g.Timeout}
 	if g.DryRun {
 		sc.Quarantine = ""
 	}
@@ -427,7 +427,7 @@ func (g *Global) remux(ctx context.Context, args []string) int {
 	if !t.runner.Have(exec.MKVPropedit) {
 		return g.usageErr("mkvpropedit not found; run 'amuxify doctor'")
 	}
-	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile, VerifyTier: "none"}
+	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile, VerifyTier: "none", Timeout: g.Timeout}
 	rm := &remux.Remuxer{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Scanner: sc, Profile: t.profile,
 		OutputRoot: *output, InPlace: *inPlace, Hardlinks: *hardlinks, VerifyTier: *tier, Force: *force,
 		DryRun: g.DryRun, Original: *original, Timeout: g.Timeout, Progress: g.progress}

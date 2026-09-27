@@ -94,7 +94,7 @@ func (g *Global) newIngester(t *tools, o ingestOpts) (*ingest.Ingester, error) {
 		quarantine = o.quarantine.resolve(g.StateDir)
 	}
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		VerifyTier: "none", Quarantine: quarantine}
+		VerifyTier: "none", Quarantine: quarantine, Timeout: g.Timeout}
 	rm := &remux.Remuxer{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
 		InPlace: true, Hardlinks: o.hardlinks, VerifyTier: o.tier, Force: o.force,
 		DryRun: g.DryRun, Original: o.original, Timeout: g.Timeout}
