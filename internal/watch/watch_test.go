@@ -590,15 +590,36 @@ func TestChangedDuringIngestIsIngestedAgain(t *testing.T) {
 }
 
 // A cancelled context ends the pass between two files: the file in progress
-// is finished, the rest stay pending and are ingested by the next pass.
+// is finished under a context the cancellation does not reach, so the tool
+// working on it is not killed mid-write (guarantee 2), the rest stay pending
+// and are ingested by the next pass. A pass that starts with a cancelled
+// context ingests nothing.
 func TestCancelStopsBetweenFiles(t *testing.T) {
 	root := t.TempDir()
 	a := write(t, filepath.Join(root, "a.nfo"), "nfo")
 	b := write(t, filepath.Join(root, "b.nfo"), "nfo")
 	h := newHarness(t, root, 0)
-	ctx, cancel := context.WithCancel(context.Background())
-	h.onIngest = func(p string) report.FileResult {
+	type key string
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key("k"), "v"))
+	var cancelledDuring []string
+	checking := true
+	h.w.Ingest = func(ictx context.Context, p string) report.FileResult {
+		h.ingested = append(h.ingested, p)
+		if !checking {
+			return report.FileResult{Path: p}
+		}
 		cancel()
+		// The caller's context is cancelled now; the ingest's own must
+		// not be, and it must still carry the caller's values.
+		if ictx.Err() != nil {
+			cancelledDuring = append(cancelledDuring, p)
+		}
+		if ictx.Value(key("k")) != "v" {
+			t.Errorf("the ingest context lost the caller's values")
+		}
+		if ctx.Err() == nil {
+			t.Errorf("the caller's context is not cancelled")
+		}
 		return report.FileResult{Path: p}
 	}
 	res, err := h.w.Pass(ctx)
@@ -608,7 +629,17 @@ func TestCancelStopsBetweenFiles(t *testing.T) {
 	if len(res) != 1 || res[0].Path != a {
 		t.Fatalf("results %v", res)
 	}
-	h.onIngest = nil
+	if len(cancelledDuring) != 0 {
+		t.Fatalf("the file in progress was handed a cancelled context: %v", cancelledDuring)
+	}
+	res, err = h.w.Pass(ctx)
+	if err != nil || len(res) != 0 {
+		t.Fatalf("a pass under a cancelled context ingested %v (%v)", res, err)
+	}
+	if len(h.ingested) != 1 {
+		t.Fatalf("ingested %v, want only %s", h.ingested, a)
+	}
+	checking = false
 	res = h.pass(t)
 	if len(res) != 1 || res[0].Path != b {
 		t.Fatalf("next pass results %v, want %s", res, b)

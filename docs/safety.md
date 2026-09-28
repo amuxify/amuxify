@@ -28,8 +28,18 @@ SECURITY.md.
    crash leaves at most a temp file, which the next run ignores. Only a name
    of exactly that shape is ignored: a file that borrows the `.amuxify-`
    prefix without the `.tmp` suffix is scanned like any other.
+   A cancelled context, whether from a tool timeout or from an interrupt,
+   kills the tool and removes the temp file. `watch` does not pass its
+   interrupt into the file in progress: that file is finished and the pass
+   stops before the next one, so a stop signal never kills a tool mid-write.
    Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`,
-   `cli.TestWatchInterruptedExitsClean` (a watcher stopped mid-pass leaves none).
+   `remux.TestFailedRemuxLeavesNothing` (a timed-out mkvmerge leaves nothing),
+   `remux.TestCancelledMidMkvmergeLeavesNoTemp` (a cancel while mkvmerge writes
+   the temp file removes it and leaves the source untouched),
+   `watch.TestCancelStopsBetweenFiles` (the file in progress is handed a
+   context the cancel does not reach), `cli.TestWatchInterruptFinishesFileInProgress`
+   (SIGINT while mkvmerge runs under `watch`: the file is finished and placed,
+   no further file is started, no temp file is left).
 3. **Symlinks are never followed.** Each symlink is reported `WARN SYMLINK` and
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
    A symlink swapped onto the temp name during a run is refused before the

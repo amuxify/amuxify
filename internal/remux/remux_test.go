@@ -821,6 +821,82 @@ func TestFailedRemuxLeavesNothing(t *testing.T) {
 	}
 }
 
+// Guarantee 2 when the context is cancelled while mkvmerge is writing the
+// temp file: the tool is killed, the temp file is removed, nothing is
+// placed, the source keeps its bytes and the result says why. The wrapper
+// reports that mkvmerge has started and then waits for the test, so the
+// cancel lands while the temp file exists; the test checks that it did.
+func TestCancelledMidMkvmergeLeavesNoTemp(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "clean.mkv")
+	root := filepath.Dir(src)
+	before := fileSHA(t, src)
+	outRoot := filepath.Join(t.TempDir(), "out")
+	tmp := filepath.Join(outRoot, ".amuxify-clean.mkv.tmp")
+	started := filepath.Join(t.TempDir(), "started")
+	// The snippet runs before the real mkvmerge: it announces itself and
+	// waits up to 20 seconds for the test to cancel the context, which
+	// kills the shell and the wait with it. The cap keeps a broken test
+	// from hanging.
+	mkvmergeWrapper(t, r, ": > "+shq(started)+"\ni=0\nwhile [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done", "")
+	rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	rm.OutputRoot = outRoot
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tempSeen := make(chan bool, 1)
+	go func() {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, err := os.Lstat(started); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				tempSeen <- false
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_, err := os.Lstat(tmp)
+		cancel()
+		tempSeen <- err == nil
+	}()
+	res, err := rm.RemuxPath(ctx, root)
+	if !<-tempSeen {
+		t.Fatalf("the temp file did not exist while mkvmerge ran, so the cancel landed elsewhere (results %v, %v)", res, err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results, want the interrupted file reported", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never ran: %v", codes(fr))
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeRemuxFail && strings.Contains(f.Message, "context canceled") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not name the cancellation: %v", fr.Findings)
+	}
+	if left := leftovers(t, outRoot, root); len(left) != 0 {
+		t.Fatalf("left behind after the cancel: %v", left)
+	}
+	if _, err := os.Lstat(filepath.Join(outRoot, "clean.mkv")); err == nil {
+		t.Fatal("output placed although mkvmerge was killed")
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+}
+
 // Over the whole corpus with --force: BLOCK files are refused, no file is
 // written in a dry run, and non-media files are only scanned.
 func TestCorpusRefusalsWithForce(t *testing.T) {

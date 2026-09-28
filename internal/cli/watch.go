@@ -104,6 +104,9 @@ func (g *Global) watch(ctx context.Context, args []string) int {
 			return
 		}
 		inputRoot, outRoot := in.Remuxer.Roots(abs, true)
+		// The context the watcher hands over is not cancelled by the
+		// interrupt, so the file in progress is finished, with its tools
+		// bounded by their timeouts, and the pass stops before the next one.
 		w.Ingest = func(ctx context.Context, p string) report.FileResult {
 			fr := in.IngestFile(ctx, p, abs, inputRoot, outRoot)
 			g.progress(fr)
