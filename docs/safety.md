@@ -207,19 +207,31 @@ SECURITY.md.
    the scan never passes a file that was not scanned: a scanner that is
    missing, that was killed at the timeout, that could not start or that
    exited without a verdict fails the file before it is probed, and
-   `ingest` and the hook adapters refuse it.
+   `ingest` and the hook adapters refuse it. The same holds for a file the
+   scanner did not read: every clamscan call raises the file size limit to
+   2047 MiB, the most libclamav can scan, switches off its scan size and
+   scan time limits, and passes `--alert-exceeds-max`, so a file above a
+   limit is an error from the scanner and not a silent pass, and a file
+   larger than 2047 MiB, which libclamav cannot scan at all, is
+   `CLAMAV_ERROR` before the scanner starts: FAIL and refused under a
+   profile that requires the scan, WARN and probed like any other file
+   under an optional one, and never reported clean.
    Test: `remux.TestBlockRefusedEvenWithForce`,
    `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`,
    `scan.TestClamscanInfectedBlocks`,
    `scan.TestClamAVFlagForcesAndNeverDowngrades`,
    `scan.TestClamscanErrorFailsUnderRequiredProfile`,
+   `scan.TestClamscanOversizedFileNotScanned`,
+   `scan.TestClamscanArgumentsVerbatim`,
    `ingest.TestClamscanInfectedRefusedEvenWithForce`,
    `ingest.TestClamscanMissingRefusesMedia`,
    `ingest.TestClamscanErrorRefusedUnderStrict`,
    `cli.TestClamscanInfectedBlocksEverywhere`,
    `cli.TestClamscanMissingWithStrictProfile`,
    `cli.TestClamscanErrorFailsStrictEverywhere`,
-   `doctor.TestClamscanDatabaseRequiredByProfile`.
+   `doctor.TestClamscanDatabaseRequiredByProfile`,
+   `doctor.TestClamscanCannotRunWithRequiredProfile`,
+   `doctor.TestClamscanVersionFloor`.
 10. **No root by accident.** Modifying commands refuse to run as uid 0 unless
     `--allow-root`, because a hook container running as root would leave
     root-owned files in the library.
