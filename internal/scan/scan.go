@@ -237,7 +237,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 		fr.Addf(CodePolyglot, report.Block, "%s", poly)
 		return r
 	}
-	if s.clamav(ctx, fr, path) {
+	if s.clamav(ctx, fr, path, fi.Size()) {
 		return r
 	}
 
@@ -579,6 +579,40 @@ func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path s
 // that without letting a hung scanner hold the run forever.
 const DefaultClamTimeout = 30 * time.Minute
 
+// ClamMaxFileSize is the largest file one clamscan call is asked to scan,
+// passed as --max-filesize. libclamav cannot scan a file of 2 GiB or more
+// at all, and its own default limit is 100 MB, above which it reports the
+// file clean without reading it; the value here is the largest whole
+// number of MiB below the hard cap, so every file that libclamav can scan
+// is scanned in full and every file it cannot scan is refused. A file
+// larger than this is CLAMAV_ERROR before clamscan starts, in the same
+// words for every version of the scanner, and --alert-exceeds-max makes
+// clamscan itself exit 2 for one that grew past the limit after the stat.
+const ClamMaxFileSize = 2047 << 20
+
+// clamLimitArgs are the limit options every clamscan call carries. By
+// default libclamav skips a file above --max-filesize, stops reading a
+// file above --max-scansize and gives up on one that takes longer than
+// --max-scantime, and in each case clamscan prints nothing under
+// --infected and exits 0, so a required scan would pass a file that was
+// never read. --alert-exceeds-max turns a skipped file into an alert
+// instead. The scan size and scan time limits are then switched off rather
+// than raised, because an alert on either of them exits 1, which is the
+// exit status of an infected file, and a clean file that was merely slow
+// or large must never be blocked and quarantined as one: the run's own
+// timeout bounds a slow scan and reports it CLAMAV_ERROR, and the file
+// size limit, whose alert exits 2, is the one limit left that can fire.
+// --alert-exceeds-max needs ClamAV 0.103 or newer; an older clamscan
+// refuses the option and exits with an error, which is CLAMAV_ERROR and
+// under a required profile fails the file, and doctor reports the version
+// as too old.
+var clamLimitArgs = []string{
+	fmt.Sprintf("--max-filesize=%dM", ClamMaxFileSize>>20),
+	"--max-scansize=0",
+	"--max-scantime=0",
+	"--alert-exceeds-max",
+}
+
 // The bounds on what a finding keeps of the clamscan output. A scanner
 // that floods its output, or an output crafted to look like a report,
 // cannot grow the finding beyond these. The per-line and message bounds
@@ -599,6 +633,20 @@ func (s *Scanner) clamTimeout() time.Duration {
 	return DefaultClamTimeout
 }
 
+// MaxClamScans is how many clamscan processes amuxify runs at the same time
+// in one process, whatever --jobs says. clamscan loads the whole signature
+// database on every start, which takes well over a gigabyte of memory and
+// tens of seconds, so one process per worker would exhaust the memory of
+// most hosts long before the disks were busy. A worker whose file is due
+// for clamscan waits for a slot; the other checks of the other workers go
+// on meanwhile.
+const MaxClamScans = 1
+
+// clamSlots is the process-wide gate that enforces MaxClamScans. It is one
+// for the whole process rather than one per Scanner because ingest and the
+// hook adapters build their own Scanner and the memory is shared either way.
+var clamSlots = make(chan struct{}, MaxClamScans)
+
 // clamav runs clamscan when the profile or the --clamav flag asks for it
 // and reports the outcome. The verdict rests on the exit status alone
 // (0 clean, 1 infected, anything else an error): nothing printed by the
@@ -614,22 +662,14 @@ func (s *Scanner) clamTimeout() time.Duration {
 // a profile that requires the scan must not let a file through that was
 // never scanned, and both a short --timeout and a scanner without a
 // signature database would otherwise turn "required" into a pass.
-
-// MaxClamScans is how many clamscan processes amuxify runs at the same time
-// in one process, whatever --jobs says. clamscan loads the whole signature
-// database on every start, which takes well over a gigabyte of memory and
-// tens of seconds, so one process per worker would exhaust the memory of
-// most hosts long before the disks were busy. A worker whose file is due
-// for clamscan waits for a slot; the other checks of the other workers go
-// on meanwhile.
-const MaxClamScans = 1
-
-// clamSlots is the process-wide gate that enforces MaxClamScans. It is one
-// for the whole process rather than one per Scanner because ingest and the
-// hook adapters build their own Scanner and the memory is shared either way.
-var clamSlots = make(chan struct{}, MaxClamScans)
-
-func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
+//
+// A file larger than ClamMaxFileSize, which libclamav cannot scan, is the
+// same outcome without starting the scanner: size is the file's size from
+// the scan's own stat, and the finding says in plain words why the file
+// was not scanned. The limit is also passed to clamscan (clamLimitArgs),
+// so a file that grew past it after the stat is refused by the scanner
+// itself rather than reported clean unread.
+func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string, size int64) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
 		mode = "optional"
@@ -648,6 +688,10 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 	if mode == "required" {
 		sev, stop = report.Fail, true
 	}
+	if size > ClamMaxFileSize {
+		fr.Addf(CodeClamError, sev, "file is %d bytes and clamscan cannot scan files larger than %d MiB (libclamav does not support files of 2 GiB or more), so it was not scanned", size, ClamMaxFileSize>>20)
+		return stop
+	}
 	// The wait for a slot gives up when the run is cancelled, so an
 	// interrupt is not held behind another worker's clamscan.
 	select {
@@ -657,7 +701,9 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 		fr.Addf(CodeClamError, sev, "%v", ctx.Err())
 		return stop
 	}
-	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, "--no-summary", "--infected", "--", path)
+	args := append([]string{"--no-summary", "--infected"}, clamLimitArgs...)
+	args = append(args, "--", path)
+	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, args...)
 	if err != nil {
 		// A start failure or a timeout: the child was killed or never ran,
 		// so there is no exit status to read a verdict from.
@@ -706,10 +752,15 @@ func clamErrorMessage(res *exec.Result, path string) string {
 // carrying anything else the scanner printed.
 //
 // The output is walked in place, one line at a time, and nothing of it is
-// copied until a line has passed the prefix test, so the memory the call
-// takes is bounded by the detail it returns and not by what the scanner
-// printed: the runner keeps up to its MaxOutput of each stream, and
-// splitting that into lines first would cost a string header per newline.
+// copied until a line has passed the prefix test, and then no more of it
+// than the per-line bound, so the memory the call takes is bounded by the
+// detail it returns and not by what the scanner printed: the runner keeps
+// up to its MaxOutput of each stream, splitting that into lines first
+// would cost a string header per newline, and a single line as long as
+// the whole stream would otherwise be copied in full before it was cut.
+// A line is sanitised before it is counted against the byte bound, so the
+// bound holds on the sanitised text and a line that would cross it is
+// left out and counted as not shown.
 func clamDetail(res *exec.Result, path string) string {
 	prefix := []byte(path + ":")
 	var lines []string
@@ -719,11 +770,17 @@ func clamDetail(res *exec.Result, path string) string {
 			if !bytes.HasPrefix(line, prefix) {
 				return true
 			}
-			if len(lines) >= clamDetailLines || total >= clamDetailBytes {
+			if len(lines) >= clamDetailLines {
 				more++
 				return true
 			}
-			s := clamText(string(line), clamLineBytes)
+			// One byte past the bound is enough for clamText to see that
+			// the line was longer and mark the cut.
+			s := clamText(string(line[:min(len(line), clamLineBytes+1)]), clamLineBytes)
+			if total+len(s) > clamDetailBytes {
+				more++
+				return true
+			}
 			total += len(s)
 			lines = append(lines, s)
 			return true

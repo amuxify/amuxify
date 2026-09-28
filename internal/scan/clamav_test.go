@@ -17,12 +17,13 @@ import (
 )
 
 // fakeClamscan installs a POSIX shell script as clamscan. The script body
-// runs with the arguments amuxify passes ("--no-summary --infected --
-// <path>"), so "$4" or the last positional is the scanned path. Every
-// other tool is pointed at a missing path first, so what the scan does
-// after clamscan (attempt the probe) is deterministic: ffprobe is absent
-// and the file is reported UNPARSEABLE, which is how the tests tell that
-// the run carried on past the scanner.
+// runs with the arguments amuxify passes ("--no-summary --infected", the
+// limit options, "--" and the path), so the last positional, which the
+// script's first line puts in $last, is the scanned path. Every other
+// tool is pointed at a missing path first, so what the scan does after
+// clamscan (attempt the probe) is deterministic: ffprobe is absent and the
+// file is reported UNPARSEABLE, which is how the tests tell that the run
+// carried on past the scanner.
 func fakeClamscan(t *testing.T, body string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -181,6 +182,32 @@ func TestClamscanOutputBounded(t *testing.T) {
 	if len(f.Detail) > clamLineBytes+8 || !strings.HasSuffix(f.Detail, "...") || !utf8.ValidString(f.Detail) {
 		t.Fatalf("long line: %d bytes %q", len(f.Detail), f.Detail)
 	}
+	// The bound on the whole detail holds on the sanitised text: eight
+	// lines that are each within the per-line bound but grow fourfold when
+	// their control bytes are escaped do not reach the detail in full,
+	// because a line that would cross the byte bound is left out and
+	// counted as not shown rather than appended and only then noticed.
+	fakeClamscan(t, `c=$(printf '\001'); pad=; i=0; while [ $i -lt 400 ]; do pad="$pad$c"; i=$((i+1)); done; i=0; while [ $i -lt 8 ]; do printf '%s: %s FOUND\n' "$last" "$pad"; i=$((i+1)); done; exit 1`)
+	s, media = clamScanner(t, "archive")
+	fr = scanOne(t, s, media)
+	f = finding(fr, CodeClamInfected)
+	lines = strings.Split(f.Detail, "\n")
+	kept, shown := 0, 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, media+": ") {
+			kept += len(l)
+			shown++
+		}
+	}
+	if kept > clamDetailBytes || shown == 0 || shown+1 != len(lines) {
+		t.Fatalf("detail not bounded on the sanitised text: %d bytes in %d line(s) about the file, %d lines in all", kept, shown, len(lines))
+	}
+	if !cleanOf(f.Detail) || !strings.Contains(f.Detail, `\x01`) {
+		t.Fatalf("control bytes not escaped: %q", f.Detail)
+	}
+	if want := fmt.Sprintf("%d more line(s) about this file not shown", 8-shown); lines[len(lines)-1] != want {
+		t.Fatalf("last line %q, want %q", lines[len(lines)-1], want)
+	}
 }
 
 // Output crafted to read like a report is neutralised: ANSI escapes and
@@ -311,6 +338,11 @@ func TestClamscanExitZeroWithStderr(t *testing.T) {
 
 // The arguments reach clamscan as separate words with the path after
 // "--", so a path that begins with a dash is a file name, never an option.
+// The limit options are part of every call: without --max-filesize raised
+// to the most libclamav can scan, --max-scansize and --max-scantime
+// switched off and --alert-exceeds-max, clamscan reports a file above its
+// default 100 MB limit clean without reading it, which almost every media
+// file is.
 func TestClamscanArgumentsVerbatim(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "argv")
 	fakeClamscan(t, `for a; do printf '%s\n' "$a"; done > '`+log+`'; exit 0`)
@@ -322,8 +354,93 @@ func TestClamscanArgumentsVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "--no-summary\n--infected\n--\n"+dash+"\n" {
+	want := "--no-summary\n--infected\n--max-filesize=2047M\n--max-scansize=0\n--max-scantime=0\n--alert-exceeds-max\n--\n" + dash + "\n"
+	if string(got) != want {
 		t.Fatalf("argv:\n%s", got)
+	}
+	if ClamMaxFileSize != 2047<<20 || ClamMaxFileSize >= 1<<31 {
+		t.Fatalf("ClamMaxFileSize %d is not the largest whole MiB below libclamav's 2 GiB cap", ClamMaxFileSize)
+	}
+}
+
+// Guarantee 9: a file libclamav cannot scan is never passed by a scan that
+// did not read it. A file larger than ClamMaxFileSize is CLAMAV_ERROR in
+// plain words before clamscan starts, FAIL and the scan stops under a
+// required profile, WARN and the file is probed under an optional one, and
+// --clamav lowers none of it. A file exactly at the limit is handed to
+// clamscan with the limit options. When clamscan itself refuses a file
+// that grew past the limit after the stat, its --alert-exceeds-max output
+// (an alert line with exit 2) is CLAMAV_ERROR the same way, so a scanner
+// that exits 0 without reading the file is never reached.
+func TestClamscanOversizedFileNotScanned(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "argv")
+	fakeClamscan(t, `for a; do printf '%s\n' "$a"; done > '`+log+`'; exit 0`)
+	sparse := func(t *testing.T, size int64) string {
+		t.Helper()
+		p := write(t, filepath.Join(t.TempDir(), "movie.mkv"), ebml, 0o644)
+		if err := os.Truncate(p, size); err != nil {
+			t.Skipf("cannot make a %d byte sparse file: %v", size, err)
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Size() != size {
+			t.Skipf("the filesystem did not keep a %d byte sparse file", size)
+		}
+		return p
+	}
+	big := sparse(t, ClamMaxFileSize+1)
+	for _, flag := range []bool{false, true} {
+		s := newScanner(t, mustProfile(t, "strict"), nil)
+		s.ClamAV = flag
+		fr := scanOne(t, s, big)
+		if fr.Verdict != report.Fail || !fr.Has(CodeClamError) || fr.Has(CodeUnparseable) || fr.Has(CodeClamInfected) {
+			t.Fatalf("strict clamav=%v: verdict %s %v", flag, fr.Verdict, codes(fr))
+		}
+		f := finding(fr, CodeClamError)
+		if f.Severity != report.Fail || !strings.Contains(f.Message, "cannot scan files larger than 2047 MiB") || !strings.Contains(f.Message, "2 GiB") {
+			t.Fatalf("strict: finding %s %q", f.Severity, f.Message)
+		}
+		if _, err := os.Lstat(log); err == nil {
+			t.Fatal("clamscan was started for a file it cannot scan")
+		}
+	}
+	s := newScanner(t, mustProfile(t, "archive"), nil)
+	fr := scanOne(t, s, big)
+	f := finding(fr, CodeClamError)
+	if f.Severity != report.Warn || fr.Verdict >= report.Block || !fr.Has(CodeUnparseable) {
+		t.Fatalf("archive: %s %v", fr.Verdict, codes(fr))
+	}
+	if _, err := os.Lstat(log); err == nil {
+		t.Fatal("clamscan was started for a file it cannot scan")
+	}
+	// At the limit the file is scanned, with the limit options.
+	edge := sparse(t, ClamMaxFileSize)
+	fr = scanOne(t, s, edge)
+	if fr.Has(CodeClamError) || fr.Has(CodeClamInfected) {
+		t.Fatalf("a file at the limit raised %v", codes(fr))
+	}
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal("clamscan was not run for a file at the limit")
+	}
+	for _, opt := range []string{"--max-filesize=2047M\n", "--alert-exceeds-max\n", "--max-scansize=0\n", "--max-scantime=0\n"} {
+		if !strings.Contains(string(got), opt) {
+			t.Fatalf("argv lacks %q:\n%s", opt, got)
+		}
+	}
+	// The scanner's own refusal of a file above the limit.
+	fakeClamscan(t, `printf '%s: Heuristics.Limits.Exceeded.MaxFileSize FOUND\n' "$last"; exit 2`)
+	s, media := clamScanner(t, "strict")
+	fr = scanOne(t, s, media)
+	if fr.Verdict != report.Fail || !fr.Has(CodeClamError) || fr.Has(CodeUnparseable) || fr.Has(CodeClamInfected) {
+		t.Fatalf("strict, scanner alert: verdict %s %v", fr.Verdict, codes(fr))
+	}
+	f = finding(fr, CodeClamError)
+	if f.Message != "clamscan exit 2: "+media+": Heuristics.Limits.Exceeded.MaxFileSize FOUND" || f.Detail != media+": Heuristics.Limits.Exceeded.MaxFileSize FOUND" {
+		t.Fatalf("strict, scanner alert: %q / %q", f.Message, f.Detail)
+	}
+	s, media = clamScanner(t, "archive")
+	fr = scanOne(t, s, media)
+	if f := finding(fr, CodeClamError); f.Severity != report.Warn || !fr.Has(CodeUnparseable) {
+		t.Fatalf("archive, scanner alert: %s %v", fr.Verdict, codes(fr))
 	}
 }
 
@@ -525,6 +642,20 @@ func TestClamDetailMemoryBounded(t *testing.T) {
 	}
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
 		t.Fatalf("clamDetail allocated %d bytes for %d bytes of newline-only output", grew, 2*n)
+	}
+	// One line as long as the whole stream that starts with the path is
+	// not copied in full before it is cut: only the per-line bound of it is.
+	stdout = append([]byte(path+": "), bytes.Repeat([]byte{'A'}, n)...)
+	res = &exec.Result{Stdout: stdout, ExitCode: 1}
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	detail = clamDetail(res, path)
+	runtime.ReadMemStats(&after)
+	if !strings.HasPrefix(detail, path+": AAAA") || !strings.HasSuffix(detail, "...") || len(detail) > clamLineBytes+8 {
+		t.Fatalf("long line detail: %d bytes %q", len(detail), detail[:min(len(detail), 80)])
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("clamDetail allocated %d bytes for one %d byte line", grew, n)
 	}
 	// The same flood from the scanner itself, through the runner.
 	fakeClamscan(t, `pad='

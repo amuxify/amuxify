@@ -10,7 +10,7 @@ first, then the binary, then run `amuxify doctor`.
 | MKVToolNix (`mkvmerge`, `mkvpropedit`, `mkvextract`) | 50 | the only MKV writer; `--no-date`, IETF language tags, attachment extraction |
 | ffmpeg and ffprobe | 4.4 (5.0+ recommended) | probing, stream hashing, decode checks, MP4/AVI metadata rewrite |
 | exiftool | any | optional, richer provenance reports |
-| clamscan | any | optional, `--clamav` or `safety.clamav = "optional"` or `"required"`; see [ClamAV](#clamav) |
+| clamscan | 0.103 | optional, `--clamav` or `safety.clamav = "optional"` or `"required"`; see [ClamAV](#clamav) |
 
 ```sh
 # Debian / Ubuntu
@@ -110,7 +110,7 @@ PASS     mkvextract   /usr/bin/mkvextract (...)
 PASS     ffmpeg       /usr/bin/ffmpeg (ffmpeg version 6.1.1 ...)
 PASS     ffprobe      /usr/bin/ffprobe (...)
 WARN     exiftool     not found (optional: deep metadata reports)
-WARN     clamscan     not found (optional: safety.clamav = optional|required)
+WARN     clamscan     not found (ClamAV 0.103 or newer for --alert-exceeds-max; optional: safety.clamav = optional|required)
 PASS     locale       en_US.UTF-8
 PASS     profile      homelab: Keep all languages, chapters and fonts; ...
 PASS     user         uid 1000
@@ -128,6 +128,11 @@ the active profile is invalid.
 
 ClamAV is optional. Install it and download the signature database once
 before the first scan; the scan needs the database, not the `clamd` daemon.
+ClamAV 0.103 or newer is required, because every scan passes
+`--alert-exceeds-max`, which that release introduced; `doctor` reports an
+older clamscan as too old and exits 2, and an older clamscan refuses the
+option, which every scan reports as `CLAMAV_ERROR`. The package in every
+distribution listed below is newer than that.
 
 ```sh
 # Debian / Ubuntu
@@ -160,15 +165,32 @@ Whether a scan runs is decided by the profile's `safety.clamav` key and the
 The `strict` profile requires clamscan: without it `doctor` exits 2 with
 `MISSING  clamav  profile requires clamscan but it is not installed`, and
 `scan`, `ingest` and the hook adapters fail every media file with
-`CLAMAV_MISSING`, and a clamscan that has no signature database makes
+`CLAMAV_MISSING`, a clamscan that has no signature database makes
 `doctor` exit 2 with `MISSING  clamav-db` and fails every media file with
-`CLAMAV_ERROR`. One clamscan call is bounded by `--timeout` when given and
+`CLAMAV_ERROR`, and a clamscan that is installed but cannot be run, because
+a shared library is missing for example, makes `doctor` exit 2 with
+`MISSING  clamav  profile requires clamscan but it cannot be run` for the
+same reason. One clamscan call is bounded by `--timeout` when given and
 by 30 minutes otherwise; a scanner that runs past it is killed and the file
 is reported `WARN CLAMAV_ERROR` under an optional scan, which does not block
 the run, and `FAIL CLAMAV_ERROR` under a required one, which refuses the
 file. Every call loads the whole signature database before it reads the
 file, which takes several seconds on a slow machine, so a large tree scans
 noticeably slower with ClamAV on.
+
+libclamav cannot scan a file of 2 GiB or more, and by default it skips any
+file above 100 MB and reports it clean without reading it. amuxify raises
+the file size limit to 2047 MiB, the most libclamav accepts, switches off
+the scan size and scan time limits so that a large or slow file is read in
+full under amuxify's own timeout, and passes `--alert-exceeds-max` so that
+a file the scanner did not read is never reported clean. A media file
+larger than 2047 MiB is therefore not scanned at all: it is `CLAMAV_ERROR`
+with a message that says so, which is a warning under an optional scan and
+fails the file under a required one, so a `strict` profile refuses every
+file of that size. Many high bitrate and 4K releases are larger than that,
+so a library of them needs a profile with `safety.clamav = optional`, which
+probes and verifies such a file as usual and records in the report that
+the antivirus scan did not run, rather than one that requires the scan.
 
 The `locale` line shows the locale every tool is run under. amuxify keeps your
 own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale (messages are

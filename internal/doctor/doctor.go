@@ -41,7 +41,11 @@ var floors = []floor{
 	{exec.FFmpeg, true, []int{4, 4}, "4.4 minimum, 5.0 or newer recommended"},
 	{exec.FFprobe, true, []int{4, 4}, "ships with ffmpeg"},
 	{exec.ExifTool, false, nil, "optional: deep metadata reports"},
-	{exec.ClamScan, false, nil, "optional: safety.clamav = optional|required"},
+	// The scan passes --alert-exceeds-max so a file above clamscan's size
+	// limit is refused rather than reported clean unread; ClamAV 0.103 was
+	// the first release with the option, and an older clamscan exits with
+	// an error on every call.
+	{exec.ClamScan, false, []int{0, 103}, "ClamAV 0.103 or newer for --alert-exceeds-max; optional: safety.clamav = optional|required"},
 }
 
 var verRe = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
@@ -74,6 +78,14 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 		line, err := r.Version(ctx, f.tool)
 		if err != nil {
 			add(Check{Name: f.tool, Status: report.Warn, Detail: path + ": cannot read version: " + err.Error(), Required: f.required})
+			// A clamscan that is installed but cannot be run (a missing
+			// shared library, a broken interpreter line) fails every media
+			// file under a profile that requires the scan, exactly as one
+			// with no signature database does, so it is reported as the
+			// same missing requirement rather than left at a warning.
+			if f.tool == exec.ClamScan && clamRequired {
+				add(Check{Name: "clamav", Status: report.Usage, Detail: "profile requires clamscan but it cannot be run: " + err.Error(), Required: true})
+			}
 			continue
 		}
 		// The version line is tool output and is printed on the terminal,
