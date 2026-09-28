@@ -68,8 +68,24 @@ SECURITY.md.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make
-   ffmpeg open a URL.
-   Test: `exec.TestFFGuardPrependsWhitelist`, `exec.TestCleanEnvDropsLDPreload`.
+   ffmpeg open a URL. Every tool, clamscan included, runs under the same
+   environment and timeout, and the runner keeps a bounded amount of what a
+   tool prints, so a tool that hangs is killed and a tool that floods its
+   output cannot grow the process. A bounded output is never mistaken for
+   the whole: a probe cut at the bound is an unparseable file with the cut
+   named as the reason, and a text subtitle track cut at the bound is
+   reported `LINK_IN_SUBS` as not fully checked, so a track padded past the
+   bound cannot hide a link behind it. What clamscan printed reaches the
+   report only as the lines about the scanned file, walked in place so the
+   memory taken is bounded by the detail and not by the output, cut to a
+   fixed size and passed through the report sanitiser; the verdict comes
+   from its exit status alone.
+   Test: `exec.TestFFGuardPrependsWhitelist`, `exec.TestCleanEnvDropsLDPreload`,
+   `exec.TestRunTimeoutReturnsTimedOut`, `exec.TestRunCapsOutput`,
+   `scan.TestSubtitleTrackLongerThanRunnerKeeps`, `scan.TestProbeOutputLongerThanRunnerKeeps`,
+   `scan.TestClamscanHangIsKilledAtTimeout`, `scan.TestClamscanOutputBounded`,
+   `scan.TestClamDetailMemoryBounded`,
+   `scan.TestClamscanHostileOutputSanitised`, `scan.TestClamscanArgumentsVerbatim`.
 5. **Streams are proven identical.** After remux, every kept stream is hashed
    in the source and in the output with `ffmpeg -f streamhash` (SHA-256 of
    packets). When the source container frames packets differently from
@@ -105,8 +121,20 @@ SECURITY.md.
    whether it comes from the flag or from the profile.
    Test: `remux.TestInPlaceVerifyNoneRefused`, `ingest.TestVerifyNoneRefusedFromFlagAndProfile`.
 9. **BLOCK is final.** No flag, profile key or environment variable turns a
-   BLOCK into anything else.
-   Test: `remux.TestBlockRefusedEvenWithForce`, `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`.
+   BLOCK into anything else. A positive antivirus hit is a BLOCK from the
+   exit status of clamscan, whatever the scanner printed, and `--clamav`
+   never lowers a profile that requires the scan. A profile that requires
+   the scan never passes a file that was not scanned: a scanner that is
+   missing, that was killed at the timeout, that could not start or that
+   exited without a verdict fails the file before it is probed, and
+   `ingest` and the hook adapters refuse it.
+   Test: `remux.TestBlockRefusedEvenWithForce`, `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`,
+   `scan.TestClamscanInfectedBlocks`, `scan.TestClamAVFlagForcesAndNeverDowngrades`,
+   `scan.TestClamscanErrorFailsUnderRequiredProfile`,
+   `ingest.TestClamscanInfectedRefusedEvenWithForce`, `ingest.TestClamscanMissingRefusesMedia`,
+   `ingest.TestClamscanErrorRefusedUnderStrict`,
+   `cli.TestClamscanInfectedBlocksEverywhere`, `cli.TestClamscanMissingWithStrictProfile`,
+   `cli.TestClamscanErrorFailsStrictEverywhere`, `doctor.TestClamscanDatabaseRequiredByProfile`.
 10. **No root by accident.** Modifying commands refuse to run as uid 0 unless
     `--allow-root`, because a hook container running as root would leave
     root-owned files in the library.

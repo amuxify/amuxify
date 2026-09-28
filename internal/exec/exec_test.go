@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,26 @@ func TestMain(m *testing.M) {
 	case "exit3":
 		fmt.Fprintln(os.Stderr, "helper failing on purpose")
 		os.Exit(3)
+	case "flood":
+		// Write the number of bytes named by the first argument to stdout
+		// and the same to stderr, then exit with the second argument's code
+		// so the caller can tell that the child finished on its own.
+		n, _ := strconv.Atoi(args[0])
+		code, _ := strconv.Atoi(args[1])
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		for _, w := range []*os.File{os.Stdout, os.Stderr} {
+			for left := n; left > 0; {
+				k := len(chunk)
+				if left < k {
+					k = left
+				}
+				if _, err := w.Write(chunk[:k]); err != nil {
+					os.Exit(98)
+				}
+				left -= k
+			}
+		}
+		os.Exit(code)
 	case "forkexit", "forkhang":
 		// Start a grandchild that inherits this process's stdout and
 		// stderr and sleeps, so the pipes stay open after this process is
@@ -745,6 +767,46 @@ func TestRunStreaming(t *testing.T) {
 	prefix = helperTool(t, "streamer", "echo")
 	if _, err := r.RunStreaming(context.Background(), 10*time.Second, "streamer", failingWriter{}, append(prefix, "x")...); err == nil {
 		t.Fatal("write failure was not reported")
+	}
+}
+
+// Guarantee 4: a tool that floods its output cannot grow the process
+// without bound. The runner keeps the first MaxOutput bytes of stdout and
+// of stderr, reads and drops the rest so the child never stalls on a full
+// pipe, marks the result as truncated, and still reports the exit status
+// the child ended with. Output under the bound is kept whole and not
+// marked. The bound does not apply to a streaming run, whose stdout goes
+// to the caller's writer.
+func TestRunCapsOutput(t *testing.T) {
+	prefix := helperTool(t, "floodtool", "flood")
+	r := &Runner{MaxOutput: 1 << 20}
+	res, err := r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "3")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != 1<<20 || len(res.Stderr) != 1<<20 {
+		t.Fatalf("kept %d bytes of stdout and %d of stderr, want %d each", len(res.Stdout), len(res.Stderr), 1<<20)
+	}
+	if !res.OutputTruncated || res.ExitCode != 3 || res.TimedOut {
+		t.Fatalf("result: truncated=%v exit=%d timedOut=%v", res.OutputTruncated, res.ExitCode, res.TimedOut)
+	}
+	res, err = r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(1000), "0")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != 1000 || len(res.Stderr) != 1000 || res.OutputTruncated {
+		t.Fatalf("under the bound: %d/%d bytes, truncated=%v", len(res.Stdout), len(res.Stderr), res.OutputTruncated)
+	}
+	if (&Runner{}).maxOutput() != DefaultMaxOutput || DefaultMaxOutput < 4<<20 {
+		t.Fatalf("default bound %d", (&Runner{}).maxOutput())
+	}
+	var w countingWriter
+	res, err = r.RunStreaming(context.Background(), 30*time.Second, "floodtool", &w, append(prefix, strconv.Itoa(3<<20), "0")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.b) != 3<<20 || len(res.Stderr) != 1<<20 || !res.OutputTruncated {
+		t.Fatalf("streaming: writer got %d bytes, stderr %d, truncated=%v", len(w.b), len(res.Stderr), res.OutputTruncated)
 	}
 }
 

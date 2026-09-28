@@ -341,7 +341,7 @@ func TestVersionAndHelp(t *testing.T) {
 	if n == 0 {
 		t.Fatal("no global flags bound")
 	}
-	if !strings.Contains(help, "--timeout <duration>    per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean)\n") {
+	if !strings.Contains(help, "--timeout <duration>    per-tool timeout (default: 60s probe, 1h verify, 6h remux, 2h clean, 30m clamscan)\n") {
 		t.Errorf("help lacks the --timeout line:\n%s", help)
 	}
 	if !strings.Contains(help, "amuxify "+Version+" - the ingest gate") || strings.Contains(help, "%!") {

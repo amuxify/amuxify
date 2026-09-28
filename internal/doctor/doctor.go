@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
@@ -55,6 +56,11 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 			worst = c.Status
 		}
 	}
+	// The profile is loaded first because the clamscan rows depend on
+	// whether it requires the scan; its own row keeps its place after the
+	// tools and the locale.
+	p, perr := policy.Load(profileName)
+	clamRequired := perr == nil && p.Safety.ClamAV == "required"
 	for _, f := range floors {
 		path, err := r.Path(f.tool)
 		if err != nil {
@@ -70,6 +76,10 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 			add(Check{Name: f.tool, Status: report.Warn, Detail: path + ": cannot read version: " + err.Error(), Required: f.required})
 			continue
 		}
+		// The version line is tool output and is printed on the terminal,
+		// so it is bounded and sanitised like every other value that did
+		// not come from amuxify itself.
+		line = report.Sanitize(cut(line, versionBytes))
 		v, ok := parseVersion(line)
 		switch {
 		case f.min == nil:
@@ -81,10 +91,13 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 		default:
 			add(Check{Name: f.tool, Status: report.Pass, Detail: fmt.Sprintf("%s (%s)", path, line), Required: f.required})
 		}
+		if f.tool == exec.ClamScan {
+			add(clamDBCheck(line, clamRequired))
+		}
 	}
 	add(localeCheck(ctx, r))
-	if p, err := policy.Load(profileName); err != nil {
-		add(Check{Name: "profile", Status: report.Usage, Detail: err.Error(), Required: true})
+	if perr != nil {
+		add(Check{Name: "profile", Status: report.Usage, Detail: perr.Error(), Required: true})
 	} else {
 		add(Check{Name: "profile", Status: report.Pass, Detail: p.Name + ": " + p.Description, Required: true})
 		if p.Safety.ClamAV == "required" && !r.Have(exec.ClamScan) {
@@ -117,6 +130,68 @@ func Run(ctx context.Context, r *exec.Runner, profileName, stateDir string) ([]C
 	}
 	return checks, worst
 }
+
+// versionBytes bounds the version line doctor keeps of a tool's output.
+const versionBytes = 256
+
+// cut returns s bounded to max bytes on a rune boundary.
+func cut(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max] + "..."
+}
+
+// clamDBLayout is the date clamscan --version prints after the signature
+// database version, as in "ClamAV 1.2.1/27000/Tue Oct 10 08:33:45 2023".
+// It is the host's local time.
+const clamDBLayout = "Mon Jan 2 15:04:05 2006"
+
+// clamDBCheck is the row under clamscan that reports the signature
+// database version and age read from the version line, when the line
+// carries them. The age never changes the doctor's exit status: a
+// database that exists but is old is a matter of freshness, not of
+// whether amuxify can run, so the row passes and the detail tells the
+// user to run freshclam. When clamscan prints no database at all, because
+// none has been downloaded yet, every scan exits 2 without reading the
+// file; under a profile that requires the scan that fails every media
+// file, so the row is then a missing requirement and the doctor exits 2,
+// the same as for a clamscan that is not installed. Under an optional scan
+// the row still passes and says what to do.
+func clamDBCheck(line string, required bool) Check {
+	c := Check{Name: "clamav-db", Status: report.Pass}
+	parts := strings.SplitN(line, "/", 3)
+	if len(parts) < 3 {
+		c.Detail = "no signature database version in the clamscan version line; run freshclam to download one"
+		if required {
+			c.Status, c.Required = report.Usage, true
+			c.Detail = "profile requires clamscan but it has no signature database; run freshclam to download one"
+		}
+		return c
+	}
+	dbver := strings.TrimSpace(parts[1])
+	date := strings.TrimSpace(parts[2])
+	t, err := time.ParseInLocation(clamDBLayout, date, time.Local)
+	if err != nil {
+		c.Detail = fmt.Sprintf("signatures %s from %s (age unknown: the date did not parse)", dbver, date)
+		return c
+	}
+	days := int(now().Sub(t).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	c.Detail = fmt.Sprintf("signatures %s from %s (%d day(s) old)", dbver, t.Format("2006-01-02"), days)
+	if days > 7 {
+		c.Detail += "; run freshclam to update them"
+	}
+	return c
+}
+
+// now is the clock the database age is measured against; tests replace it.
+var now = time.Now
 
 // localeCheck runs mkvmerge --version under the locale every tool gets
 // (exec.Locale) and reports whether mkvmerge accepted it. On a host without

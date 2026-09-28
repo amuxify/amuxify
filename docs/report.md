@@ -308,11 +308,11 @@ on its own.
 | `PURCHASE_ATOM` | WARN or FAIL | scan, clean | Identifying MP4 atoms; the profile decides the severity, and clean reports FAIL when they survive a rewrite. |
 | `PROVENANCE_INFO` | PASS | scan | Encoder and muxer fingerprints; shown in verbose output only. |
 | `LINK_IN_TAG` | WARN or FAIL | scan | A URL or domain in the title, tags, chapters or attachment names; `metadata.links` decides the severity. |
-| `LINK_IN_SUBS` | WARN or FAIL | scan | A URL or domain in a text subtitle track; `subtitles.links` decides the severity. |
+| `LINK_IN_SUBS` | WARN or FAIL | scan | A URL or domain in a text subtitle track, or a text subtitle track longer than the runner keeps of a tool's output (16 MiB), which was therefore not checked in full; `subtitles.links` decides the severity. |
 | `DECODE_FAIL` | FAIL | scan, remux, ingest | ffmpeg reported errors while decoding. |
 | `NO_DURATION` | WARN | scan | The container reports no duration. |
 | `CLAMAV_INFECTED` | BLOCK | scan | clamscan reported a match. |
-| `CLAMAV_ERROR` | WARN | scan | clamscan could not run or failed. |
+| `CLAMAV_ERROR` | WARN, or FAIL when the profile requires the scan | scan | clamscan could not run, ran past the timeout or exited with an error. Under `safety.clamav = optional` the file is still probed and verified; under `required` the scan of the file stops there and `ingest` refuses it. |
 | `CLAMAV_MISSING` | FAIL | scan | The profile requires clamscan and it is not installed. |
 | `HARDLINKED` | PASS (scan, remux copy) or WARN (remux skip or break, clean skip, ingest) | scan, remux, clean, ingest | More than one link to the inode; scan records the count in `info.nlink`. |
 | `SIDECAR_BLOCKED` | BLOCK | scan | A sidecar extension on the block list. |
@@ -344,5 +344,5 @@ on its own.
 | `XATTR` | PASS, or WARN when an attribute could not be removed | clean | Extended attributes were removed. |
 | `NOTHING_TO_CLEAN` | PASS | clean | The file was already clean or carries no writable metadata. |
 | `CLEAN_FAIL` | FAIL | clean | A cleaning step failed; the source is untouched. |
-| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
+| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `CLAMAV-DB`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
 | `TRACK`, `ATTACHMENT` | reserved | remux | Declared, never emitted. |
