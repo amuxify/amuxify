@@ -148,24 +148,43 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	// A tree with an unreadable corner still yields every readable file;
 	// the walk error naming the corner is returned after them so the run is
 	// reported as FAIL at run level, the same as scan, clean and ingest do.
-	// Each file is scanned and then remuxed by the same worker, so a
-	// parallel run streams one finished result per file just as a
-	// sequential one does.
 	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(r.Scanner.Quarantine)...)
 	if walkErr != nil && len(paths) == 0 {
 		return nil, walkErr
+	}
+	// Every file is scanned before any file is rebuilt, whatever Jobs says.
+	// The scan is the record of the tree as the run found it: with
+	// --in-place and hardlinks set to break, the second name of a
+	// hard-linked pair is reported with the two links it had when the run
+	// began, even though the rebuild of the first name has broken the link
+	// by the time the second is remuxed. Scanning and remuxing each file in
+	// one step would report the second name as a plain file, and the
+	// report would then depend on how far the run had got. The scan phase
+	// changes nothing on disk unless the scanner quarantines, which the
+	// scanner's own keys and claims order; each remux result is still
+	// streamed the moment that file is done.
+	scanKeys := make([][]string, len(paths))
+	for i, p := range paths {
+		scanKeys[i] = r.Scanner.SerialKeys(p, scanRoot)
+	}
+	scanned := make([]scan.Result, len(paths))
+	ran := pool.Run(ctx, r.Jobs, len(paths), scanKeys, func(i int) {
+		sc := r.Scanner.ScanFile(ctx, paths[i], scanRoot)
+		if r.Scanner.Progress != nil {
+			r.Scanner.Progress(sc)
+		}
+		scanned[i] = sc
+	})
+	if !all(ran) {
+		return nil, ctx.Err()
 	}
 	keys := make([][]string, len(paths))
 	for i, p := range paths {
 		keys[i] = r.SerialKeys(p, inputRoot, outRoot)
 	}
 	results := make([]report.FileResult, len(paths))
-	ran := pool.Run(ctx, r.Jobs, len(paths), keys, func(i int) {
-		sc := r.Scanner.ScanFile(ctx, paths[i], scanRoot)
-		if r.Scanner.Progress != nil {
-			r.Scanner.Progress(sc)
-		}
-		fr := r.RemuxScanned(ctx, sc, inputRoot, outRoot)
+	ran = pool.Run(ctx, r.Jobs, len(paths), keys, func(i int) {
+		fr := r.RemuxScanned(ctx, scanned[i], inputRoot, outRoot)
 		if r.Progress != nil {
 			r.Progress(fr)
 		}
@@ -183,19 +202,35 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	return out, walkErr
 }
 
+// all reports whether every item of a pool run ran.
+func all(ran []bool) bool {
+	for _, ok := range ran {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // SerialKeys lists what keeps path from running beside another file of the
 // same walk: its inode when it has other hard links, so two names of one
 // file are handled one after the other, and the outputs it could map to,
 // spelled in lower case, so files that would collide on one destination are
 // decided in walk order and the earlier one wins, as in a sequential run.
-// The claim set guards the destinations whatever the keys say; the keys make
-// the outcome deterministic.
+// Only a media file gets destination keys: RemuxScanned skips every other
+// file before it computes a destination, so a sidecar that shares its stem
+// with a media file, Movie.nfo beside Movie.mkv, need not wait for that
+// file's rebuild. The claim set guards the destinations whatever the keys
+// say; the keys make the outcome deterministic.
 func (r *Remuxer) SerialKeys(path, inputRoot, outRoot string) []string {
 	var keys []string
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
 		if k := fsutil.InodeKey(fi); k != "" {
 			keys = append(keys, "inode:"+k)
 		}
+	}
+	if !scan.IsMedia(path) {
+		return keys
 	}
 	rel, err := filepath.Rel(inputRoot, path)
 	if err != nil {
@@ -558,13 +593,16 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched", err)
 			return fr
 		}
-		keep = true
 		// The source is checked one last time now that the output sits at
 		// dest: were it replaced in the meantime, removing it would delete
 		// a file that was never rebuilt. The output is then taken back
-		// again, provided dest still is the file this run placed there.
+		// again, provided dest still is the file this run placed there,
+		// and the claim on dest goes with it, so a later file of the run
+		// that maps to dest finds the name free, as the disk says it is.
+		// The claim is kept only once dest holds an output that stays.
 		if err := sourceUnchanged(fr.Path, fi); err != nil {
 			if rerr := removeOwn(dest, created); rerr != nil {
+				keep = true
 				fr.Output = dest
 				fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the rebuilt file stays at %s: %v", err, dest, rerr)
 				return fr
@@ -572,6 +610,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the placed output was removed again", err)
 			return fr
 		}
+		keep = true
 		if err := os.Remove(fr.Path); err != nil {
 			fr.Output = dest
 			fr.Addf(CodeRemuxFail, report.Fail, "the rebuilt file was placed at %s but the source could not be removed: %v", dest, err)
