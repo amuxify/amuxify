@@ -146,7 +146,9 @@ On Debian and Ubuntu the `clamav-freshclam` service keeps the database current;
 on the other systems run `freshclam` from a timer. `doctor` reports the
 clamscan version and, in the `clamav-db` row, the signature database version
 and its age, and names `freshclam` when the database is more than a week old
-or missing. The row is informational and never changes the exit code.
+or missing. The age of the database is informational and never changes the
+exit code; only a database that is missing altogether under a profile that
+requires the scan makes `doctor` exit 2, as described below.
 
 ```
 PASS     clamscan     /usr/bin/clamscan (ClamAV 1.4.2/27500/Mon Sep 21 08:33:45 2026)

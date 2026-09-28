@@ -247,7 +247,7 @@ names a stray argument never names one of SABnzbd's own.
    Test: `hook.TestCheckSABnzbdArgs`, `hook.TestSABnzbdFailureURLNeverRefuses`,
 `hook.TestParseKeepsHostileValuesAsData`,
 `cli.TestHookSABnzbdArgumentForms`, `cli.TestHookArgumentInjection`,
-`cli.TestHookEnvironmentInjection`.
+`cli.TestHookHostileEnvironment`.
 
 `--jobs` changes how many files are in flight, not what happens to any one of
 them. The worker pool never runs two names of one inode at the same time, nor
