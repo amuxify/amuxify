@@ -38,6 +38,11 @@ type Result struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
+	// Status is how the child ended when it did not exit 0, in the words
+	// of the operating system: "exit status 1", or "signal: killed" for a
+	// child that died on a signal, which ExitCode reports as -1. Empty for
+	// a run that exited 0.
+	Status   string
 	TimedOut bool
 	// StdoutTruncated and StderrTruncated are set when the child wrote more
 	// than the runner's MaxOutput to that stream; Stdout or Stderr then
@@ -265,6 +270,7 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 			var ee *osexec.ExitError
 			if errors.As(runErr, &ee) {
 				res.ExitCode = ee.ExitCode()
+				res.Status = ee.ProcessState.String()
 			}
 		}
 		return res, fmt.Errorf("%s: %w", tool, ctx.Err())
@@ -273,6 +279,7 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 		var ee *osexec.ExitError
 		if errors.As(runErr, &ee) {
 			res.ExitCode = ee.ExitCode()
+			res.Status = ee.ProcessState.String()
 			return res, nil
 		}
 		return res, fmt.Errorf("%s: %w", tool, runErr)

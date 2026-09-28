@@ -55,6 +55,13 @@ func TestMain(m *testing.M) {
 	case "exit3":
 		fmt.Fprintln(os.Stderr, "helper failing on purpose")
 		os.Exit(3)
+	case "selfkill":
+		fmt.Fprintln(os.Stderr, "helper about to be killed")
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Kill()
+		}
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
 	case "flood":
 		// Write the number of bytes named by the first argument to stdout
 		// and the same to stderr, then exit with the second argument's code
@@ -550,11 +557,38 @@ func TestNonZeroExitIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-zero exit surfaced as error: %v", err)
 	}
-	if res.ExitCode != 3 || res.TimedOut {
+	if res.ExitCode != 3 || res.TimedOut || res.Status != "exit status 3" {
 		t.Fatalf("result: %+v", res)
 	}
 	if !strings.Contains(string(res.Stderr), "on purpose") {
 		t.Fatalf("stderr not captured: %q", res.Stderr)
+	}
+}
+
+// A child that dies on a signal is a completed run with no exit code to
+// read: ExitCode is -1 and Status says which signal, so a consumer whose
+// document never arrived can report the death rather than a parse error.
+// A run that exited 0 carries no Status.
+func TestSignalDeathIsReportedInStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no signals on windows")
+	}
+	prefix := helperTool(t, "dyingtool", "selfkill")
+	r := &Runner{}
+	res, err := r.RunWithTimeout(context.Background(), 10*time.Second, "dyingtool", prefix...)
+	if err != nil {
+		t.Fatalf("a signal death surfaced as error: %v", err)
+	}
+	if res.ExitCode != -1 || res.Status != "signal: killed" || res.TimedOut {
+		t.Fatalf("result: %+v", res)
+	}
+	if !strings.Contains(string(res.Stderr), "about to be killed") {
+		t.Fatalf("stderr not captured: %q", res.Stderr)
+	}
+	prefix = helperTool(t, "oktool", "echo")
+	res, err = r.RunWithTimeout(context.Background(), 10*time.Second, "oktool", append(prefix, "hi")...)
+	if err != nil || res.ExitCode != 0 || res.Status != "" {
+		t.Fatalf("exit 0 run: %v %+v", err, res)
 	}
 }
 

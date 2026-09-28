@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/testutil"
@@ -774,5 +775,67 @@ func TestProbeStderrOverflowKeepsDocument(t *testing.T) {
 	_, err = p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
 	if err == nil || !strings.Contains(err.Error(), "longer than the runner keeps (8192 bytes)") {
 		t.Fatalf("a cut document was not refused by name: %v", err)
+	}
+}
+
+// ffprobe that never printed its document did not run to its exit: it
+// died on a signal, or failed before it could write. The error names how
+// it ended and its last line on standard error, so a run that lost a
+// probe to a kill on a loaded host says so instead of "unexpected end of
+// JSON input". Standard error is untrusted tool output: a line carrying
+// terminal escapes is stripped of them and a long one is cut, and an
+// ffprobe that exited 0 with a broken document is still reported for the
+// parse error, since it did run to the end.
+func TestProbeDeadFFprobeNamesTheSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	dir := t.TempDir()
+	stub := func(body string) {
+		t.Helper()
+		script := filepath.Join(dir, "ffprobe")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AMUXIFY_FFPROBE", script)
+	}
+	t.Setenv("AMUXIFY_MKVMERGE", filepath.Join(dir, "no-such-mkvmerge"))
+	p := &Prober{Runner: &exec.Runner{MaxOutput: 8192}, Timeout: time.Minute}
+	probe := func() string {
+		t.Helper()
+		_, err := p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
+		if err == nil {
+			t.Fatal("a probe with no document succeeded")
+		}
+		return err.Error()
+	}
+
+	stub("echo 'x.mp4: Operation not permitted' >&2\nkill -9 $$")
+	if got := probe(); got != "ffprobe: signal: killed: x.mp4: Operation not permitted" {
+		t.Fatalf("killed ffprobe: %q", got)
+	}
+	stub("kill -9 $$")
+	if got := probe(); got != "ffprobe: signal: killed: no output on standard error" {
+		t.Fatalf("killed ffprobe, silent: %q", got)
+	}
+	stub("echo 'first line' >&2\necho 'could not open' >&2\nexit 1")
+	if got := probe(); got != "ffprobe: exit status 1: could not open" {
+		t.Fatalf("ffprobe exit 1 without a document: %q", got)
+	}
+	stub("printf '\\033[2J\\033]0;owned\\007bad \\r\\n' >&2\nexit 2")
+	if got := probe(); got != "ffprobe: exit status 2: [2J]0;ownedbad" {
+		t.Fatalf("control characters not stripped: %q", got)
+	}
+	stub("printf '%s\\n' '" + strings.Repeat("é", 150) + "' >&2\nexit 1")
+	got := probe()
+	if !strings.HasSuffix(got, "...") || !utf8.ValidString(got) || utf8.RuneCountInString(got) > len("ffprobe: exit status 1: ")+101+3 {
+		t.Fatalf("long line not cut on a rune boundary: %d runes %q", utf8.RuneCountInString(got), got)
+	}
+	stub("printf '{\"streams\":[' \nexit 0")
+	if got := probe(); !strings.HasPrefix(got, "ffprobe: unparseable output: ") {
+		t.Fatalf("a broken document from an ffprobe that exited 0: %q", got)
 	}
 }

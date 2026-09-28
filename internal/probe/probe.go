@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 )
@@ -144,6 +145,14 @@ func (p *Prober) Probe(ctx context.Context, path string) (*MediaInfo, error) {
 	}
 	var fp ffprobeOut
 	if jerr := json.Unmarshal(res.Stdout, &fp); jerr != nil {
+		if res.ExitCode != 0 {
+			// ffprobe writes its error document to standard output before
+			// it exits 1, so no document at all means it never got that
+			// far: it died on a signal, or failed before it could print.
+			// The way it ended and its last words say which, where a JSON
+			// parse error would only say the output stopped short.
+			return nil, fmt.Errorf("ffprobe: %s: %s", res.Status, lastWords(res.Stderr))
+		}
 		return nil, fmt.Errorf("ffprobe: unparseable output: %v", jerr)
 	}
 	if res.ExitCode != 0 || fp.Error != nil {
@@ -356,6 +365,33 @@ func (p *mkvTrackProps) UnmarshalJSON(b []byte) error {
 
 // IdentifyMkv runs mkvmerge -J and returns the raw parsed output plus the
 // exit status. Status 1 means warnings only and is not a failure.
+// lastWords is the last non-blank line of a tool's standard error, cut to
+// a length that fits in a finding, or "no output on standard error" when
+// there is none. Standard error is tool output and so untrusted: control
+// characters are dropped so a line cannot rewrite the terminal.
+func lastWords(stderr []byte) string {
+	const max = 200
+	lines := strings.Split(strings.TrimSpace(string(stderr)), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		return "no output on standard error"
+	}
+	last = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, last)
+	if len(last) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(last[cut]) {
+			cut--
+		}
+		last = last[:cut] + "..."
+	}
+	return last
+}
+
 func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 	res, err := p.Runner.RunWithTimeout(ctx, to, exec.MKVMerge, "-J", m.Path)
 	if err != nil {
