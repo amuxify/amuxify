@@ -31,7 +31,7 @@ source before the output is placed.
 |---|---|---|
 | `amuxify scan <path>...` | Inspect files and sidecars, report findings, verdict per file | nothing (unless `--quarantine`) |
 | `amuxify remux <path>...` | Rebuild any supported container into a sanitized MKV with mkvmerge, verify, place | `<root>__remuxed/` or `--output`, or `--in-place` |
-| `amuxify clean <path>...` | Strip metadata, provenance atoms and extended attributes in place, tracks untouched | the file, after stream-hash verification |
+| `amuxify clean <path>...` | Strip metadata, provenance atoms and extended attributes in place, tracks untouched | the file; MP4, MOV, AVI and FLV are rewritten to a temp file and hash-verified before they replace the original, MKV and WebM headers are edited in place by mkvpropedit |
 | `amuxify ingest <path>...` | Scan, then rebuild into a verified MKV or clean in place, one pass per file | the file in place, after verification |
 | `amuxify hook sabnzbd\|nzbget\|sonarr\|radarr` | Run ingest from a download client or media manager script and exit the way that caller expects | as ingest |
 | `amuxify watch <dir>` | Poll a directory and run ingest on each file once it has stopped changing; for a sidecar container or a drop folder | as ingest |
