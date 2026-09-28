@@ -263,7 +263,10 @@ func (s *Scanner) checkStreams(fr *report.FileResult, info *probe.MediaInfo, cat
 			if !st.AttachedPic {
 				hasVideo = true
 				if len(st.HDR) > 0 {
-					fr.Addf(CodeHDR, report.Pass, "stream #%d: %s", st.Index, strings.Join(st.HDR, "+"))
+					// The detail lists the values the remux verifier
+					// holds the output to, so a report shows what the
+					// source carried.
+					fr.Add(report.Finding{Code: CodeHDR, Severity: report.Pass, Message: fmt.Sprintf("stream #%d: %s", st.Index, strings.Join(st.HDR, "+")), Detail: st.Color.String()})
 					fr.Info["hdr"] = strings.Join(st.HDR, "+")
 				}
 			}

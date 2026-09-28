@@ -938,12 +938,18 @@ func (r *Remuxer) verifyOutput(ctx context.Context, fr *report.FileResult, src *
 	if d.StripProvenance && (out.MuxingApp != "" || out.WritingApp != "") {
 		return fail("muxing/writing application still set")
 	}
-	// HDR and Dolby Vision survive only if mkvmerge carried the side data.
-	sv := src.StreamsOf("video")
+	// HDR and Dolby Vision survive only if mkvmerge carried the colour
+	// description, the static metadata and the configuration record. Every
+	// kept video stream is compared with its copy, and any value lost,
+	// gained or changed fails the file (guarantee 5 applies to the
+	// signalling as it does to the packets: the output is discarded).
 	ov := out.StreamsOf("video")
-	if len(sv) > 0 && len(ov) > 0 && len(sv[0].HDR) > 0 {
-		if strings.Join(sv[0].HDR, "+") != strings.Join(ov[0].HDR, "+") {
-			fr.Addf(CodeHDRLost, report.Fail, "source video is %s, output is %s", strings.Join(sv[0].HDR, "+"), orNone(strings.Join(ov[0].HDR, "+")))
+	for i, t := range d.KeptOf("video") {
+		if i >= len(ov) {
+			break
+		}
+		if diffs := hdrDiff(t.Stream, ov[i]); len(diffs) > 0 {
+			fr.Addf(CodeHDRLost, report.Fail, "stream #%d: %s", t.Stream.Index, strings.Join(diffs, "; "))
 			return false
 		}
 	}
@@ -987,6 +993,21 @@ func orNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// hdrDiff lists what differs in the HDR signalling between a source video
+// stream and the output stream that carries it: the family labels the scan
+// reports (hdr10, hlg, dovi, hdr10plus), and then every colour and HDR
+// property the probe normalised, in the words probe.ColorDiff uses. An SDR
+// source is compared as strictly as an HDR one, so an output that gained
+// signalling is reported too.
+func hdrDiff(src, out probe.Stream) []string {
+	var diffs []string
+	sl, ol := strings.Join(src.HDR, "+"), strings.Join(out.HDR, "+")
+	if sl != ol {
+		diffs = append(diffs, fmt.Sprintf("source video is %s, output is %s", orNone(sl), orNone(ol)))
+	}
+	return append(diffs, probe.ColorDiff(&src.Color, &out.Color)...)
 }
 
 // sameStream compares packet hashes first and falls back to decoded hashes
