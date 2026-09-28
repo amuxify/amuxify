@@ -26,12 +26,16 @@ SECURITY.md.
    before it creates anything, so two sources that rebuild to one name give
    exactly one output and `OUTPUT_EXISTS` for the other, and two blocked
    files that would quarantine under one name give one move and one
-   `quarantine failed`.
+   `quarantine failed`. The claim is given back whenever the destination is
+   left empty, including when a placed output is taken away again because
+   its source changed, so the claim set never refuses a name that is free
+   on disk.
    Test: `fsutil.TestPlaceNoClobberRefusesExisting`, `remux.TestOutputExistsBeforeAnyTool`,
    `pool.TestClaimsExactlyOneWinner`, `remux.TestClaimExactlyOneWinner`,
-   `remux.TestParallelSameDestinationOnce`, `remux.TestClaimReleasedWhenNothingPlaced`,
-   `scan.TestQuarantineSameNameFromTwoRootsOnce`, `cli.TestJobsSameDestinationRace`,
-   `cli.TestJobsSameQuarantineNameRace`.
+   `remux.TestClaimGuardsConcurrentRemuxScanned`, `remux.TestParallelSameDestinationOnce`,
+   `remux.TestClaimReleasedWhenNothingPlaced`, `remux.TestClaimReleasedWhenPlacedOutputRemovedAgain`,
+   `scan.TestQuarantineClaimRefusesBeforeDisk`, `scan.TestQuarantineSameNameFromTwoRootsOnce`,
+   `cli.TestJobsSameDestinationRace`.
 2. **Temp, fsync, rename.** Output is written as `.amuxify-<name>.tmp` in the
    destination directory, fsynced, then renamed. Same filesystem always; a
    crash leaves at most a temp file, which the next run ignores. Only a name
@@ -93,13 +97,22 @@ or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
 them. The worker pool never runs two names of one inode at the same time, nor
 two sources that map to one output or quarantine name; such files run one
 after the other in walk order, so a parallel run makes the same decisions as
-a sequential one. Paths given on the command line are still processed one
-after the other. The hook adapters always use one job, because the download
-client decides how many scripts run at once.
+a sequential one. `remux` scans every file of a tree before it rebuilds any,
+whatever the job count, so the scan findings describe the tree as the run
+found it: the second name of a hard-linked pair is reported with the links it
+had before the first name was rebuilt in place. Paths given on the command
+line are still processed one after the other, and a file that quarantines to
+a name an earlier root already took meets that file on disk. The hook
+adapters always use one job, because the download client decides how many
+scripts run at once. Whatever the job count, at most one `clamscan` process
+runs at a time, because each one loads the whole signature database; a
+worker whose file is due for it waits its turn.
 Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
-`remux.TestParallelHardLinksSerialised`, `scan.TestScanPathParallelOrderAndCancel`,
+`remux.TestParallelHardLinksSerialised`, `remux.TestSerialKeysOnlyMediaGetDestKeys`,
+`scan.TestScanPathParallelOrderAndCancel`, `scan.TestClamScanRunsOneAtATime`,
 `exec.TestPathConcurrentCallers`, `cli.TestJobsParallelMatchesSequential`,
-`cli.TestJobsUsageErrors`, `cli.TestHookIgnoresJobs`.
+`cli.TestJobsSameQuarantineNameAcrossRoots`, `cli.TestJobsUsageErrors`,
+`cli.TestHookIgnoresJobs`.
 
 ## What scan looks at
 

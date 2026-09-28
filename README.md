@@ -72,7 +72,9 @@ default is 1 and behaves exactly as before. Each file's lines are printed as
 soon as that file is finished, so they appear in completion order, while the
 JSON report keeps walk order. Two names of one inode, or two sources that
 would produce one output, are never processed at the same time, so the
-result matches a sequential run. The hook adapters always use one job.
+result matches a sequential run. ClamAV scans run one at a time whatever the
+job count, because every `clamscan` start loads the whole signature database.
+The hook adapters always use one job.
 
 ## Profiles
 

@@ -538,6 +538,20 @@ func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path s
 	}
 }
 
+// MaxClamScans is how many clamscan processes amuxify runs at the same time
+// in one process, whatever --jobs says. clamscan loads the whole signature
+// database on every start, which takes well over a gigabyte of memory and
+// tens of seconds, so one process per worker would exhaust the memory of
+// most hosts long before the disks were busy. A worker whose file is due
+// for clamscan waits for a slot; the other checks of the other workers go
+// on meanwhile.
+const MaxClamScans = 1
+
+// clamSlots is the process-wide gate that enforces MaxClamScans. It is one
+// for the whole process rather than one per Scanner because ingest and the
+// hook adapters build their own Scanner and the memory is shared either way.
+var clamSlots = make(chan struct{}, MaxClamScans)
+
 func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
@@ -551,6 +565,15 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 			fr.Addf(CodeClamMissing, report.Fail, "clamscan required by profile but not installed")
 			return true
 		}
+		return false
+	}
+	// The wait for a slot gives up when the run is cancelled, so an
+	// interrupt is not held behind another worker's clamscan.
+	select {
+	case clamSlots <- struct{}{}:
+		defer func() { <-clamSlots }()
+	case <-ctx.Done():
+		fr.Addf(CodeClamError, report.Warn, "%v", ctx.Err())
 		return false
 	}
 	res, err := s.Runner.RunWithTimeout(ctx, 30*time.Minute, exec.ClamScan, "--no-summary", "--infected", "--", path)

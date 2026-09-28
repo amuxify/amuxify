@@ -54,7 +54,10 @@ type Global struct {
 }
 
 // MaxJobs bounds --jobs. Every job holds a tool process and an open temp
-// file, and a larger number would only contend for the same disks.
+// file, and a larger number would only contend for the same disks. clamscan
+// is the exception to that budget and is gated separately by
+// scan.MaxClamScans, since each of its starts loads the whole signature
+// database.
 const MaxJobs = 64
 
 // bind registers the global flags. Defaults are the current values so the

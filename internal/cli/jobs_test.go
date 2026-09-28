@@ -277,21 +277,24 @@ func TestJobsSameDestinationRace(t *testing.T) {
 	}
 }
 
-// Guarantee 1 for quarantine from the command line: two roots holding a
-// blocked file of the same name are scanned with --jobs 4 and the second is
-// refused with "destination already exists"; the quarantine holds one file
-// and the loser stays where it was. Repeated, because a race that shows
-// only sometimes is still a race.
-func TestJobsSameQuarantineNameRace(t *testing.T) {
+// Quarantine across the roots named on one command line: two roots holding
+// a blocked file of the same name are scanned with --jobs 4 and the second
+// is refused with "destination already exists"; the quarantine holds the
+// first root's file and the second stays where it was. Roots are processed
+// one after the other, and each holds a single file, so nothing here runs
+// in parallel: the second root's file meets the first's on disk, exactly as
+// with one job. The claim that decides the same collision between two
+// workers is exercised in scan.TestQuarantineClaimRefusesBeforeDisk.
+func TestJobsSameQuarantineNameAcrossRoots(t *testing.T) {
 	testutil.Stubs(t)
 	asUser(t, 1000)
-	for round := 0; round < 10; round++ {
+	for _, jobs := range []string{"1", "4"} {
 		q := filepath.Join(t.TempDir(), "q")
 		a := write(t, filepath.Join(t.TempDir(), "a", "x.url"), "[InternetShortcut]\nURL=http://a\n")
 		b := write(t, filepath.Join(t.TempDir(), "b", "x.url"), "[InternetShortcut]\nURL=http://b\n")
-		code, out, errb := run(t, "--json", "--jobs", "4", "scan", "--quarantine", q, a, b)
+		code, out, errb := run(t, "--json", "--jobs", jobs, "scan", "--quarantine", q, a, b)
 		if code != 4 {
-			t.Fatalf("round %d: exit %d\n%s%s", round, code, out, errb)
+			t.Fatalf("jobs %s: exit %d\n%s%s", jobs, code, out, errb)
 		}
 		doc := decodeJSON(t, out)
 		moved, failed := 0, 0
@@ -307,22 +310,22 @@ func TestJobsSameQuarantineNameRace(t *testing.T) {
 				case "quarantine failed: destination already exists":
 					failed++
 				default:
-					t.Errorf("round %d: %v", round, m)
+					t.Errorf("jobs %s: %v", jobs, m)
 				}
 			}
 		}
 		if moved != 1 || failed != 1 {
-			t.Errorf("round %d: %d moved, %d failed", round, moved, failed)
+			t.Errorf("jobs %s: %d moved, %d failed", jobs, moved, failed)
 		}
 		got, err := os.ReadFile(filepath.Join(q, "x.url"))
 		if err != nil || !strings.Contains(string(got), "URL=http://a") {
-			t.Errorf("round %d: quarantine holds %q, %v; the first root's file should win", round, got, err)
+			t.Errorf("jobs %s: quarantine holds %q, %v; the first root's file should win", jobs, got, err)
 		}
 		if _, err := os.Lstat(a); err == nil {
-			t.Errorf("round %d: the moved file is still at %s", round, a)
+			t.Errorf("jobs %s: the moved file is still at %s", jobs, a)
 		}
 		if _, err := os.Lstat(b); err != nil {
-			t.Errorf("round %d: the refused file is gone from %s", round, b)
+			t.Errorf("jobs %s: the refused file is gone from %s", jobs, b)
 		}
 	}
 }
