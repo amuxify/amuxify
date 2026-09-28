@@ -129,10 +129,26 @@ func (p *Prober) Probe(ctx context.Context, path string) (*MediaInfo, error) {
 	if to == 0 {
 		to = 60 * time.Second
 	}
-	res, err := p.Runner.RunWithTimeout(ctx, to, exec.FFprobe,
-		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-show_error", "--", path)
+	res, err := p.runFFprobe(ctx, to, path)
 	if err != nil {
 		return nil, err
+	}
+	if diedOnSignal(res) {
+		// ffprobe crashed. Seen on a loaded three-core host running four
+		// probes beside mkvmerge and ffmpeg: one ffprobe out of hundreds
+		// dies with a segmentation fault on a file it reads fine every
+		// other time. That is a fault in ffprobe, not in the file, and a
+		// run reports the file only for what is in it, so the probe is
+		// made once more. A file that crashes ffprobe every time is still
+		// refused, with both deaths named. The retry is safe because
+		// ffprobe only reads.
+		first := res.Status
+		if res, err = p.runFFprobe(ctx, to, path); err != nil {
+			return nil, err
+		}
+		if diedOnSignal(res) {
+			return nil, fmt.Errorf("ffprobe died twice: %s, then %s: %s", first, res.Status, lastWords(res.Stderr))
+		}
 	}
 	if res.StdoutTruncated {
 		// The runner kept only the first part of the document, which would
@@ -365,6 +381,18 @@ func (p *mkvTrackProps) UnmarshalJSON(b []byte) error {
 
 // IdentifyMkv runs mkvmerge -J and returns the raw parsed output plus the
 // exit status. Status 1 means warnings only and is not a failure.
+func (p *Prober) runFFprobe(ctx context.Context, to time.Duration, path string) (*exec.Result, error) {
+	return p.Runner.RunWithTimeout(ctx, to, exec.FFprobe,
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-show_error", "--", path)
+}
+
+// diedOnSignal reports whether the child ended on a signal rather than
+// an exit: a crash, or a kill from outside. A run the caller cancelled
+// never reaches here, because the runner returns that as an error.
+func diedOnSignal(res *exec.Result) bool {
+	return res.ExitCode < 0 && strings.HasPrefix(res.Status, "signal:")
+}
+
 // lastWords is the last non-blank line of a tool's standard error, cut to
 // a length that fits in a finding, or "no output on standard error" when
 // there is none. Standard error is tool output and so untrusted: control
