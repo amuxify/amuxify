@@ -157,11 +157,20 @@ SECURITY.md.
    trusted, and a malformed value in the source that is missing in the
    output is still a difference. A field that either tool rejected stays
    malformed when the two tools' readings are combined, so a clean value
-   from the other tool never stands in for it.
+   from the other tool never stands in for it. The values mkvmerge does not
+   read from an MP4 source (the range flag, the mastering display and the
+   content light levels) are passed to it on the command line from the
+   source's ffprobe reading, so an HDR10 MP4 comes through as a complete
+   HDR10 Matroska file rather than failing on every run; the assertion is
+   not relaxed for it, and a mkvmerge that still loses a value fails the
+   file.
    Test: `remux.TestHashMismatchDeletesOutput`, `remux.TestHDRPropertyStrippedDeletesOutput`,
-   `remux.TestSDRGainedHDRFails`, `remux.TestHdrDiffDolbyVision`, `probe.TestCloseEnough`,
+   `remux.TestSDRGainedHDRFails`, `remux.TestHdrDiffDolbyVision`,
+   `remux.TestRemuxKeepsHDRProperties`,
+   `remux.TestMkvmergeArgsCarryColourMkvmergeDrops`, `probe.TestCloseEnough`,
    `probe.TestColorMergeKeepsRejectedFieldMalformed`,
-   `probe.TestColorHostileFFprobeJSON`, `probe.TestColorHostileMkvmergeJSON`.
+   `probe.TestColorHostileFFprobeJSON`, `probe.TestColorHostileMkvmergeJSON`,
+   `probe.TestProbeKeepsMkvmergeColourView`.
 6. **In place preserves identity.** `--in-place` copies mode, owner, group and
    modification time from the source to the output before the rename. The
    copy goes through the descriptor of the file this run created, so it
