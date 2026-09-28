@@ -58,11 +58,24 @@ func TestMain(m *testing.M) {
 	case "flood":
 		// Write the number of bytes named by the first argument to stdout
 		// and the same to stderr, then exit with the second argument's code
-		// so the caller can tell that the child finished on its own.
+		// so the caller can tell that the child finished on its own. An
+		// optional third argument of "stdout" or "stderr" floods only that
+		// stream and writes a single line to the other.
 		n, _ := strconv.Atoi(args[0])
 		code, _ := strconv.Atoi(args[1])
 		chunk := bytes.Repeat([]byte("x"), 64<<10)
-		for _, w := range []*os.File{os.Stdout, os.Stderr} {
+		targets := []*os.File{os.Stdout, os.Stderr}
+		if len(args) > 2 {
+			switch args[2] {
+			case "stdout":
+				targets = targets[:1]
+				fmt.Fprintln(os.Stderr, "one line")
+			case "stderr":
+				targets = targets[1:]
+				fmt.Println("one line")
+			}
+		}
+		for _, w := range targets {
 			for left := n; left > 0; {
 				k := len(chunk)
 				if left < k {
@@ -788,8 +801,8 @@ func TestRunCapsOutput(t *testing.T) {
 	if len(res.Stdout) != 1<<20 || len(res.Stderr) != 1<<20 {
 		t.Fatalf("kept %d bytes of stdout and %d of stderr, want %d each", len(res.Stdout), len(res.Stderr), 1<<20)
 	}
-	if !res.OutputTruncated || res.ExitCode != 3 || res.TimedOut {
-		t.Fatalf("result: truncated=%v exit=%d timedOut=%v", res.OutputTruncated, res.ExitCode, res.TimedOut)
+	if !res.OutputTruncated || !res.StdoutTruncated || !res.StderrTruncated || res.ExitCode != 3 || res.TimedOut {
+		t.Fatalf("result: truncated=%v/%v/%v exit=%d timedOut=%v", res.OutputTruncated, res.StdoutTruncated, res.StderrTruncated, res.ExitCode, res.TimedOut)
 	}
 	res, err = r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(1000), "0")...)
 	if err != nil {
@@ -808,6 +821,35 @@ func TestRunCapsOutput(t *testing.T) {
 	}
 	if len(w.b) != 3<<20 || len(res.Stderr) != 1<<20 || !res.OutputTruncated {
 		t.Fatalf("streaming: writer got %d bytes, stderr %d, truncated=%v", len(w.b), len(res.Stderr), res.OutputTruncated)
+	}
+}
+
+// A consumer that parses only standard output must not throw away a
+// complete document because the tool was noisy on standard error, and must
+// not trust a document whose own stream overflowed. The two flags are
+// therefore set per stream, and the combined flag is their union.
+func TestRunReportsTruncationPerStream(t *testing.T) {
+	prefix := helperTool(t, "floodtool", "flood")
+	r := &Runner{MaxOutput: 1 << 20}
+	res, err := r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "0", "stderr")...)
+	if err != nil {
+		t.Fatalf("stderr flood: %v", err)
+	}
+	if res.StdoutTruncated || !res.StderrTruncated || !res.OutputTruncated {
+		t.Fatalf("stderr flood: truncated stdout=%v stderr=%v either=%v", res.StdoutTruncated, res.StderrTruncated, res.OutputTruncated)
+	}
+	if string(res.Stdout) != "one line\n" || len(res.Stderr) != 1<<20 {
+		t.Fatalf("stderr flood: stdout %q, stderr %d bytes", res.Stdout, len(res.Stderr))
+	}
+	res, err = r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "0", "stdout")...)
+	if err != nil {
+		t.Fatalf("stdout flood: %v", err)
+	}
+	if !res.StdoutTruncated || res.StderrTruncated || !res.OutputTruncated {
+		t.Fatalf("stdout flood: truncated stdout=%v stderr=%v either=%v", res.StdoutTruncated, res.StderrTruncated, res.OutputTruncated)
+	}
+	if len(res.Stdout) != 1<<20 || string(res.Stderr) != "one line\n" {
+		t.Fatalf("stdout flood: stdout %d bytes, stderr %q", len(res.Stdout), res.Stderr)
 	}
 }
 

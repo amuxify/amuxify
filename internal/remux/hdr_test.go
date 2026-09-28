@@ -39,16 +39,26 @@ func hdrFinding(t *testing.T, fr report.FileResult) report.Finding {
 	return f
 }
 
-// A remux of the HDR fixtures keeps every colour and HDR value: the output
-// probes to the same normalised signalling as the source, and the file
-// passes with the hashes verified.
+// A remux of the HDR and colour fixtures keeps every colour and HDR value:
+// the output probes to the same normalised signalling as the source, and
+// the file passes with the hashes verified. The Matroska fixtures pass
+// because mkvmerge copies its own track header. The MP4 fixtures pass only
+// because the remuxer names on the command line what mkvmerge's MP4 reader
+// drops: the colr range flag, the mdcv mastering display and the clli
+// content light levels (verified with ffprobe 9.0.2 and mkvmerge v102,
+// where a plain `mkvmerge -o out.mkv hdr10.mp4` loses all three). The Dolby
+// Vision record in dovi.mp4 has no mkvmerge option; mkvmerge v102 carries
+// it into a block addition mapping by itself, and this test pins that,
+// because an mkvmerge that dropped it would fail the file as HDR_LOST
+// rather than pass it. sdr709.mp4 is the common case: a BT.709 file with a
+// colr atom that 0.4 before this fix refused with "range lost (was tv)".
 func TestRemuxKeepsHDRProperties(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
-	for _, name := range []string{"hdr10.mkv", "hlg.mkv"} {
+	for _, name := range []string{"hdr10.mkv", "hlg.mkv", "sdr709.mp4", "hdr10.mp4", "dovi.mp4"} {
 		t.Run(name, func(t *testing.T) {
 			src := testutil.Copy(t, name)
 			outRoot := filepath.Join(t.TempDir(), "out")
-			rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
 			rm.OutputRoot = outRoot
 			res, err := rm.RemuxPath(context.Background(), filepath.Dir(src))
 			if err != nil {
@@ -68,14 +78,50 @@ func TestRemuxKeepsHDRProperties(t *testing.T) {
 				t.Fatal(err)
 			}
 			sv, ov := in.StreamsOf("video")[0], out.StreamsOf("video")[0]
-			if sv.Color.Empty() || len(sv.HDR) == 0 {
+			if sv.Color.Empty() {
+				t.Fatalf("the fixture carries no colour signalling: %q", sv.Color.String())
+			}
+			if name != "sdr709.mp4" && len(sv.HDR) == 0 {
 				t.Fatalf("the fixture carries no HDR signalling: %v %q", sv.HDR, sv.Color.String())
 			}
 			if diffs := hdrDiff(sv, ov); len(diffs) != 0 {
 				t.Fatalf("output differs from source: %v\nsource %s\noutput %s", diffs, sv.Color.String(), ov.Color.String())
 			}
-			if name == "hdr10.mkv" && (ov.Color.Mastering == nil || ov.Color.Light == nil) {
-				t.Fatalf("output lost static metadata: %s", ov.Color.String())
+			switch name {
+			case "hdr10.mkv", "hdr10.mp4", "dovi.mp4":
+				if ov.Color.Mastering == nil || ov.Color.Light == nil {
+					t.Fatalf("output lost static metadata: %s", ov.Color.String())
+				}
+			case "sdr709.mp4":
+				if ov.Color.Range != "tv" || ov.Color.Primaries != "bt709" {
+					t.Fatalf("output lost the colr signalling: %s", ov.Color.String())
+				}
+			}
+			if name == "dovi.mp4" && (ov.Color.DolbyVision == nil || strings.Join(ov.HDR, "+") != "hdr10+dovi") {
+				t.Fatalf("output lost the Dolby Vision record: %v %s", ov.HDR, ov.Color.String())
+			}
+			// The values mkvmerge does not carry from MP4 were named on
+			// its command line, and for a Matroska source nothing was.
+			var merge string
+			for _, l := range tr.writes() {
+				if strings.Contains(l, "mkvmerge") {
+					merge = l
+				}
+			}
+			named := strings.Contains(merge, "--colour-range 0:1")
+			if strings.HasSuffix(name, ".mp4") != named {
+				t.Fatalf("colour options on the command line: %v\n%s", named, merge)
+			}
+			if strings.HasSuffix(name, ".mkv") && (strings.Contains(merge, "--chromaticity") || strings.Contains(merge, "-light")) {
+				t.Fatalf("a Matroska source got colour options: %s", merge)
+			}
+			if name == "hdr10.mp4" || name == "dovi.mp4" {
+				for _, want := range []string{"--chromaticity-coordinates 0:0.708,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates 0:0.3127,0.329",
+					"--min-luminance 0:0.0001", "--max-luminance 0:1000", "--max-content-light 0:1000", "--max-frame-light 0:400"} {
+					if !strings.Contains(merge, want) {
+						t.Fatalf("command line lacks %q:\n%s", want, merge)
+					}
+				}
 			}
 		})
 	}

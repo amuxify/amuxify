@@ -70,6 +70,26 @@ first stream that differs. The comparison exists because this signalling lives
 in the container header, outside the packets that the stream hashes cover, and
 a muxer can drop or alter it without changing a hash.
 
+The remuxer feeds that view back into the mkvmerge command line. mkvmerge's
+MP4 reader carries the colour primaries, transfer and matrix from the `colr`
+box, but not its range flag, and it does not read the mastering display
+(`mdcv`) and content light (`clli`) boxes at all, so a plain remux of an HDR10
+MP4 produces a Matroska file without them and the assertion fails it as
+`HDR_LOST`. For every kept video track the argument builder therefore names
+the range, the chromaticity and white point coordinates, the luminance bounds
+and the content light levels with mkvmerge's colour options whenever the
+source's ffprobe view holds a value that mkvmerge's own `-J` view of the same
+track does not. A value mkvmerge already reads is left to mkvmerge, so a
+Matroska source gets no colour options at all. Each number is written as a
+plain decimal with at most twelve fractional digits, because mkvmerge rejects
+exponent notation and misparses longer decimals, and only when that decimal
+reads back within the verifier's tolerance; otherwise the group is left out
+and the assertion reports the loss rather than passing a substitute. The
+Dolby Vision configuration record has no mkvmerge option. mkvmerge 102 carries
+the `dvcC` box from an MP4 source into a Matroska block addition mapping on
+its own, the `dovi.mp4` fixture pins that, and an older mkvmerge that drops it
+fails the file as `HDR_LOST` instead of passing silently.
+
 ## Decision flow for ingest
 
 ingest is scan plus one of remux or clean, never both on the same file, and a
