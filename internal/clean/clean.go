@@ -18,6 +18,7 @@ import (
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/scan"
@@ -56,7 +57,12 @@ type Cleaner struct {
 	Hardlinks string
 	Timeout   time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(report.FileResult)
+	// Jobs is the number of files CleanPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
 }
 
 func (c *Cleaner) hardlinks() string {
@@ -82,16 +88,32 @@ func (c *Cleaner) CleanPath(ctx context.Context, root string) ([]report.FileResu
 	// Walk lists every readable entry and names the unreadable ones in
 	// walkErr; those are reported at run level after the readable files.
 	paths, walkErr := scan.Walk(abs)
-	var out []report.FileResult
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
+	// Two names of one inode are cleaned one after the other in walk order,
+	// never at the same time, so the second sees what the first did.
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			if k := fsutil.InodeKey(fi); k != "" {
+				keys[i] = []string{"inode:" + k}
+			}
 		}
-		fr := c.CleanFile(ctx, p)
+	}
+	results := make([]report.FileResult, len(paths))
+	ran := pool.Run(ctx, c.Jobs, len(paths), keys, func(i int) {
+		fr := c.CleanFile(ctx, paths[i])
 		if c.Progress != nil {
 			c.Progress(fr)
 		}
-		out = append(out, fr)
+		results[i] = fr
+	})
+	var out []report.FileResult
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
 }
@@ -111,6 +133,10 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
 		return fr
 	}
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeCleanFail, report.Fail, "not a regular file; skipped")
+		return fr
+	}
 	ext := fsutil.Ext(path)
 	if !scan.IsMedia(path) {
 		c.cleanSidecar(&fr, path, ext)
@@ -126,7 +152,7 @@ func (c *Cleaner) CleanFile(ctx context.Context, path string) report.FileResult 
 		fr.Addf(CodeCleanFail, report.Fail, "probe: %v", err)
 		return fr
 	}
-	c.cleanMedia(ctx, &fr, path, ext, info)
+	c.cleanMedia(ctx, &fr, path, ext, info, fi)
 	return fr
 }
 
@@ -147,6 +173,20 @@ func (c *Cleaner) CleanScanned(ctx context.Context, sc scan.Result) report.FileR
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
 		return fr
 	}
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeCleanFail, report.Fail, "not a regular file; skipped")
+		return fr
+	}
+	// The scan's verdict is what lets this file be edited without a probe
+	// of its own, and it describes the file the scanner examined. The entry
+	// at the path must still be that file, with the size and the
+	// modification time the scanner saw, or the verdict says nothing about
+	// what would be edited (guarantee 9). A result without a Stat was never
+	// examined by the scanner and is refused for the same reason.
+	if !fsutil.Unchanged(sc.Stat, fi) {
+		fr.Addf(CodeCleanFail, report.Fail, "%s changed since the scan; the file that was scanned is not the file at this path", path)
+		return fr
+	}
 	ext := fsutil.Ext(path)
 	if !scan.IsMedia(path) {
 		c.cleanSidecar(&fr, path, ext)
@@ -160,7 +200,7 @@ func (c *Cleaner) CleanScanned(ctx context.Context, sc scan.Result) report.FileR
 		fr.Addf(CodeCleanFail, report.Fail, "no probe result; scan did not parse this file")
 		return fr
 	}
-	c.cleanMedia(ctx, &fr, path, ext, sc.Info)
+	c.cleanMedia(ctx, &fr, path, ext, sc.Info, fi)
 	return fr
 }
 
@@ -188,22 +228,24 @@ func (c *Cleaner) cleanSidecar(fr *report.FileResult, path, ext string) {
 }
 
 // cleanMedia picks the cleaner for a probed media file and strips extended
-// attributes afterwards.
-func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, ext string, info *probe.MediaInfo) {
+// attributes afterwards. fi is the os.Lstat the caller took of the file
+// before it was probed or, under ingest, checked against the scan; it pins
+// the file every later step must still find at the path.
+func (c *Cleaner) cleanMedia(ctx context.Context, fr *report.FileResult, path, ext string, info *probe.MediaInfo, fi os.FileInfo) {
 	switch {
 	case info.IsMatroska():
-		c.cleanMatroska(ctx, fr, info)
+		c.cleanMatroska(ctx, fr, info, fi)
 	case info.Container == "mp4":
-		c.cleanRewrite(ctx, fr, info, mp4Muxer(ext))
+		c.cleanRewrite(ctx, fr, info, mp4Muxer(ext), fi)
 	case info.Container == "avi":
-		c.cleanRewrite(ctx, fr, info, "avi")
+		c.cleanRewrite(ctx, fr, info, "avi", fi)
 	case info.Container == "flv":
-		c.cleanRewrite(ctx, fr, info, "flv")
+		c.cleanRewrite(ctx, fr, info, "flv", fi)
 	case info.Container == "mpegts", info.Container == "mpegps":
 		fr.Addf(CodeNothing, report.Pass, "%s carries no writable metadata; use remux to convert", info.Container)
 	case info.Container == "mp3", info.Container == "flac", info.Container == "ogg", info.Container == "wav":
 		if c.StripAudioTags {
-			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container))
+			c.cleanRewrite(ctx, fr, info, audioMuxer(info.Container), fi)
 		} else {
 			fr.Addf(CodeSkipped, report.Pass, "%s", c.audioTagsAdvice())
 		}
@@ -235,7 +277,7 @@ func audioMuxer(c string) string {
 	return "wav"
 }
 
-func (c *Cleaner) cleanMatroska(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo) {
+func (c *Cleaner) cleanMatroska(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo, fi os.FileInfo) {
 	p := c.Profile
 	args := []string{info.Path}
 	var what []string
@@ -269,6 +311,17 @@ func (c *Cleaner) cleanMatroska(ctx context.Context, fr *report.FileResult, info
 	}
 	if c.DryRun {
 		fr.Addf(CodeDryRun, report.Pass, "would remove %s", strings.Join(what, ", "))
+		return
+	}
+	// mkvpropedit opens the name with an ordinary open and edits whatever
+	// it reaches, and the name was last examined before a probe that takes
+	// seconds, or under ingest before a whole scan. The entry at the path
+	// must still be the file that was probed: a symbolic link swapped onto
+	// it would otherwise have its target's headers edited (guarantee 3),
+	// and a different file renamed onto it would be edited on the strength
+	// of another file's probe.
+	if err := sourceUnchanged(info.Path, fi); err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "%v; nothing was edited", err)
 		return
 	}
 	res, err := c.Runner.RunWithTimeout(ctx, c.timeout(), exec.MKVPropedit, args...)
@@ -322,7 +375,7 @@ func inertStreamTag(key, value string) bool {
 	return false
 }
 
-func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo, muxer string) {
+func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo, muxer string, fi os.FileInfo) {
 	var what []string
 	if info.Container == "mp4" {
 		if in, err := mp4.Parse(info.Path); err == nil {
@@ -358,16 +411,32 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		return
 	}
 	// The temp file is created here, empty and exclusively, before its name
-	// is handed to ffmpeg, and the identity recorded is what the replacement
-	// below requires of the file it opens: the source's mode, ownership and
-	// time are written through that descriptor, never through the name, so
-	// a symlink swapped onto the temp name cannot have its target's identity
-	// rewritten (guarantee 3). ffmpeg writes into the existing file rather
-	// than unlinking and recreating it, so the identity survives the
-	// rewrite. os.Remove never follows a link, so the cleanup on every
-	// failure removes a planted link and leaves its target alone. The handle
-	// stays open until the replacement has been checked, so the inode
-	// number cannot be freed and reused by a file swapped onto the name.
+	// is handed to ffmpeg, and the identity recorded is what every later
+	// step requires of the entry at the name: as soon as ffmpeg returns, and
+	// before ffprobe, the stream hashes or the atom parser open that name,
+	// tempUnchanged checks that it still leads to this run's own regular
+	// file, so a symlink swapped onto it is never read through and a named
+	// pipe swapped onto it is never opened, which would block the run until
+	// the planter chose to write. The replacement below then writes the
+	// source's mode, ownership and time through a descriptor of that same
+	// file, never through the name (guarantee 3). ffmpeg writes into the
+	// existing file rather than unlinking and recreating it, so the identity
+	// survives the rewrite. os.Remove never follows a link, so the cleanup
+	// on every failure removes a planted link or pipe and leaves any target
+	// alone. The handle stays open until the replacement has been checked,
+	// so the inode number cannot be freed and reused by a file swapped onto
+	// the name, and the flush before the replacement goes through it.
+	//
+	// The source is checked against fi, the identity pinned before the
+	// probe, right before ffmpeg opens its name, because ffmpeg follows
+	// whatever the name leads to, and again after the last read of it and
+	// before the replacement, because a different file renamed onto the
+	// path after the hashes were taken is not the file that was verified
+	// and must not be replaced and lost.
+	if err := sourceUnchanged(info.Path, fi); err != nil {
+		fr.Addf(CodeCleanFail, report.Fail, "%v; original untouched", err)
+		return
+	}
 	tmp := fsutil.TempName(info.Path)
 	own, err := fsutil.CreateTemp(tmp)
 	if err != nil {
@@ -406,6 +475,11 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 		fr.Addf(CodeCleanFail, report.Fail, "ffmpeg rewrite: %s", msg)
 		return
 	}
+	if err := tempUnchanged(tmp, created); err != nil {
+		_ = os.Remove(tmp)
+		fr.Addf(CodeCleanFail, report.Fail, "replace: %v; original untouched", err)
+		return
+	}
 	out, err := c.Prober.Probe(ctx, tmp)
 	if err != nil || len(out.Streams) != len(info.Streams) {
 		_ = os.Remove(tmp)
@@ -435,17 +509,70 @@ func (c *Cleaner) cleanRewrite(ctx context.Context, fr *report.FileResult, info 
 	}
 	// The replacement's error is assigned to the function-level err on
 	// purpose: an if-scoped err here would be discarded and a failed
-	// replacement reported as a successful rewrite.
-	err = fsutil.Fsync(tmp)
+	// replacement reported as a successful rewrite. The replacement is
+	// handed fi as well, so the entry it renames over must be the file the
+	// hashes were taken from, with the same size and time, or nothing is
+	// renamed.
+	err = sourceUnchanged(info.Path, fi)
 	if err == nil {
-		err = fsutil.ReplaceInPlaceOwn(tmp, info.Path, created)
+		err = own.Sync()
+	}
+	if err == nil {
+		err = fsutil.ReplaceInPlaceOwn(tmp, info.Path, created, fi)
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		fr.Addf(CodeCleanFail, report.Fail, "replace: %v", err)
+		fr.Addf(CodeCleanFail, report.Fail, "replace: %v; original untouched", err)
 		return
 	}
 	fr.Addf(CodeMetadata, report.Pass, "rewritten without %s", strings.Join(what, ", "))
+}
+
+// sourceUnchanged reports an error when path no longer names the regular
+// file described by was, the os.Lstat taken before the file was probed or
+// checked against the scan: a symlink planted since, a directory, a device,
+// nothing at all, another regular file renamed onto the path, or the same
+// file written to since, which inode, size and modification time tell
+// apart. It runs right before a tool opens the source by name and right
+// before the source is replaced, because the Lstat that refused a symlink
+// at the start does not cover the time a probe, a scan or a rewrite takes.
+func sourceUnchanged(path string, was os.FileInfo) error {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("source changed since it was examined: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", path)
+	}
+	if !now.Mode().IsRegular() {
+		return fmt.Errorf("%s is no longer a regular file", path)
+	}
+	if !fsutil.Unchanged(was, now) {
+		return fmt.Errorf("%s was replaced after it was examined", path)
+	}
+	return nil
+}
+
+// tempUnchanged reports an error when tmp no longer names the regular file
+// created describes with a single name: a symlink, a named pipe or another
+// entry swapped onto the name, or a hard link added to the file. It runs
+// as soon as ffmpeg has returned, before any tool or parser opens the name
+// again.
+func tempUnchanged(tmp string, created os.FileInfo) error {
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		return fmt.Errorf("temp file: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", tmp)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+		return fmt.Errorf("%s is not the file this run created", tmp)
+	}
+	if n := fsutil.Nlink(now); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", tmp, n)
+	}
+	return nil
 }
 
 // audioTagsAdvice is the SKIPPED text for an audio file whose tags are left

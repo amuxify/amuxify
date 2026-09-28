@@ -34,6 +34,7 @@ source before the output is placed.
 | `amuxify clean <path>...` | Strip metadata, provenance atoms and extended attributes in place, tracks untouched | the file, after stream-hash verification |
 | `amuxify ingest <path>...` | Scan, then rebuild into a verified MKV or clean in place, one pass per file | the file in place, after verification |
 | `amuxify hook sabnzbd\|nzbget\|sonarr\|radarr` | Run ingest from a download client or media manager script and exit the way that caller expects | as ingest |
+| `amuxify watch <dir>` | Poll a directory and run ingest on each file once it has stopped changing; for a sidecar container or a drop folder | as ingest |
 | `amuxify doctor` | Check tools, version floors, profile and environment | nothing |
 | `amuxify profile [show <name>]` | List or print built-in profiles | nothing |
 
@@ -66,6 +67,15 @@ non-destructive path and `--dry-run` shows the plan.
 
 The worst verdict of the run is the exit code. `--json` prints the full report on
 stdout with the same codes; the schema is documented in [docs/report.md](docs/report.md).
+
+`--jobs <n>` processes up to `n` files at the same time, from 1 to 64; the
+default is 1 and behaves exactly as before. Each file's lines are printed as
+soon as that file is finished, so they appear in completion order, while the
+JSON report keeps walk order. Two names of one inode, or two sources that
+would produce one output, are never processed at the same time, so the
+result matches a sequential run. ClamAV scans run one at a time whatever the
+job count, because every `clamscan` start loads the whole signature database.
+The hook adapters and `watch` always use one job.
 
 ## Profiles
 
@@ -106,8 +116,9 @@ make build && ./bin/amuxify doctor
 ```
 
 amuxify drives external tools: **MKVToolNix 50+** (mkvmerge, mkvpropedit) and
-**ffmpeg 4.4+** (5.0+ recommended). exiftool and clamscan are optional.
-`amuxify doctor` tells you what is missing. See [docs/install.md](docs/install.md).
+**ffmpeg 4.4+** (5.0+ recommended). exiftool and clamscan (ClamAV 0.103+)
+are optional. `amuxify doctor` tells you what is missing. See
+[docs/install.md](docs/install.md).
 
 ## Safety guarantees
 
@@ -129,8 +140,11 @@ Each guarantee has a test; [docs/safety.md](docs/safety.md) names the test next 
 amuxify never prompts. Untagged-language tracks follow `languages.und` in the
 profile (`keep`, `drop`, or `assume:<lang>`). `amuxify hook sabnzbd`, `nzbget`,
 `sonarr` and `radarr` read the caller's environment, run `ingest` on the finished
-download and exit the way that caller expects. Wrapper scripts, the `--fail-on`
-option and Docker notes are in [docs/hooks.md](docs/hooks.md).
+download and exit the way that caller expects. `amuxify watch <dir>` polls a
+folder instead, for a download client whose image you do not want to rebuild or
+a folder that files arrive in by other means, and ingests each file once it has
+stayed unchanged for a settle window. Wrapper scripts, the `--fail-on` option,
+the watcher and Docker notes are in [docs/hooks.md](docs/hooks.md).
 
 ## Upgrading from 0.2.0
 

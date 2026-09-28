@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/report"
 )
 
@@ -333,7 +334,7 @@ func readNfo(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s: not a regular file", path)
 	}
-	f, err := os.Open(path)
+	f, err := fsutil.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

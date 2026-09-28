@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amuxify/amuxify/internal/clean"
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/remux"
 	"github.com/amuxify/amuxify/internal/report"
@@ -34,7 +36,16 @@ type Ingester struct {
 	Original              string
 	RemoveBlockedSidecars bool
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(report.FileResult)
+	// Jobs is the number of files IngestPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
+
+	// cmdOnce names the command on the cleaner exactly once, so workers
+	// running IngestFile at the same time do not all write the field.
+	cmdOnce sync.Once
 }
 
 // ErrVerifyNone is returned by IngestPath when the effective verify tier is none.
@@ -91,16 +102,31 @@ func (in *Ingester) IngestPath(ctx context.Context, root string) ([]report.FileR
 	// which raises the run verdict to FAIL. A quarantine directory inside
 	// the tree is not entered.
 	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(in.Scanner.Quarantine)...)
-	var out []report.FileResult
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		fr := in.IngestFile(ctx, p, scanRoot, inputRoot, outRoot)
+	// The keys keep two names of one inode, two files that would become one
+	// output and two files that would be quarantined to one place from
+	// running at the same time; the scanner's and the remuxer's own claim
+	// sets guard those places whatever the keys say.
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = in.Remuxer.SerialKeys(p, inputRoot, outRoot)
+		keys[i] = append(keys[i], in.Scanner.SerialKeys(p, scanRoot)...)
+	}
+	results := make([]report.FileResult, len(paths))
+	ran := pool.Run(ctx, in.Jobs, len(paths), keys, func(i int) {
+		fr := in.IngestFile(ctx, paths[i], scanRoot, inputRoot, outRoot)
 		if in.Progress != nil {
 			in.Progress(fr)
 		}
-		out = append(out, fr)
+		results[i] = fr
+	})
+	var out []report.FileResult
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
 }
@@ -120,11 +146,13 @@ func merge(fr *report.FileResult, r report.FileResult) {
 // quarantine mirrors; inputRoot and outRoot come from Remuxer.Roots.
 func (in *Ingester) IngestFile(ctx context.Context, path, scanRoot, inputRoot, outRoot string) (fr report.FileResult) {
 	start := time.Now()
-	if in.Cleaner != nil {
-		// The cleaner's advice must not name --strip-audio-tags, which
-		// only the clean command has (review C10).
-		in.Cleaner.Command = "ingest"
-	}
+	in.cmdOnce.Do(func() {
+		if in.Cleaner != nil {
+			// The cleaner's advice must not name --strip-audio-tags, which
+			// only the clean command has (review C10).
+			in.Cleaner.Command = "ingest"
+		}
+	})
 	sc := in.Scanner.ScanFile(ctx, path, scanRoot)
 	fr = sc.File
 	if fr.Info == nil {

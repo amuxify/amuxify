@@ -5,9 +5,10 @@ package sniff
 import (
 	"bytes"
 	"io"
-	"os"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/amuxify/amuxify/internal/fsutil"
 )
 
 // Kind is a coarse content class.
@@ -70,9 +71,12 @@ func (k Kind) Dangerous() bool {
 	return false
 }
 
-// File sniffs a path by reading its first 8 KiB.
+// File sniffs a path by reading its first 8 KiB. The path is opened with
+// fsutil.OpenRegular, so a symbolic link is never followed and a named pipe
+// planted at the path is refused rather than read from, which would block
+// until the planter chose to write.
 func File(path string) (Result, error) {
-	f, err := os.Open(path)
+	f, err := fsutil.OpenRegular(path)
 	if err != nil {
 		return Result{Kind: Unknown}, err
 	}

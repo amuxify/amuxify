@@ -2,6 +2,207 @@
 
 All notable changes to amuxify will be documented in this file.
 
+## 0.4.0
+
+### Added
+
+- HDR and Dolby Vision assertions. The remux verifier reads the colour
+  primaries, transfer characteristic, matrix coefficients and range, the
+  mastering display chromaticity and luminance, the content light levels and
+  the Dolby Vision configuration record of every kept video stream from both
+  ffprobe and `mkvmerge -J`, and compares them between the source and the
+  output. A value that was lost, gained or changed fails the file with
+  `HDR_LOST`, names the value, and deletes the output, as a stream hash
+  mismatch does. An SDR source whose output gained HDR signalling fails the
+  same way. Chromaticity and luminance are compared with a tolerance of one
+  part in a million, which covers the single-precision rounding of the
+  Matroska header and nothing wider. Every number is validated before it is
+  trusted, so a malformed probe result is recorded as malformed rather than
+  compared, and a clean value from one tool never stands in for a malformed
+  one from the other. The scan `HDR` finding lists the values it read. An
+  `HDR_LOST` finding for a value that changed below the six digits shown
+  appends the exact value of each side. mkvmerge's MP4 reader does not carry
+  the colour range flag, the mastering display or the content light levels,
+  so the remuxer passes those values to mkvmerge from the source's ffprobe
+  reading whenever mkvmerge would otherwise drop them; without this every
+  HDR10 MP4 or MOV would fail its own verification as `HDR_LOST`. The fixture
+  corpus gains an HDR10 and an HLG Matroska file and SDR, HDR10 and Dolby
+  Vision MP4 files, the last of which pins that mkvmerge carries the Dolby
+  Vision configuration record from an MP4 on its own.
+- `--jobs <n>`: `scan`, `remux`, `clean` and `ingest` process up to n files at
+  the same time, from 1 to 64. The default of 1 behaves exactly as before and
+  a value outside the range is a usage error. Each file's lines are printed
+  the moment that file finishes, so they appear in completion order, while
+  the JSON report and the count line keep walk order. A parallel run makes
+  the same decisions as a sequential one: two names of one inode, two sources
+  that would rebuild to one output and two blocked files that would
+  quarantine under one name are never processed at the same time, and a
+  run-wide claim set makes sure that a collision between workers leaves
+  exactly one output and reports `OUTPUT_EXISTS` or a failed quarantine for
+  the other. `remux` scans every file of a tree before it rebuilds any,
+  whatever the job count, so the second name of a hard-linked pair is
+  reported with the links it had when the run began. An interrupt starts no
+  further file, waits for the files already running, and leaves no temp file
+  behind. Two sources whose names differ only in Unicode normalisation, the
+  composed and the decomposed spelling of an accented letter, which APFS
+  treats as one directory entry, are rebuilt one after the other so the
+  later one reports `OUTPUT_EXISTS` as a sequential run does. The hook
+  adapters and `watch` accept the flag and always process one file at a
+  time, because the download client decides how many scripts run at once
+  and the watcher hands files to `ingest` as they settle.
+- `amuxify watch <dir>`: polls one directory and runs `ingest` on each
+  regular file once its size, modification time and identity have stayed
+  unchanged for `--settle` (default 30s), checking every `--interval`
+  (default 5s). It takes the ingest flags, uses the same walker, quarantine
+  exclusion and symlink rules, and hands files to `ingest` one at a time. A
+  file is ingested once per version; a file that grows, is rewritten or is
+  replaced under the same name is ingested again once it settles, including
+  a file amuxify itself rebuilt. Right before each ingest the path is checked
+  again to be the same regular file, still inside the watched directory and
+  reached through real directories. Under `--json` every pass that did
+  something writes one `amuxify.report/1` document on one line. On SIGINT or
+  SIGTERM the watcher finishes the file it is working on, with the tool that
+  is rebuilding or editing it left to run to its end under its usual timeout,
+  starts no further file and exits 0. `--once` makes one pass and, when the
+  settle window is longer than zero, waits it out and makes a second pass,
+  then exits with the worst verdict; `--settle 0s` ingests everything present
+  in one pass and is the cron form. The quarantine directory, a directory
+  inside it and a symlink are refused as the watched directory, and
+  `--verify none` is refused. The Docker compose example gains a watcher
+  service with a `stop_grace_period`.
+- ClamAV: `doctor` adds an informational `clamav-db` row under `clamscan`
+  with the signature database version, date and age, suggests `freshclam`
+  when the signatures are more than a week old or absent, and exits 2 when
+  the active profile requires the scan and no database has been downloaded.
+  The `CLAMAV_INFECTED` and `CLAMAV_ERROR` details carry only the lines of
+  clamscan output that name the scanned file, at most eight of them, passed
+  through the report sanitiser; the verdict comes from the exit status alone,
+  so text in the output cannot change it. ClamAV scans run one at a time
+  whatever the job count, because every `clamscan` start loads the whole
+  signature database. `doctor` checks that clamscan is ClamAV 0.103 or newer,
+  the first release with `--alert-exceeds-max`, and reports a missing
+  requirement (exit 2) under a profile that requires the scan when clamscan
+  is installed but cannot be run. docs/profiles.md and docs/install.md
+  gained ClamAV sections.
+- The tool runner keeps at most 16 MiB of what any tool prints to each of
+  standard output and standard error, so a flooding tool cannot grow the
+  process, and a cut output is never taken for the whole: a text subtitle
+  track longer than the bound is reported as not fully checked with
+  `LINK_IN_SUBS` at the profile's link severity, and a cut ffprobe or
+  `mkvmerge -J` document names the cut as the reason the file is unparseable.
+
+### Changed
+
+- Under `safety.clamav = required` (the strict profile) a scanner that gives
+  no verdict, because it timed out, could not start or exited with an error,
+  is `FAIL CLAMAV_ERROR` and the file is not probed or imported. It was
+  `WARN CLAMAV_ERROR`, which let a short `--timeout` or a clamscan without a
+  signature database turn a required scan into a pass. Under an optional
+  scan it stays a warning and the file is still probed and verified.
+- clamscan runs under the same `--timeout` as every other tool, with a
+  default of 30 minutes; a scan that runs past the deadline is killed and
+  reported as `CLAMAV_ERROR`.
+- The SABnzbd adapter accepts exactly the argument forms SABnzbd produces.
+  The job is read from the environment whenever `SAB_COMPLETE_DIR` is set,
+  and `SAB_PP_STATUS` must be set with it; a job without a status now exits
+  2 where it was treated as successful. Positional parameters are accepted
+  only as SABnzbd's seven or eight parameters in SABnzbd's order, and the
+  status must not be empty. A lone directory, any other count, and a
+  directory written in front of an older SABnzbd's seven parameters are
+  usage errors that name the argument; a bare `--quarantine` followed by a
+  stray argument says to write `--quarantine=<dir>`. The eighth parameter,
+  the failure URL, is never inspected, because SABnzbd copies it from the
+  indexer's `X-DNZB-Failure` header and a check on its value would let an
+  indexer have its jobs refused before the scan. Seven positional parameters
+  with `SAB_COMPLETE_DIR` set are a usage error: every SABnzbd that sets the
+  environment passes eight, so seven in that form means a flag that takes a
+  value, such as `--category`, was written before `"$@"` in the wrapper and
+  swallowed the job directory, and such a run previously went ahead on the
+  shifted values. The check for a directory written in front of an older
+  SABnzbd's seven parameters looks up the second parameter only when it is
+  written as a path; SABnzbd's own NZB name, which the indexer chooses, is
+  never looked up, so a directory of that name in the script's working
+  directory no longer refuses the job. Operators with `script_can_fail` on
+  should note that a job started with `SAB_COMPLETE_DIR` but no
+  `SAB_PP_STATUS` now fails as a usage error.
+- The `LINK_IN_TAG` finding lists tag hits in a fixed order instead of the
+  order the tag map happened to be visited in.
+- `remux` refuses the output root it names itself, `<root>__remuxed`, when a
+  symbolic link or anything but a directory sits at that name, because anyone
+  with write access to the parent of the input tree could otherwise plant a link
+  there and have every verified output placed wherever it points. A root given
+  with `--output` is still followed as the user's choice, so an operator who
+  kept outputs elsewhere through a link at the default name should name that
+  directory with `--output`.
+- `make test-required`, which CI runs on Linux and macOS, runs the test suite
+  under the race detector.
+- The Homebrew cask clears the macOS quarantine attribute through a
+  `postflight_steps` stanza instead of the `postflight` block that Homebrew 7
+  reports as deprecated.
+- The documentation states that a native Windows build is not planned,
+  because the safety guarantees rest on POSIX file identity; Windows users
+  run the Docker image through Docker Desktop or the Linux binary under WSL.
+
+### Fixed
+
+- An ffprobe that crashed made the file `UNPARSEABLE` with the message
+  "unexpected end of JSON input". On a loaded three-core host running four
+  jobs, one ffprobe in hundreds died with a segmentation fault on a file it
+  reads fine every other time, and a hook run would have failed the job for
+  it. A probe whose ffprobe dies on a signal is now made once more, and a
+  file that crashes ffprobe twice is refused with both deaths named. An
+  ffprobe that exited without a document is not retried; the message says
+  how it ended ("exit status 1") and quotes its last line on standard error.
+- A named pipe planted at a path amuxify opens could stall a run for as long
+  as the planter liked, because opening a pipe waits for a peer. Every open
+  of an input file, a sidecar, the quarantine source and destination, and
+  the temp file after an external tool has written to it is now made without
+  blocking and without following a link, and the entry is refused unless it
+  is a regular file. A pipe under a media or sidecar name is reported as
+  `FAIL UNREADABLE` by scan, remux and ingest and as `FAIL CLEAN_FAIL` by
+  clean, and a pipe swapped onto the temp name after mkvmerge or ffmpeg
+  returns is caught before any further read of that name. The flush before
+  placement goes through the descriptor held since the temp file was created
+  rather than through its name.
+- On Linux the in-place remux set the output's modification time through
+  `/proc/self/fd`, so in a container without `/proc` the file kept a fresh
+  time and the identity guarantee failed silently. The time is now set with
+  `utimensat` on the descriptor first, then through `/proc/self/fd`, and by
+  the file's own name only after a check that the name still leads to the
+  open file, with a call that never follows a symbolic link. An in-place
+  remux or MP4 rewrite whose modification time cannot be set now fails
+  before the rename, with the source left under its own name. Ownership
+  remains best effort.
+- clamscan reported a file above its own file size limit clean without reading
+  it, and that limit defaults to 100 MB, which is below almost every media file,
+  so a ClamAV scan passed nearly everything unread. Every clamscan call now
+  raises the limit to 2047 MiB, the most libclamav can scan, switches off its
+  scan size and scan time limits, and passes `--alert-exceeds-max`, so a file
+  the scanner skipped is `CLAMAV_ERROR` rather than a silent pass; a file larger
+  than 2047 MiB, which libclamav cannot scan at all, is `CLAMAV_ERROR` in plain
+  words before clamscan starts. Under `safety.clamav = required` that fails the
+  file and under `optional` it warns. The scan therefore needs ClamAV 0.103 or
+  newer.
+- A file could be rebuilt or edited on the strength of a scan of a different
+  file. `remux` scans a whole tree before it rebuilds any file, and under
+  `ingest` the routing sits between the scan and the action, so a file swapped
+  onto the path in that window was carried past the scan. The scan now records
+  the identity, size and modification time of the file it examined, and a remux
+  or a clean that acts on the verdict first checks that the entry at the path is
+  still that file, refusing it before any tool runs otherwise. The cleaner makes
+  the same check right before mkvpropedit, right before ffmpeg and again after
+  the stream hashes right before the source is replaced, so a link or another
+  file swapped onto the source in those windows is never edited or renamed over.
+  The identity an in-place output receives is the examined source's, never a
+  fresh look at the source's name. Files are opened with `O_NOCTTY`, so a run
+  that leads its session cannot acquire a planted terminal device as its
+  controlling terminal. The Linux fallback that sets a file's time by name also
+  requires the file to have a single hard link before and after the call.
+- Guarantees 2, 3, 6 and 9 in docs/safety.md are backed by new adversarial
+  tests: a cancelled mkvmerge and an interrupted watcher leave no temp file,
+  pipes at every name a run opens, the timestamp fallbacks, and a file
+  swapped onto a scanned path before the remux, the clean or the replacement.
+
 ## 0.3.0
 
 ### Added
