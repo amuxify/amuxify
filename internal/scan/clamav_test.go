@@ -657,9 +657,11 @@ func TestClamDetailMemoryBounded(t *testing.T) {
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
 		t.Fatalf("clamDetail allocated %d bytes for one %d byte line", grew, n)
 	}
-	// The same flood from the scanner itself, through the runner.
-	fakeClamscan(t, `pad='
-'; i=0; while [ $i -lt 20 ]; do pad="$pad$pad"; i=$((i+1)); done; i=0; while [ $i -lt 4 ]; do printf '%s' "$pad"; printf '%s' "$pad" >&2; i=$((i+1)); done; exit 1`)
+	// The same flood from the scanner itself, through the runner. The
+	// newlines come from head and tr rather than a shell variable: bash's
+	// printf builtin writes a megabyte argument a byte at a time, which on
+	// a slow macOS runner took longer than the scanner's timeout.
+	fakeClamscan(t, `head -c 4194304 /dev/zero | tr '\0' '\n'; head -c 4194304 /dev/zero | tr '\0' '\n' >&2; exit 1`)
 	s, media := clamScanner(t, "archive")
 	s.Runner.MaxOutput = 2 << 20
 	fr := scanOne(t, s, media)
