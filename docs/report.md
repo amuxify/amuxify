@@ -325,8 +325,8 @@ on its own.
 | `UND_TRACK` | PASS | scan, remux | A track without a language tag. |
 | `AUDIO_FALLBACK` | WARN | remux | Policy would have dropped every audio track, so all were kept. |
 | `VIDEO_EXTRA` | WARN | remux, ingest | A secondary video stream was dropped. |
-| `HDR` | PASS | scan | HDR10, HLG, Dolby Vision or HDR10+ was detected. |
-| `HDR_LOST` | FAIL | remux | The output lost HDR or Dolby Vision signalling. |
+| `HDR` | PASS | scan | HDR10, HLG, Dolby Vision or HDR10+ was detected; the detail lists the colour description, mastering display, content light and Dolby Vision values that were read. |
+| `HDR_LOST` | FAIL | remux | The output lost, gained or changed HDR or Dolby Vision signalling; the message names each value that differs. |
 | `QUARANTINED` | BLOCK, or WARN when the move failed | scan | The file was moved under `--quarantine`. |
 | `REFUSED` | FAIL or BLOCK | remux, ingest | The scan verdict prevented the remux; the severity is the scan verdict. |
 | `SKIPPED` | PASS or WARN | remux, clean | There was nothing to do for this file; the message says why. |

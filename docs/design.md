@@ -56,6 +56,20 @@ equality (packet hash, or decoded-frame hash across container families) → head
 and tail decode (or full) → fsync → place without clobber, or replace in place
 preserving identity.
 
+The HDR assertion compares more than a label. The prober reads the colour
+primaries, transfer characteristic, matrix coefficients and range, the
+mastering display chromaticity and luminance, the content light levels and
+the Dolby Vision configuration record from ffprobe's stream fields and side
+data, and fills any gap from the `mkvmerge -J` track properties, into one
+normalised `probe.Color` per video stream. Every number is validated as it is
+read; a value that is not a finite number, is negative, or is beyond what the
+format can express is recorded as malformed instead of trusted. The verifier
+compares the source and output `Color` of every kept video stream and reports
+each value that was lost, gained or changed in one `HDR_LOST` finding for the
+first stream that differs, because this signalling
+lives in the container header, outside the packets that the stream hashes
+cover, and a muxer can drop or alter it without changing a hash.
+
 ## Decision flow for ingest
 
 ingest is scan plus one of remux or clean, never both on the same file, and a

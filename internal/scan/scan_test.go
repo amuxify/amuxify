@@ -1042,6 +1042,54 @@ func TestExeAttachmentOutsideTailIsBlocked(t *testing.T) {
 	}
 }
 
+// The HDR finding keeps its code, severity and message and lists in its
+// detail every value the remux verifier holds the output to.
+func TestHDRFindingListsValues(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
+	root := testutil.Fixtures(t)
+	s := newScanner(t, mustProfile(t, "homelab"), r)
+	for _, tc := range []struct {
+		fixture string
+		label   string
+		detail  []string
+	}{
+		{"hdr10.mkv", "hdr10", []string{"primaries=bt2020", "transfer=smpte2084", "matrix=bt2020nc", "range=tv",
+			"red_x=0.708", "white_y=0.329", "min_luminance=0.0001", "max_luminance=1000", "max_cll=1000", "max_fall=400"}},
+		{"hlg.mkv", "hlg", []string{"primaries=bt2020", "transfer=arib-std-b67", "matrix=bt2020nc", "range=tv"}},
+	} {
+		fr := scanOne(t, s, filepath.Join(root, tc.fixture))
+		expect(t, fr, report.Pass, CodeHDR)
+		var hdr *report.Finding
+		for i := range fr.Findings {
+			if fr.Findings[i].Code == CodeHDR {
+				hdr = &fr.Findings[i]
+			}
+		}
+		if hdr == nil {
+			t.Fatalf("%s: no HDR finding", tc.fixture)
+		}
+		if hdr.Severity != report.Pass || hdr.Message != "stream #0: "+tc.label {
+			t.Fatalf("%s: %s %q", tc.fixture, hdr.Severity, hdr.Message)
+		}
+		if fr.Info["hdr"] != tc.label {
+			t.Fatalf("%s: info.hdr = %q", tc.fixture, fr.Info["hdr"])
+		}
+		for _, want := range tc.detail {
+			if !strings.Contains(hdr.Detail, want) {
+				t.Errorf("%s: detail %q lacks %q", tc.fixture, hdr.Detail, want)
+			}
+		}
+		if tc.fixture == "hlg.mkv" && strings.Contains(hdr.Detail, "luminance") {
+			t.Errorf("hlg detail claims static metadata: %q", hdr.Detail)
+		}
+	}
+	// An SDR file has no HDR finding and no hdr info key.
+	fr := scanOne(t, s, filepath.Join(root, "clean.mkv"))
+	if fr.Has(CodeHDR) || fr.Info["hdr"] != "" {
+		t.Fatalf("clean.mkv reports HDR: %v %q", codes(fr), fr.Info["hdr"])
+	}
+}
+
 func TestCorpusVerdicts(t *testing.T) {
 	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVExtract)
 	root := testutil.Fixtures(t)
@@ -1084,6 +1132,8 @@ func TestCorpusVerdicts(t *testing.T) {
 		"sample.ts":        {verdict: report.Pass},
 		"sample.webm":      {verdict: report.Pass},
 		"sample.mpg":       {verdict: report.Pass},
+		"hdr10.mkv":        {verdict: report.Pass, codes: []string{CodeHDR, CodeProvenanceInfo}},
+		"hlg.mkv":          {verdict: report.Pass, codes: []string{CodeHDR, CodeProvenanceInfo}},
 		"links.txt":        {verdict: report.Pass, codes: []string{CodeSidecarOK}},
 		"kodi/movie.nfo":   {nfo: true},
 		"kodi/tvshow.nfo":  {nfo: true},
