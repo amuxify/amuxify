@@ -2,6 +2,8 @@ package pool
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -183,6 +185,177 @@ func TestRunCancelStartsNothingNew(t *testing.T) {
 		if ok {
 			t.Errorf("ran[%d] under a done context", i)
 		}
+	}
+}
+
+// A cancellation that arrives while workers are parked on a key must wake
+// them. Every item carries one shared key, so while item 0 runs every other
+// worker sits in the scheduler's wait, and nothing but the broadcast in
+// cancel can release it before item 0 finishes. The scheduler is driven by
+// hand first, so the release is observed while item 0 is still running and
+// cannot be explained by the broadcast finish makes; then wait must return
+// through its cancelled branch once item 0 is done. The same shape is run
+// through Run afterwards, with item 0 cancelling from inside, and Run must
+// come back promptly with item 0 as the only item that ran.
+func TestRunCancelWakesWorkersParkedOnKey(t *testing.T) {
+	const n = 16
+	keys := make([][]string, n)
+	for i := range keys {
+		keys[i] = []string{"one"}
+	}
+	s := newScheduler(n, keys)
+	if i, ok := s.next(context.Background()); !ok || i != 0 {
+		t.Fatalf("first item %d %v", i, ok)
+	}
+	const parked = 7
+	left := make(chan bool, parked)
+	for w := 0; w < parked; w++ {
+		go func() {
+			_, ok := s.next(context.Background())
+			left <- ok
+		}()
+	}
+	// The workers have nothing to start until item 0 finishes; give them
+	// time to reach the wait, and check that none of them came back.
+	select {
+	case ok := <-left:
+		t.Fatalf("a worker returned %v before the cancellation while item 0 was running", ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.cancel()
+	for w := 0; w < parked; w++ {
+		select {
+		case ok := <-left:
+			if ok {
+				t.Error("a worker was handed an item after the cancellation")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a parked worker was not woken by cancel")
+		}
+	}
+	// wait returns only once the running item has finished, and then
+	// through the cancelled branch, since fifteen items never ran.
+	waited := make(chan struct{})
+	go func() {
+		s.wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("wait returned while item 0 was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.finish(0)
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("wait did not return after the last running item finished")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var count int32
+	done := make(chan []bool, 1)
+	go func() {
+		done <- Run(ctx, 8, n, keys, func(i int) {
+			atomic.AddInt32(&count, 1)
+			if i == 0 {
+				cancel()
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+	}()
+	select {
+	case ran := <-done:
+		if !ran[0] {
+			t.Error("item 0 did not run")
+		}
+		for i := 1; i < n; i++ {
+			if ran[i] {
+				t.Errorf("item %d ran after the cancellation", i)
+			}
+		}
+		if count != 1 {
+			t.Errorf("fn ran %d times, want 1", count)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return: the parked workers were never woken")
+	}
+}
+
+// An item may carry the same key twice, as an ingest item does for a
+// hard-linked file whose remux keys and scan keys both name its inode. Such
+// an item is at the head of that key for each occurrence, so it starts, and
+// finish advances the key's position once per occurrence, so the next item
+// on the key is reached and not skipped. Every item runs exactly once and
+// the key's items run in index order.
+func TestRunDuplicateKeysOnOneItem(t *testing.T) {
+	keys := [][]string{{"k", "k"}, {"k"}, {"k", "k"}, nil, {"k", "k", "k"}, {"k"}}
+	var mu sync.Mutex
+	var seq []int
+	runs := make([]int32, len(keys))
+	done := make(chan []bool, 1)
+	go func() {
+		done <- Run(context.Background(), 4, len(keys), keys, func(i int) {
+			atomic.AddInt32(&runs[i], 1)
+			if keys[i] != nil {
+				mu.Lock()
+				seq = append(seq, i)
+				mu.Unlock()
+			}
+			time.Sleep(2 * time.Millisecond)
+		})
+	}()
+	select {
+	case ran := <-done:
+		for i, ok := range ran {
+			if !ok || runs[i] != 1 {
+				t.Errorf("item %d: ran %v, %d times", i, ok, runs[i])
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		want := []int{0, 1, 2, 4, 5}
+		if len(seq) != len(want) {
+			t.Fatalf("keyed items ran as %v, want %v", seq, want)
+		}
+		for i := range want {
+			if seq[i] != want[i] {
+				t.Errorf("keyed items ran as %v, want %v", seq, want)
+				break
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return: a duplicate key left its position behind")
+	}
+}
+
+// PathKeys gives an ASCII name one key, its lower-cased path, and a name
+// with a character outside ASCII a second key naming its directory, so the
+// composed and the decomposed spelling of one accented name, which compare
+// as different byte strings, share the directory key while a sibling with a
+// plain name shares neither. Only the base name is looked at: a non-ASCII
+// directory with an ASCII file in it gets one key.
+func TestPathKeys(t *testing.T) {
+	dir := filepath.Join(string(filepath.Separator), "Out", "Season 1")
+	lower := strings.ToLower(dir)
+	nfc := filepath.Join(dir, "Café.mkv")
+	nfd := filepath.Join(dir, "Café.mkv")
+	if got := PathKeys("dest", filepath.Join(dir, "Ep.mkv")); len(got) != 1 || got[0] != "dest:"+filepath.Join(lower, "ep.mkv") {
+		t.Errorf("ASCII name: %v", got)
+	}
+	kc, kd := PathKeys("dest", nfc), PathKeys("dest", nfd)
+	if len(kc) != 2 || len(kd) != 2 {
+		t.Fatalf("non-ASCII names: %v %v", kc, kd)
+	}
+	if kc[0] == kd[0] {
+		t.Errorf("the two spellings fold to one name key without a normalisation table: %q", kc[0])
+	}
+	if kc[1] != "dest-dir:"+lower || kd[1] != kc[1] {
+		t.Errorf("directory keys %q %q, want %q", kc[1], kd[1], "dest-dir:"+lower)
+	}
+	if got := PathKeys("quarantine", filepath.Join(string(filepath.Separator), "Café", "ep.mkv")); len(got) != 1 {
+		t.Errorf("ASCII name under a non-ASCII directory: %v", got)
 	}
 }
 

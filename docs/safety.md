@@ -256,22 +256,30 @@ hint that names a stray argument never names one of SABnzbd's own.
 them. The worker pool never runs two names of one inode at the same time, nor
 two sources that map to one output or quarantine name; such files run one
 after the other in walk order, so a parallel run makes the same decisions as
-a sequential one. `remux` scans every file of a tree before it rebuilds any,
-whatever the job count, so the scan findings describe the tree as the run
-found it: the second name of a hard-linked pair is reported with the links it
-had before the first name was rebuilt in place. Paths given on the command
-line are still processed one after the other, and a file that quarantines to
-a name an earlier root already took meets that file on disk. The hook
-adapters always use one job, because the download client decides how many
-scripts run at once. Whatever the job count, at most one `clamscan` process
-runs at a time, because each one loads the whole signature database; a
-worker whose file is due for it waits its turn.
+a sequential one. A name is compared in lower case, and a name that holds a
+character outside ASCII is keyed to its directory as well, so two spellings
+of one accented name that a filesystem such as APFS folds into one entry are
+also run one after the other. `remux` scans every file of a tree before it
+rebuilds any, whatever the job count, so the scan findings describe the tree
+as the run found it: the second name of a hard-linked pair is reported with
+the links it had before the first name was rebuilt in place. Paths given on
+the command line are still processed one after the other, and a file that
+quarantines to a name an earlier root already took meets that file on disk.
+The hook adapters and `watch` always use one job, because the download
+client, or the watcher's own polling, decides how many files are handed over
+at once. Whatever the job count, at most one `clamscan` process runs at a
+time, because each one loads the whole signature database; a worker whose
+file is due for it waits its turn.
    Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
 `remux.TestParallelHardLinksSerialised`, `remux.TestSerialKeysOnlyMediaGetDestKeys`,
 `scan.TestScanPathParallelOrderAndCancel`, `scan.TestClamScanRunsOneAtATime`,
 `exec.TestPathConcurrentCallers`, `cli.TestJobsParallelMatchesSequential`,
 `cli.TestJobsSameQuarantineNameAcrossRoots`, `cli.TestJobsUsageErrors`,
-`cli.TestHookIgnoresJobs`.
+`cli.TestHookIgnoresJobs`, `pool.TestPathKeys`,
+`remux.TestParallelNormalisationCollisionSerialised`,
+`scan.TestSerialKeysNormalisationSharesDirectoryKey`,
+`pool.TestRunCancelWakesWorkersParkedOnKey`,
+`pool.TestRunDuplicateKeysOnOneItem`.
 
 ## What scan looks at
 

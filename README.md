@@ -75,7 +75,7 @@ JSON report keeps walk order. Two names of one inode, or two sources that
 would produce one output, are never processed at the same time, so the
 result matches a sequential run. ClamAV scans run one at a time whatever the
 job count, because every `clamscan` start loads the whole signature database.
-The hook adapters always use one job.
+The hook adapters and `watch` always use one job.
 
 ## Profiles
 

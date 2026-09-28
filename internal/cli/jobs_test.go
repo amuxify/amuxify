@@ -73,7 +73,7 @@ func TestJobsUsageErrors(t *testing.T) {
 // The help page lists --jobs with its value placeholder.
 func TestJobsInHelp(t *testing.T) {
 	_, out, errb := run(t, "help")
-	if !strings.Contains(out+errb, "  --jobs <n>              files to process at the same time, 1 to 64; hook always uses 1\n") {
+	if !strings.Contains(out+errb, "  --jobs <n>              files to process at the same time, 1 to 64; hook and watch always use 1\n") {
 		t.Errorf("help does not list --jobs <n>:\n%s%s", out, errb)
 	}
 }
@@ -330,12 +330,21 @@ func TestJobsSameQuarantineNameAcrossRoots(t *testing.T) {
 	}
 }
 
-// The hook adapters run with one job whatever --jobs says: the flag is
-// accepted, checked, and ignored, and the run behaves like a sequential
-// ingest.
+// The hook adapters and watch run with one job whatever --jobs says: the
+// flag is accepted, checked, and ignored, and the run behaves like a
+// sequential ingest. The job count is read off the ingester each command
+// builds, through the ingesterJobs seam, because with stub tools two files
+// finish within microseconds of each other and the order they are streamed
+// in would come out as walk order most of the time even with two workers.
+// The ingest command is run the same way to show the seam sees the flag
+// when a command does pass it through.
 func TestHookIgnoresJobs(t *testing.T) {
 	testutil.Stubs(t)
 	asUser(t, 1000)
+	var seen []int
+	ingesterJobs = func(jobs int) { seen = append(seen, jobs) }
+	t.Cleanup(func() { ingesterJobs = nil })
+
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a.nfo"), "nfo\n")
 	write(t, filepath.Join(dir, "b.nfo"), "nfo\n")
@@ -350,5 +359,34 @@ func TestHookIgnoresJobs(t *testing.T) {
 	}
 	if !strings.Contains(out, "amuxify: "+report.Pass.String()+", 2 file(s)") {
 		t.Errorf("summary line missing:\n%s", out)
+	}
+	if !reflect.DeepEqual(seen, []int{1}) {
+		t.Errorf("the hook built its ingester with jobs %v, want [1]", seen)
+	}
+
+	// watch builds one ingester up front and one per pass; every one of
+	// them has a single job, with --jobs before and after the command.
+	seen = nil
+	wdir := t.TempDir()
+	write(t, filepath.Join(wdir, "a.nfo"), "nfo\n")
+	if code, out, errb := run(t, "--jobs", "64", "watch", "--jobs=32", "--once", "--settle", "0s", wdir); code != 0 {
+		t.Fatalf("watch: exit %d\n%s%s", code, out, errb)
+	}
+	if len(seen) == 0 {
+		t.Fatal("watch built no ingester")
+	}
+	for _, j := range seen {
+		if j != 1 {
+			t.Errorf("watch built an ingester with jobs %d, want 1 (all: %v)", j, seen)
+		}
+	}
+
+	// ingest passes the flag through, so the seam is not blind to it.
+	seen = nil
+	if code, out, errb := run(t, "--jobs", "64", "ingest", dir); code != 0 {
+		t.Fatalf("ingest: exit %d\n%s%s", code, out, errb)
+	}
+	if !reflect.DeepEqual(seen, []int{64}) {
+		t.Errorf("ingest built its ingester with jobs %v, want [64]", seen)
 	}
 }

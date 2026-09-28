@@ -286,6 +286,116 @@ func TestParallelHardLinksSerialised(t *testing.T) {
 	}
 }
 
+// foldsNormalisation reports whether the filesystem under dir treats the
+// composed and the decomposed spelling of an accented name as one entry, as
+// APFS does: a file is written under the composed spelling and looked up
+// under the decomposed one.
+func foldsNormalisation(t *testing.T, dir string) bool {
+	t.Helper()
+	nfc := filepath.Join(dir, ".probe-é")
+	if err := os.WriteFile(nfc, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(nfc)
+	a, err := os.Lstat(nfc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.Lstat(filepath.Join(dir, ".probe-é"))
+	return err == nil && os.SameFile(a, b)
+}
+
+// Guarantee 1 and the promise that a parallel run decides as a sequential
+// one, for two sources whose names differ only in Unicode normalisation.
+// Café.mov is spelled with a composed é, as a Linux tool writes it, and
+// Café.webm with a decomposed one, as Finder writes it; on APFS both
+// rebuild to one directory entry Café.mkv and both temp names are one entry
+// too. The two keys compare as different byte strings, so without the
+// directory key both files run at once, both pass the destination check,
+// and the loser fails at its temp file with REMUX_FAIL "file exists"
+// instead of the OUTPUT_EXISTS a sequential run reports, with the winner
+// decided by timing. With the key they run in walk order: the first is
+// placed, the second meets it on disk. Both modes, in place and to an
+// output tree, and repeated because a race that shows only sometimes is
+// still a race. The keys themselves are checked on every filesystem; the
+// rebuild only where the two spellings collide.
+func TestParallelNormalisationCollisionSerialised(t *testing.T) {
+	nfc, nfd := "Café.mov", "Café.webm"
+	rm := &Remuxer{InPlace: true}
+	dir, out := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	kc := rm.SerialKeys(filepath.Join(dir, nfc), dir, out)
+	kd := rm.SerialKeys(filepath.Join(dir, nfd), dir, out)
+	if len(kc) != 4 || len(kd) != 4 || kc[1] != kd[1] || kc[3] != kd[3] || kc[0] == kd[0] || kc[2] == kd[2] {
+		t.Fatalf("keys %v and %v must share the two directory keys and nothing else", kc, kd)
+	}
+	if kc[1] != "dest-dir:"+strings.ToLower(out) || kc[3] != "dest-dir:"+strings.ToLower(dir) {
+		t.Errorf("directory keys %q %q", kc[1], kc[3])
+	}
+	if !foldsNormalisation(t, dir) {
+		t.Skip("this filesystem keeps the two spellings as two entries")
+	}
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, inPlace := range []bool{false, true} {
+		mode := "output"
+		if inPlace {
+			mode = "in place"
+		}
+		t.Run(mode, func(t *testing.T) {
+			for round := 0; round < 3; round++ {
+				dir := collisionPair(t, nfc, nfd)
+				rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+				rm.Jobs, rm.InPlace = 4, inPlace
+				destDir := dir
+				if !inPlace {
+					destDir = filepath.Join(t.TempDir(), "out")
+					rm.OutputRoot = destDir
+				}
+				res, err := rm.RemuxPath(context.Background(), dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(res) != 2 {
+					t.Fatalf("round %d: %d results", round, len(res))
+				}
+				first, second := res[0], res[1]
+				if !first.Has(CodePlaced) || first.Verdict >= report.Fail {
+					t.Errorf("round %d: the first file in walk order, %s, was not placed: %s %v", round, filepath.Base(first.Path), first.Verdict, codes(first))
+				}
+				f, ok := finding(second, CodeOutputExists)
+				if !ok || second.Verdict != report.Fail || second.Has(CodePlaced) || second.Has(CodeRemuxFail) || second.Output != "" {
+					t.Errorf("round %d: the second file, %s, must report OUTPUT_EXISTS as a sequential run does: %s %v", round, filepath.Base(second.Path), second.Verdict, codes(second))
+				} else if !strings.HasSuffix(f.Message, ".mkv already exists") {
+					t.Errorf("round %d: %q", round, f.Message)
+				}
+				entries, err := os.ReadDir(destDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mkv := 0
+				for _, e := range entries {
+					if strings.HasPrefix(e.Name(), ".amuxify-") {
+						t.Errorf("round %d: temp file %s left behind", round, e.Name())
+					}
+					if strings.HasSuffix(e.Name(), ".mkv") {
+						mkv++
+					}
+				}
+				if mkv != 1 {
+					t.Errorf("round %d: %d .mkv outputs in %s, want 1", round, mkv, destDir)
+				}
+				if inPlace {
+					if _, err := os.Lstat(second.Path); err != nil {
+						t.Errorf("round %d: the refused source %s is gone", round, filepath.Base(second.Path))
+					}
+					if _, err := os.Lstat(first.Path); err == nil {
+						t.Errorf("round %d: the winner's source %s is still there", round, filepath.Base(first.Path))
+					}
+				}
+			}
+		})
+	}
+}
+
 // hasFinding reports whether fr carries a finding with exactly this code,
 // severity and message.
 func hasFinding(fr report.FileResult, code string, sev report.Severity, msg string) bool {

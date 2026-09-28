@@ -81,6 +81,8 @@ func TestWatchUsage(t *testing.T) {
 		{"watching the quarantine directory", []string{"watch", "--quarantine=" + q, q}, "watch: " + q + " is the quarantine directory"},
 		{"watching inside the quarantine directory", []string{"watch", "--quarantine=" + q, inQ}, "watch: " + inQ + " lies inside the quarantine directory " + q},
 		{"unknown flag", []string{"watch", "--no-such-flag", dir}, "flag provided but not defined"},
+		{"jobs out of range", []string{"watch", "--jobs", "0", "--once", "--settle", "0s", dir}, "--jobs must be between 1 and"},
+		{"jobs above the maximum", []string{"watch", "--jobs=65", "--once", "--settle", "0s", dir}, "--jobs must be between 1 and"},
 	}
 	if runtime.GOOS != "windows" {
 		cases = append(cases, struct {
@@ -184,10 +186,36 @@ func TestWatchOnceIngestsSettledFiles(t *testing.T) {
 		t.Error("the blocked sidecar was removed without --remove-blocked-sidecars")
 	}
 	noTemp(t, dir)
-	// --quiet prints nothing at all.
-	_, qout, qerr := run(t, "--quiet", "watch", "--once", "--settle", "0s", dir)
+	// --quiet prints nothing at all, as docs/report.md promises: not the
+	// start line, not the verdicts, not the count line, and not the
+	// watcher's own notices either. A fresh tree holds a plain file, a
+	// symbolic link and an unreadable subdirectory: the link is what the
+	// notice closure reports and the directory is what the pass error
+	// reports, and neither may reach a stream, while the exit code still
+	// carries the unreadable directory's FAIL.
+	qdir := t.TempDir()
+	qa := write(t, filepath.Join(qdir, "a.nfo"), "nfo\n")
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(qa, filepath.Join(qdir, "link.nfo")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantCode := 0
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(qdir, "locked")
+		write(t, filepath.Join(locked, "hidden.nfo"), "nfo\n")
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(locked, 0o755) })
+		wantCode = 3
+	}
+	qcode, qout, qerr := run(t, "--quiet", "watch", "--once", "--settle", "0s", qdir)
 	if qout != "" || qerr != "" {
 		t.Errorf("--quiet wrote %q %q", qout, qerr)
+	}
+	if qcode != wantCode {
+		t.Errorf("--quiet exit %d, want %d", qcode, wantCode)
 	}
 }
 
