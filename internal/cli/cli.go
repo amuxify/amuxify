@@ -134,6 +134,7 @@ Commands:
   clean     strip metadata and extended attributes in place, tracks untouched
   ingest    scan, then rebuild into a verified MKV or clean in place, in one pass
   hook      run ingest for sabnzbd | nzbget | sonarr | radarr and exit the way they expect
+  watch     poll a directory and ingest each file once it has stopped changing
   doctor    check tools, versions, profile, and environment
   profile   list built-in profiles or print one:  amuxify profile show homelab
   version   print the version
@@ -218,6 +219,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		code = g.ingest(ctx, rest)
 	case "hook":
 		code = g.hook(ctx, rest)
+	case "watch":
+		// A watch that is interrupted has done its job: it exits 0 after
+		// the file in progress, so the 130 below is not applied to it.
+		return g.watch(ctx, rest)
 	default:
 		fmt.Fprintf(stderr, "amuxify: unknown command %q\n\n", cmd)
 		fs.Usage()
