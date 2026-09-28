@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -118,7 +120,9 @@ func leftovers(t *testing.T, roots ...string) []string {
 }
 
 // mediaResult builds a scan result for a fake video file so remuxScanned can
-// be exercised without any tool.
+// be exercised without any tool. The result carries the file's identity as
+// the scanner would have recorded it, taken now, so a test that swaps the
+// file afterwards exercises the same check a real scan would.
 func mediaResult(path string, verdict report.Severity) scan.Result {
 	fr := report.FileResult{Path: path, Info: map[string]string{}}
 	switch verdict {
@@ -129,8 +133,10 @@ func mediaResult(path string, verdict report.Severity) scan.Result {
 	case report.Warn:
 		fr.Addf(scan.CodeLinkInTag, report.Warn, "test warn")
 	}
+	stat, _ := os.Lstat(path)
 	return scan.Result{
 		File: fr,
+		Stat: stat,
 		Info: &probe.MediaInfo{
 			Path: path, Container: "matroska", MkvSupported: true, MkvIdentified: true,
 			Streams: []probe.Stream{
@@ -432,6 +438,140 @@ func TestMkvmergeArgsGolden(t *testing.T) {
 	got4 := rm.mkvmergeArgs(out, m, d2)
 	if n := len(got4); got4[n-3] != "(" || got4[n-2] != "--no-video" || got4[n-1] != ")" {
 		t.Fatalf("input not bracketed: %q", got4)
+	}
+}
+
+// The command line names, per kept video track, the colour and HDR values
+// that ffprobe read and mkvmerge's own view of the track lacks, and only
+// those: a Matroska source, whose header mkvmerge copies, gets no option;
+// a value mkvmerge saw for itself is not repeated; a malformed value is
+// never written; a measured value is written in a decimal mkvmerge parses
+// and only when that decimal reads back as the value held, and a value
+// strconv would print with an exponent comes out in fixed notation, since
+// mkvmerge rejects the exponent form. Every option is a single argument
+// of the form option, "id:digits", so nothing a probe read can reach the
+// shell or split into a second option.
+func TestMkvmergeArgsCarryColourMkvmergeDrops(t *testing.T) {
+	rm, _ := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	in := filepath.Join(t.TempDir(), "in.mp4")
+	full := probe.Color{
+		Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc", Range: "tv",
+		Mastering: &probe.MasteringDisplay{HasPrimaries: true, RedX: 0.708, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329,
+			HasLuminance: true, MinLuminance: 0.0001, MaxLuminance: 1000},
+		Light: &probe.ContentLight{MaxCLL: 1000, MaxFALL: 400},
+	}
+	clone := func(c probe.Color) probe.Color {
+		b, _ := json.Marshal(c)
+		var out probe.Color
+		_ = json.Unmarshal(b, &out)
+		return out
+	}
+	colrOnly := probe.Color{Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc"}
+	allOpts := []string{
+		"--colour-range", "3:1",
+		"--chromaticity-coordinates", "3:0.708,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329",
+		"--min-luminance", "3:0.0001", "--max-luminance", "3:1000",
+		"--max-content-light", "3:1000", "--max-frame-light", "3:400",
+	}
+	cases := []struct {
+		name string
+		c    probe.Color
+		mk   probe.Color
+		want []string
+	}{
+		{"mp4 with colr, mdcv and clli", full, colrOnly, allOpts},
+		{"matroska source: mkvmerge holds everything", full, clone(full), nil},
+		{"mkvmerge never ran on the file", full, probe.Color{}, allOpts},
+		{"sdr mp4 with colr", probe.Color{Primaries: "bt709", Transfer: "bt709", Matrix: "bt709", Range: "tv"}, probe.Color{Primaries: "bt709", Transfer: "bt709", Matrix: "bt709"},
+			[]string{"--colour-range", "3:1"}},
+		{"full range", probe.Color{Range: "pc"}, probe.Color{}, []string{"--colour-range", "3:2"}},
+		{"range mkvmerge already holds", probe.Color{Range: "tv"}, probe.Color{Range: "tv"}, nil},
+		{"range mkvmerge holds differently is not overridden", probe.Color{Range: "tv"}, probe.Color{Range: "pc"}, nil},
+		{"range name that is not tv or pc", probe.Color{Range: "limited;--attachments"}, probe.Color{}, nil},
+		{"nothing at all", probe.Color{}, probe.Color{}, nil},
+		{"primaries held by mkvmerge, luminance not", full, func() probe.Color {
+			c := clone(full)
+			c.Mastering.HasLuminance = false
+			return c
+		}(), []string{"--min-luminance", "3:0.0001", "--max-luminance", "3:1000"}},
+		{"luminance held by mkvmerge, primaries not", full, func() probe.Color {
+			c := clone(full)
+			c.Mastering.HasPrimaries = false
+			return c
+		}(), []string{"--chromaticity-coordinates", "3:0.708,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329"}},
+		{"light held by mkvmerge", probe.Color{Light: &probe.ContentLight{MaxCLL: 1, MaxFALL: 1}}, probe.Color{Light: &probe.ContentLight{MaxCLL: 1, MaxFALL: 1}}, nil},
+		{"only a flag set, no values", probe.Color{Mastering: &probe.MasteringDisplay{}}, probe.Color{}, nil},
+		// A malformed value is not held by the merged Color, so nothing is
+		// written for it; the verifier then compares it as malformed.
+		{"malformed on the source side", probe.Color{Range: "tv", Malformed: []string{"max_cll", "max_fall", "chromaticity_coordinates"}}, probe.Color{},
+			[]string{"--colour-range", "3:1"}},
+		// Tiny values that strconv would print with an exponent, which
+		// mkvmerge rejects, come out in fixed notation and exact: twelve
+		// fractional digits are finer than the tolerance's absolute floor,
+		// so the round trip the builder checks always holds for a value in
+		// range, and the check is what keeps that true rather than assumed.
+		{"chromaticity of a ten millionth", probe.Color{Mastering: &probe.MasteringDisplay{HasPrimaries: true, RedX: 1e-7, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329}}, probe.Color{},
+			[]string{"--chromaticity-coordinates", "3:0.0000001,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329"}},
+		{"luminance of three billionths", probe.Color{Mastering: &probe.MasteringDisplay{HasLuminance: true, MinLuminance: 3e-9, MaxLuminance: 1000}}, probe.Color{},
+			[]string{"--min-luminance", "3:0.000000003", "--max-luminance", "3:1000"}},
+		// The float32 noise ffprobe's rationals carry is rounded to twelve
+		// fractional digits with trailing zeros trimmed, well inside the
+		// eighteen mkvmerge parses correctly.
+		{"values with float32 noise are rounded to twelve digits", probe.Color{Mastering: &probe.MasteringDisplay{HasPrimaries: true,
+			RedX: 11878269.0 / 16777216, RedY: 4898947.0 / 16777216, GreenX: 11408507.0 / 67108864, GreenY: 13371441.0 / 16777216,
+			BlueX: 8791261.0 / 67108864, BlueY: 12348031.0 / 268435456, WhiteX: 10492471.0 / 33554432, WhiteY: 689963.0 / 2097152,
+			HasLuminance: true, MinLuminance: 209800.0 / 2098000053, MaxLuminance: 100000}}, probe.Color{},
+			[]string{"--chromaticity-coordinates", "3:0.708000004292,0.291999995708,0.170000001788,0.79699999094,0.130999997258,0.046000000089", "--white-colour-coordinates", "3:0.312700003386,0.328999996185",
+				"--min-luminance", "3:0.000099999997", "--max-luminance", "3:100000"}},
+		{"zero is written as zero", probe.Color{Mastering: &probe.MasteringDisplay{HasLuminance: true, MinLuminance: 0, MaxLuminance: 1}}, probe.Color{},
+			[]string{"--min-luminance", "3:0", "--max-luminance", "3:1"}},
+		{"content light at the 16-bit bound", probe.Color{Light: &probe.ContentLight{MaxCLL: 65535, MaxFALL: 0}}, probe.Color{},
+			[]string{"--max-content-light", "3:65535", "--max-frame-light", "3:0"}},
+	}
+	value := regexp.MustCompile(`^3:[0-9.,]+$`)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := probe.Stream{Index: 3, MkvID: 3, Type: "video", Color: tc.c, MkvColor: tc.mk}
+			got := colourArgs("3", s)
+			// Every rounded value reads back as the value held, so the
+			// verifier will accept what mkvmerge writes from it.
+			for i := 0; i+1 < len(got); i += 2 {
+				if !strings.HasPrefix(got[i], "--") || !value.MatchString(got[i+1]) {
+					t.Fatalf("option %q %q is not option, id:digits", got[i], got[i+1])
+				}
+				for _, num := range strings.Split(strings.TrimPrefix(got[i+1], "3:"), ",") {
+					if strings.ContainsAny(num, "eE") || len(num)-strings.Index(num, ".")-1 > 18 && strings.Contains(num, ".") {
+						t.Fatalf("value %q is not a decimal mkvmerge parses", num)
+					}
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("options\n got %q\nwant %q", got, tc.want)
+			}
+			// Through the whole builder the options sit with the track's
+			// other per-track options, after the flags of the other tracks.
+			m := &probe.MediaInfo{Path: in, Container: "mp4"}
+			d := &policy.Decision{Tracks: []policy.TrackAction{{Stream: s, Keep: true}, {Stream: probe.Stream{Index: 4, MkvID: 4, Type: "audio"}, Keep: true}}}
+			args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), m, d)
+			joined := strings.Join(args, "\x00")
+			if wantJoined := strings.Join(tc.want, "\x00"); len(tc.want) > 0 && !strings.Contains(joined, wantJoined) {
+				t.Fatalf("builder lacks the options: %q", args)
+			}
+			if len(tc.want) == 0 && strings.Contains(joined, "--colour") {
+				t.Fatalf("builder wrote colour options for nothing: %q", args)
+			}
+			// A dropped track gets nothing.
+			d.Tracks[0].Keep = false
+			if args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), m, d); strings.Contains(strings.Join(args, " "), "--colour") || strings.Contains(strings.Join(args, " "), "-light") {
+				t.Fatalf("a dropped track got colour options: %q", args)
+			}
+		})
+	}
+	// An audio track never gets colour options, whatever its Color holds.
+	a := probe.Stream{Index: 1, MkvID: 1, Type: "audio", Color: full}
+	d := &policy.Decision{Tracks: []policy.TrackAction{{Stream: a, Keep: true}}}
+	if args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), &probe.MediaInfo{Path: in}, d); strings.Contains(strings.Join(args, " "), "--colour") {
+		t.Fatalf("an audio track got colour options: %q", args)
 	}
 }
 
@@ -815,6 +955,82 @@ func TestFailedRemuxLeavesNothing(t *testing.T) {
 	})
 	if len(files) != 0 {
 		t.Fatalf("files left after failure: %v", files)
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+}
+
+// Guarantee 2 when the context is cancelled while mkvmerge is writing the
+// temp file: the tool is killed, the temp file is removed, nothing is
+// placed, the source keeps its bytes and the result says why. The wrapper
+// reports that mkvmerge has started and then waits for the test, so the
+// cancel lands while the temp file exists; the test checks that it did.
+func TestCancelledMidMkvmergeLeavesNoTemp(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "clean.mkv")
+	root := filepath.Dir(src)
+	before := fileSHA(t, src)
+	outRoot := filepath.Join(t.TempDir(), "out")
+	tmp := filepath.Join(outRoot, ".amuxify-clean.mkv.tmp")
+	started := filepath.Join(t.TempDir(), "started")
+	// The snippet runs before the real mkvmerge: it announces itself and
+	// waits up to 20 seconds for the test to cancel the context, which
+	// kills the shell and the wait with it. The cap keeps a broken test
+	// from hanging.
+	mkvmergeWrapper(t, r, ": > "+shq(started)+"\ni=0\nwhile [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done", "")
+	rm, tr := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	rm.OutputRoot = outRoot
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tempSeen := make(chan bool, 1)
+	go func() {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, err := os.Lstat(started); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				tempSeen <- false
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_, err := os.Lstat(tmp)
+		cancel()
+		tempSeen <- err == nil
+	}()
+	res, err := rm.RemuxPath(ctx, root)
+	if !<-tempSeen {
+		t.Fatalf("the temp file did not exist while mkvmerge ran, so the cancel landed elsewhere (results %v, %v)", res, err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results, want the interrupted file reported", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never ran: %v", codes(fr))
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeRemuxFail && strings.Contains(f.Message, "context canceled") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not name the cancellation: %v", fr.Findings)
+	}
+	if left := leftovers(t, outRoot, root); len(left) != 0 {
+		t.Fatalf("left behind after the cancel: %v", left)
+	}
+	if _, err := os.Lstat(filepath.Join(outRoot, "clean.mkv")); err == nil {
+		t.Fatal("output placed although mkvmerge was killed")
 	}
 	if fileSHA(t, src) != before {
 		t.Fatal("source changed")
@@ -2261,5 +2477,384 @@ func TestFoldsCaseDetection(t *testing.T) {
 		if got := flipCase(in); got != out {
 			t.Errorf("flipCase(%q) = %q, want %q", in, got, out)
 		}
+	}
+}
+
+// Guarantee 9 across the scan-to-remux window: the scan's verdict describes
+// the file the scanner examined, and a different regular file renamed onto
+// the name before the rebuild has never been scanned. It must be refused,
+// no tool may run against it, and it must keep its bytes. The first rows
+// hand a finished scan result to RemuxScanned, the way ingest and watch do;
+// the last row swaps inside RemuxPath, between its scan phase and its
+// rebuild phase, through the scanner's progress callback. The swapped-in
+// file carries an executable attachment and would be blocked by a scan of
+// its own, so an unchecked rebuild would remux a file the run never vetted.
+func TestSourceSwappedForUnscannedFileRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		inPlace bool
+		viaPath bool
+	}{
+		{"scanned result in place", true, false},
+		{"scanned result to output tree", false, false},
+		{"between the phases of RemuxPath", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.mkv")
+			if err := os.Rename(testutil.Copy(t, "clean.mkv"), path); err != nil {
+				t.Fatal(err)
+			}
+			swap := testutil.Copy(t, "exe_attach.mkv")
+			swapSum := fileSHA(t, swap)
+			if swapSum == fileSHA(t, path) {
+				t.Fatal("test setup: the swap must differ from the source")
+			}
+			outRoot := filepath.Join(t.TempDir(), "out")
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm.InPlace = tc.inPlace
+			if !tc.inPlace {
+				rm.OutputRoot = outRoot
+			}
+			doSwap := func() {
+				if err := os.Rename(swap, path); err != nil {
+					t.Fatalf("swap: %v", err)
+				}
+			}
+			var fr report.FileResult
+			var scanned int
+			if tc.viaPath {
+				rm.Scanner.Progress = func(sc scan.Result) {
+					if sc.File.Verdict >= report.Fail {
+						t.Errorf("scan of the real source failed: %v", codes(sc.File))
+					}
+					doSwap()
+					scanned = len(tr.all())
+				}
+				res, err := rm.RemuxPath(context.Background(), dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(res) != 1 {
+					t.Fatalf("%d results", len(res))
+				}
+				fr = res[0]
+			} else {
+				sc := rm.Scanner.ScanFile(context.Background(), path, dir)
+				if sc.Info == nil || sc.File.Verdict >= report.Fail {
+					t.Fatalf("scan: %v", codes(sc.File))
+				}
+				doSwap()
+				scanned = len(tr.all())
+				fr = rm.RemuxScanned(context.Background(), sc, dir, outRoot)
+			}
+			if _, err := os.Lstat(swap); err == nil {
+				t.Fatal("the swap never happened; the window was not exercised")
+			}
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "changed since the scan") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not say the file changed since the scan: %v", fr.Findings)
+			}
+			if got := tr.all()[scanned:]; len(got) != 0 {
+				t.Fatalf("tools ran against the unscanned file: %v", got)
+			}
+			if fileSHA(t, path) != swapSum {
+				t.Fatal("the unscanned file was rebuilt or removed")
+			}
+			if _, err := os.Lstat(outRoot); err == nil {
+				t.Fatal("output root created for a refused file")
+			}
+			if l := leftovers(t, dir); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 1 {
+				t.Fatalf("directory holds %d entries, want only the swapped-in file", len(entries))
+			}
+		})
+	}
+}
+
+// A scan result that carries no record of the file the scanner examined
+// says nothing about what sits at the path now, and the remuxer must not
+// take the verdict on trust. Nothing may run and the file must be left
+// alone.
+func TestScanResultWithoutIdentityRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "clean.mkv")
+	dir := filepath.Dir(src)
+	before := fileSHA(t, src)
+	rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+	rm.InPlace = true
+	sc := rm.Scanner.ScanFile(context.Background(), src, dir)
+	if sc.Info == nil || sc.File.Verdict >= report.Fail {
+		t.Fatalf("scan: %v", codes(sc.File))
+	}
+	sc.Stat = nil
+	scanned := len(tr.all())
+	fr := rm.RemuxScanned(context.Background(), sc, dir, "")
+	if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	if got := tr.all()[scanned:]; len(got) != 0 {
+		t.Fatalf("tools ran on an unproven result: %v", got)
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+// Guarantee 3 and 6 in the identity window of the in-place rebuild: the
+// output takes the mode, ownership and time of the source that was
+// examined, never of whatever sits at the source's name at that moment. The
+// seam removes the source and plants a symlink to a world-writable victim
+// in its place right before the identity copy. A copy that read the name
+// would follow the link and hand the placed output the victim's 0777. The
+// pinned identity of the examined source (0640, an old stamp) must win, and
+// the victim must keep its own mode and time.
+func TestIdentityCopiedFromExaminedSourceNotFromSwappedLink(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits and symlinks differ on windows")
+	}
+	src := testutil.Copy(t, "clean.mkv")
+	dir := filepath.Dir(src)
+	if err := os.Chmod(src, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	srcStamp := time.Date(2010, 11, 12, 13, 14, 15, 0, time.UTC)
+	if err := os.Chtimes(src, srcStamp, srcStamp); err != nil {
+		t.Fatal(err)
+	}
+	victim := testutil.Copy(t, "clean.mkv")
+	victimBefore := fileSHA(t, victim)
+	if err := os.Chmod(victim, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	victimStamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(victim, victimStamp, victimStamp); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	t.Cleanup(func() { beforeIdentity = nil })
+	beforeIdentity = func(_, dest string) {
+		if dest != src {
+			t.Fatalf("seam ran for %s, want %s", dest, src)
+		}
+		if err := os.Remove(src); err != nil {
+			t.Fatalf("swap: %v", err)
+		}
+		if err := os.Symlink(victim, src); err != nil {
+			t.Fatalf("swap: %v", err)
+		}
+		swapped = true
+	}
+	rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+	rm.InPlace = true
+	res, err := rm.RemuxPath(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never ran: %v", codes(fr))
+	}
+	if !swapped {
+		t.Fatalf("the seam never ran; the window was not exercised: %v", codes(fr))
+	}
+	// The rename over the source cannot see the link first (the comment in
+	// remux.go says why), so the built file lands at the source's name and
+	// is reported as placed; what this test pins down is whose identity it
+	// carries.
+	fi, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("nothing was placed over the planted link: %v", codes(fr))
+	}
+	if fi.Mode().Perm() == 0o777 {
+		t.Fatalf("the placed output took the victim's mode through the swapped link: %v", codes(fr))
+	}
+	if fi.Mode().Perm() != 0o640 || !fi.ModTime().Equal(srcStamp) {
+		t.Fatalf("placed output carries mode %o mtime %v, want the examined source's 0640 %v", fi.Mode().Perm(), fi.ModTime(), srcStamp)
+	}
+	vfi, err := os.Lstat(victim)
+	if err != nil || !vfi.Mode().IsRegular() || fsutil.Nlink(vfi) != 1 {
+		t.Fatalf("victim is no longer a plain regular file with one name: %v", err)
+	}
+	if vfi.Mode().Perm() != 0o777 || !vfi.ModTime().Equal(victimStamp) {
+		t.Fatalf("victim identity rewritten through the planted link: mode %o mtime %v", vfi.Mode().Perm(), vfi.ModTime())
+	}
+	if fileSHA(t, victim) != victimBefore {
+		t.Fatal("victim bytes changed")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+// Guarantee 3 for the output root amuxify names itself: a symlink planted
+// at <root>__remuxed, the sibling every run without --output writes into,
+// must not turn the run into a write somewhere else. The defaulted root is
+// refused before any file is rebuilt, nothing is written through the link,
+// and the link is left in place. Naming a symlink with --output stays the
+// user's own choice and keeps working; that row proves the refusal is
+// confined to the name amuxify picked. The last rows hand a scanned result
+// straight to RemuxScanned with the defaulted root, the way ingest and
+// watch do, and expect the per-file refusal.
+func TestDefaultOutputRootRefusesPlantedSymlink(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	plant := func(t *testing.T) (root, elsewhere string) {
+		parent := t.TempDir()
+		root = filepath.Join(parent, "in")
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "clean.mkv"), filepath.Join(root, "clean.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		elsewhere = t.TempDir()
+		if err := os.Symlink(elsewhere, root+"__remuxed"); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return root, elsewhere
+	}
+	untouched := func(t *testing.T, root, elsewhere string) {
+		t.Helper()
+		if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+			t.Fatalf("written through the planted link: %v", entries)
+		}
+		if fi, err := os.Lstat(root + "__remuxed"); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("planted symlink was replaced or removed: %v", err)
+		}
+		if l := leftovers(t, root, elsewhere); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+	}
+
+	t.Run("defaulted root through RemuxPath", func(t *testing.T) {
+		root, elsewhere := plant(t)
+		before := fileSHA(t, filepath.Join(root, "clean.mkv"))
+		rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err == nil {
+			t.Fatalf("RemuxPath accepted a symlink at the defaulted output root: %d results", len(res))
+		}
+		if !strings.Contains(err.Error(), "symlink") || !strings.Contains(err.Error(), root+"__remuxed") {
+			t.Fatalf("error does not name the symlink at the output root: %v", err)
+		}
+		if len(tr.all()) != 0 {
+			t.Fatalf("tools ran before the output root was refused: %v", tr.all())
+		}
+		if fileSHA(t, filepath.Join(root, "clean.mkv")) != before {
+			t.Fatal("source changed")
+		}
+		untouched(t, root, elsewhere)
+	})
+
+	t.Run("defaulted root that is a regular file", func(t *testing.T) {
+		parent := t.TempDir()
+		root := filepath.Join(parent, "in")
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "clean.mkv"), filepath.Join(root, "clean.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(root+"__remuxed", []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+		_, err := rm.RemuxPath(context.Background(), root)
+		if err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("want a refusal naming the non-directory, got %v", err)
+		}
+		if len(tr.all()) != 0 {
+			t.Fatalf("tools ran before the output root was refused: %v", tr.all())
+		}
+		if b, err := os.ReadFile(root + "__remuxed"); err != nil || string(b) != "not a directory" {
+			t.Fatalf("the file at the defaulted root was changed: %q %v", b, err)
+		}
+	})
+
+	t.Run("explicit --output naming a symlink is honoured", func(t *testing.T) {
+		root, elsewhere := plant(t)
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.OutputRoot = root + "__remuxed"
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 || res[0].Verdict >= report.Fail || !res[0].Has(CodePlaced) {
+			t.Fatalf("explicit output root refused: %v", codes(res[0]))
+		}
+		if _, err := os.Lstat(filepath.Join(elsewhere, "clean.mkv")); err != nil {
+			t.Fatalf("output not placed where --output pointed: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		isDir bool
+	}{
+		{"scanned result with the defaulted root of a directory", true},
+		{"scanned result with the defaulted root of a single file", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, elsewhere := plant(t)
+			path := filepath.Join(root, "clean.mkv")
+			before := fileSHA(t, path)
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			sc := rm.Scanner.ScanFile(context.Background(), path, root)
+			if sc.Info == nil || sc.File.Verdict >= report.Fail {
+				t.Fatalf("scan: %v", codes(sc.File))
+			}
+			scanned := len(tr.all())
+			var inputRoot, outRoot string
+			if tc.isDir {
+				inputRoot, outRoot = rm.Roots(root, true)
+			} else {
+				inputRoot, outRoot = rm.Roots(path, false)
+			}
+			if outRoot != root+"__remuxed" {
+				t.Fatalf("test setup: defaulted root is %s", outRoot)
+			}
+			fr := rm.RemuxScanned(context.Background(), sc, inputRoot, outRoot)
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "symlink") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+			}
+			if got := tr.all()[scanned:]; len(got) != 0 {
+				t.Fatalf("tools ran before the output root was refused: %v", got)
+			}
+			if fileSHA(t, path) != before {
+				t.Fatal("source changed")
+			}
+			untouched(t, root, elsewhere)
+		})
 	}
 }

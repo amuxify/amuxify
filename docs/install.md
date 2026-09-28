@@ -10,7 +10,7 @@ first, then the binary, then run `amuxify doctor`.
 | MKVToolNix (`mkvmerge`, `mkvpropedit`, `mkvextract`) | 50 | the only MKV writer; `--no-date`, IETF language tags, attachment extraction |
 | ffmpeg and ffprobe | 4.4 (5.0+ recommended) | probing, stream hashing, decode checks, MP4/AVI metadata rewrite |
 | exiftool | any | optional, richer provenance reports |
-| clamscan | any | optional, `--clamav` or `safety.clamav = "required"` |
+| clamscan | 0.103 | optional, `--clamav` or `safety.clamav = "optional"` or `"required"`; see [ClamAV](#clamav) |
 
 ```sh
 # Debian / Ubuntu
@@ -41,7 +41,7 @@ PREFIX=$HOME/.local sh install.sh
 
 The script downloads the archive for your OS and CPU, verifies it against the
 `checksums.txt` published with the release, and installs `amuxify` under
-`$PREFIX/bin`. Set `VERSION=0.3.0` to pin a version.
+`$PREFIX/bin`. Set `VERSION=0.4.0` to pin a version.
 
 ### Homebrew
 
@@ -82,21 +82,35 @@ Go 1.26 or newer.
 
 ### Windows
 
-Planned for 0.4. The code does not build for Windows yet (the file identity
-checks use Unix `stat` fields), so no Windows binary is published.
+There is no native Windows build, and none is planned. The safety guarantees
+in [safety.md](safety.md) rest on POSIX file identity: a file is recognised
+by its device and inode number so that a symlink, a hard link or a file
+swapped onto a name during a run is caught before anything is written, and
+ownership, mode and modification time are carried over to the rebuilt file.
+Windows has no equivalent that the same code can rely on, and a port that
+weakened those checks would not be amuxify.
+
+On Windows, run amuxify in one of two ways. With Docker Desktop, use the
+Docker image described above; mount the library into the container and pass
+the uid and gid that own it, exactly as on Linux. With WSL, install the Linux
+binary or the Docker image inside the WSL distribution and keep the library
+on a Linux filesystem there (a path under `/home` or `/srv`, not under
+`/mnt/c`), because a Windows drive mounted into WSL does not provide the
+file identity the guarantees need. The hook adapters work the same way when
+the download client runs inside WSL or in a container.
 
 ## Check
 
 ```
 $ amuxify doctor
-amuxify 0.3.0
+amuxify 0.4.0
 PASS     mkvmerge     /usr/bin/mkvmerge (mkvmerge v85.0 ('Nightingale') 64-bit)
 PASS     mkvpropedit  /usr/bin/mkvpropedit (...)
 PASS     mkvextract   /usr/bin/mkvextract (...)
 PASS     ffmpeg       /usr/bin/ffmpeg (ffmpeg version 6.1.1 ...)
 PASS     ffprobe      /usr/bin/ffprobe (...)
 WARN     exiftool     not found (optional: deep metadata reports)
-WARN     clamscan     not found (optional: safety.clamav = optional|required)
+WARN     clamscan     not found (ClamAV 0.103 or newer for --alert-exceeds-max; optional: safety.clamav = optional|required)
 PASS     locale       en_US.UTF-8
 PASS     profile      homelab: Keep all languages, chapters and fonts; ...
 PASS     user         uid 1000
@@ -109,6 +123,74 @@ WARN: usable with warnings
 Exit code 0 means amuxify is usable, even when optional tools are missing and
 reported as `WARN`. Exit code 2 means a required tool is missing or too old, or
 the active profile is invalid.
+
+## ClamAV
+
+ClamAV is optional. Install it and download the signature database once
+before the first scan; the scan needs the database, not the `clamd` daemon.
+ClamAV 0.103 or newer is required, because every scan passes
+`--alert-exceeds-max`, which that release introduced; `doctor` reports an
+older clamscan as too old and exits 2, and an older clamscan refuses the
+option, which every scan reports as `CLAMAV_ERROR`. The package in every
+distribution listed below is newer than that.
+
+```sh
+# Debian / Ubuntu
+sudo apt install clamav && sudo freshclam
+# Fedora
+sudo dnf install clamav clamav-update && sudo freshclam
+# Arch
+sudo pacman -S clamav && sudo freshclam
+# Alpine
+apk add clamav && freshclam
+# macOS
+brew install clamav && freshclam
+```
+
+On Debian and Ubuntu the `clamav-freshclam` service keeps the database current;
+on the other systems run `freshclam` from a timer. `doctor` reports the
+clamscan version and, in the `clamav-db` row, the signature database version
+and its age, and names `freshclam` when the database is more than a week old
+or missing. The age of the database is informational and never changes the
+exit code; only a database that is missing altogether under a profile that
+requires the scan makes `doctor` exit 2, as described below.
+
+```
+PASS     clamscan     /usr/bin/clamscan (ClamAV 1.4.2/27500/Mon Sep 21 08:33:45 2026)
+PASS     clamav-db    signatures 27500 from 2026-09-21 (7 day(s) old)
+```
+
+Whether a scan runs is decided by the profile's `safety.clamav` key and the
+`scan --clamav` flag; [docs/profiles.md](profiles.md#clamav) has the table.
+The `strict` profile requires clamscan: without it `doctor` exits 2 with
+`MISSING  clamav  profile requires clamscan but it is not installed`, and
+`scan`, `ingest` and the hook adapters fail every media file with
+`CLAMAV_MISSING`, a clamscan that has no signature database makes
+`doctor` exit 2 with `MISSING  clamav-db` and fails every media file with
+`CLAMAV_ERROR`, and a clamscan that is installed but cannot be run, because
+a shared library is missing for example, makes `doctor` exit 2 with
+`MISSING  clamav  profile requires clamscan but it cannot be run` for the
+same reason. One clamscan call is bounded by `--timeout` when given and
+by 30 minutes otherwise; a scanner that runs past it is killed and the file
+is reported `WARN CLAMAV_ERROR` under an optional scan, which does not block
+the run, and `FAIL CLAMAV_ERROR` under a required one, which refuses the
+file. Every call loads the whole signature database before it reads the
+file, which takes several seconds on a slow machine, so a large tree scans
+noticeably slower with ClamAV on.
+
+libclamav cannot scan a file of 2 GiB or more, and by default it skips any
+file above 100 MB and reports it clean without reading it. amuxify raises
+the file size limit to 2047 MiB, the most libclamav accepts, switches off
+the scan size and scan time limits so that a large or slow file is read in
+full under amuxify's own timeout, and passes `--alert-exceeds-max` so that
+a file the scanner did not read is never reported clean. A media file
+larger than 2047 MiB is therefore not scanned at all: it is `CLAMAV_ERROR`
+with a message that says so, which is a warning under an optional scan and
+fails the file under a required one, so a `strict` profile refuses every
+file of that size. Many high bitrate and 4K releases are larger than that,
+so a library of them needs a profile with `safety.clamav = optional`, which
+probes and verifies such a file as usual and records in the report that
+the antivirus scan did not run, rather than one that requires the scan.
 
 The `locale` line shows the locale every tool is run under. amuxify keeps your
 own `LC_ALL`, `LC_CTYPE` or `LANG` when it names a UTF-8 locale (messages are

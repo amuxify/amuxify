@@ -76,10 +76,20 @@ func validateIngestEnums(o *ingestOpts, cmd string) string {
 	return ""
 }
 
+// ingesterJobs, when set, receives the job count of every ingester that
+// newIngester builds. Tests set it to prove that the hook adapters and watch
+// build theirs with one job whatever --jobs says, while ingest passes the
+// flag through; with stub tools every file finishes in microseconds, so the
+// streamed order alone cannot tell one job from many. It is nil in
+// production.
+var ingesterJobs func(jobs int)
+
 // newIngester wires Scanner{VerifyTier:"none", Quarantine}, Remuxer{InPlace:true, ...},
 // Cleaner{...}. It returns an error for effective tier none and for a missing
-// mkvpropedit; the caller turns it into a usage error.
-func (g *Global) newIngester(t *tools, o ingestOpts) (*ingest.Ingester, error) {
+// mkvpropedit; the caller turns it into a usage error. jobs is how many
+// files the ingester works on at once; the ingest command passes --jobs and
+// the hook adapters and watch pass one.
+func (g *Global) newIngester(t *tools, o ingestOpts, jobs int) (*ingest.Ingester, error) {
 	if o.tier == "none" {
 		return nil, errors.New("ingest: in-place writes require verification; verify tier none is refused (from --verify)")
 	}
@@ -94,16 +104,19 @@ func (g *Global) newIngester(t *tools, o ingestOpts) (*ingest.Ingester, error) {
 		quarantine = o.quarantine.resolve(g.StateDir)
 	}
 	sc := &scan.Scanner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
-		VerifyTier: "none", Quarantine: quarantine}
+		VerifyTier: "none", Quarantine: quarantine, Timeout: g.Timeout}
 	rm := &remux.Remuxer{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
 		InPlace: true, Hardlinks: o.hardlinks, VerifyTier: o.tier, Force: o.force,
 		DryRun: g.DryRun, Original: o.original, Timeout: g.Timeout}
 	cl := &clean.Cleaner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
 		DryRun: g.DryRun, RemoveBlockedSidecars: o.removeSidecars, Hardlinks: o.hardlinks, Timeout: g.Timeout}
+	if ingesterJobs != nil {
+		ingesterJobs(jobs)
+	}
 	return &ingest.Ingester{
 		Scanner: sc, Remuxer: rm, Cleaner: cl, Verifier: t.verifier, Profile: t.profile,
 		VerifyTier: o.tier, Hardlinks: o.hardlinks, Force: o.force, Original: o.original,
-		RemoveBlockedSidecars: o.removeSidecars,
+		RemoveBlockedSidecars: o.removeSidecars, Jobs: jobs,
 	}, nil
 }
 
@@ -128,7 +141,7 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 	fs := g.subFlags("ingest")
 	var o ingestOpts
 	g.ingestFlags(fs, &o, true)
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if msg := validateIngestOpts(&o, "ingest", fs.Args()); msg != "" {
@@ -143,7 +156,7 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 	if err != nil {
 		return g.usageErr("%v", err)
 	}
-	in, err := g.newIngester(t, o)
+	in, err := g.newIngester(t, o, g.Jobs)
 	if err != nil {
 		return g.usageErr("%v", err)
 	}

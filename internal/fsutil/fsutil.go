@@ -35,6 +35,17 @@ func Nlink(fi os.FileInfo) uint64 {
 	return 1
 }
 
+// InodeKey names the inode of a file that has more than one hard link, as
+// "device:inode", and returns "" for a file with a single name or when the
+// platform does not expose the numbers. A parallel run uses it to keep two
+// names of one file from being processed at the same time.
+func InodeKey(fi os.FileInfo) string {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+		return fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+	}
+	return ""
+}
+
 // ErrExists is returned by PlaceNoClobber when the destination exists.
 var ErrExists = errors.New("destination already exists")
 
@@ -74,6 +85,19 @@ func (t *Temp) Close() error {
 	return err
 }
 
+// Sync flushes the file to stable storage through the descriptor held
+// since its creation. fsync acts on the file, not on the descriptor, so the
+// data an external tool wrote into that file through its name is flushed
+// as well, and the name itself is never opened again for it: an entry
+// swapped onto the name cannot be reached this way, and a named pipe
+// planted there cannot stall the flush.
+func (t *Temp) Sync() error {
+	if t == nil || t.f == nil {
+		return errors.New("temp file is not open")
+	}
+	return t.f.Sync()
+}
+
 // CreateTemp removes a leftover entry at tmp, creates tmp empty and
 // exclusively, and returns a handle to the file it made, so that a name
 // about to be handed to an external tool belongs to the caller before the
@@ -87,6 +111,11 @@ func (t *Temp) Close() error {
 // leftover that cannot be removed is an error, as is anything that appears
 // at the name between the removal and the creation. The file gets the mode
 // the tool would give a file it created itself, 0666 under the umask.
+//
+// The creation is exclusive, so a named pipe or any other entry planted at
+// the name before the call is removed as a leftover, never opened, and one
+// planted between the removal and the creation makes the creation fail; a
+// pipe cannot make this call block.
 func CreateTemp(tmp string) (*Temp, error) {
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -104,27 +133,59 @@ func CreateTemp(tmp string) (*Temp, error) {
 	return &Temp{f: f, fi: fi}, nil
 }
 
+// Unchanged reports whether now describes the very file that was described
+// and that file has not been rewritten since: the same device and inode by
+// os.SameFile, so a different regular file renamed onto the name is told
+// apart, and the same size and modification time, so a file that was
+// written to under the same inode is told apart as well. Both values are
+// os.Lstat results the caller took itself, the first when it decided what
+// to do with the file and the second right before it acts on the name. A
+// nil on either side is never unchanged, because nothing can be proven
+// about a file that was not examined.
+func Unchanged(was, now os.FileInfo) bool {
+	if was == nil || now == nil {
+		return false
+	}
+	return os.SameFile(was, now) && was.Size() == now.Size() && was.ModTime().Equal(now.ModTime())
+}
+
 // CopyIdentityTo gives the open file f the mode, ownership and modification
-// time of the file at src. Every write goes through the descriptor (fchmod,
+// time that src describes. Every write goes through the descriptor (fchmod,
 // fchown and futimes), never through a name, so a symbolic link swapped onto
 // the file's former name after f was opened cannot redirect any of them to
-// another file. Ownership is best effort: chown fails for a non-root user
-// changing the owner, which is fine. Only src is read by name, and it is the
-// file whose identity the caller wants copied.
-func CopyIdentityTo(f *os.File, src string) error {
-	fi, err := os.Stat(src)
-	if err != nil {
+// another file. The source's identity is taken from the os.FileInfo the
+// caller pinned when it checked the source last, not read from the source's
+// name again, so a symbolic link swapped onto that name after the check
+// cannot supply the mode or the time of whatever it points at; a nil src is
+// refused, because there is nothing to copy from. Ownership is best effort:
+// chown fails for a non-root user changing the owner, which is fine. The
+// mode and the time are not: a mode or a time that cannot be set is returned
+// as an error, so that the callers (ReplaceInPlaceOwn and the remuxer's
+// in-place placement) stop before the rename and the source keeps its name,
+// rather than placing an output whose identity differs from the source
+// without a finding saying so. On Linux that error also carries the refusal
+// of the name-based fallback when the temp name was swapped while the
+// descriptor calls were unavailable. Nothing is read by name.
+func CopyIdentityTo(f *os.File, src os.FileInfo) error {
+	if src == nil {
+		return errors.New("no source identity to copy")
+	}
+	if err := f.Chmod(src.Mode().Perm()); err != nil {
 		return err
 	}
-	if err := f.Chmod(fi.Mode().Perm()); err != nil {
-		return err
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+	if st, ok := src.Sys().(*syscall.Stat_t); ok {
 		_ = f.Chown(int(st.Uid), int(st.Gid))
 	}
-	_ = futimes(f, time.Now(), fi.ModTime())
+	if err := setTimes(f, time.Now(), src.ModTime()); err != nil {
+		return fmt.Errorf("set the modification time of %s: %v", f.Name(), err)
+	}
 	return nil
 }
+
+// setTimes is the descriptor-based time call CopyIdentityTo uses. Tests
+// replace it to make the call fail on every platform, since the real
+// futimes cannot be made to fail on macOS or the BSDs from a test.
+var setTimes = futimes
 
 // OpenOwn opens path for writing without following a symbolic link and
 // returns the file only when what was opened is a regular file with a single
@@ -132,9 +193,11 @@ func CopyIdentityTo(f *os.File, src string) error {
 // the check a caller performs on a temp file it made itself before it writes
 // metadata to it or places it, so that a symbolic link, a hard link or a
 // different file swapped onto the name is refused rather than followed. The
-// caller closes the file.
+// open never blocks, so a named pipe swapped onto the name is refused too
+// rather than left to stall the run (see OpenRegular). The caller closes
+// the file.
 func OpenOwn(path string, created os.FileInfo) (*os.File, error) {
-	f, err := openNoFollow(path)
+	f, err := openNoFollow(path, os.O_WRONLY)
 	if err != nil {
 		if refusedSymlink(err) {
 			return nil, fmt.Errorf("%s is now a symlink; refusing to follow it", path)
@@ -157,26 +220,68 @@ func OpenOwn(path string, created os.FileInfo) (*os.File, error) {
 	return f, nil
 }
 
+// OpenRegular opens path for reading and returns the file only when the
+// entry at the name is a regular file. It is the open every reader of an
+// input file or of a temp file uses instead of os.Open: a symbolic link at
+// the name is refused rather than followed, and the open never blocks, so
+// a named pipe planted at the name (which open(2) would otherwise wait on
+// until a writer appears, possibly forever) is refused as well, as is a
+// socket, a device or a directory. The check is made on the descriptor
+// after the open, so what is refused is what was really opened, not what
+// an earlier stat of the name saw. The returned file is in ordinary
+// blocking mode. The caller closes it.
+func OpenRegular(path string) (*os.File, error) {
+	f, err := openNoFollow(path, os.O_RDONLY)
+	if err != nil {
+		if refusedSymlink(err) {
+			return nil, fmt.Errorf("%s is a symlink; refusing to follow it", path)
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
 // ReplaceInPlace renames tmp over dest, giving the new file dest's
 // ownership, mode and modification time first. The identity is copied
 // through a descriptor of tmp obtained with OpenOwn, so a symbolic link
 // swapped onto the temp name is refused and never has its target's metadata
 // rewritten; the rename itself replaces whatever sits at dest without
-// following it. Callers that recorded the temp file's identity when they
-// created it use ReplaceInPlaceOwn, which also requires that identity.
+// following it. The identity is read from dest without following a link,
+// and a link or anything but a regular file at dest is refused. Callers
+// that recorded the temp file's identity when they created it, and the
+// destination's identity when they decided to replace it, use
+// ReplaceInPlaceOwn, which requires both.
 func ReplaceInPlace(tmp, dest string) error {
-	return ReplaceInPlaceOwn(tmp, dest, nil)
+	return ReplaceInPlaceOwn(tmp, dest, nil, nil)
 }
 
 // ReplaceInPlaceOwn is ReplaceInPlace for a caller that created tmp itself
 // and kept the os.FileInfo from that creation: the file opened at tmp must
-// be that file, or nothing is written and nothing is renamed.
-func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
+// be that file, or nothing is written and nothing is renamed. src, when not
+// nil, is the os.Lstat the caller took of dest when it last read the file
+// it is about to replace; the entry now at dest must be that file with the
+// same size and modification time, or nothing is written and nothing is
+// renamed, so a different file renamed onto dest after the caller's last
+// read is never given the output's place and lost.
+func ReplaceInPlaceOwn(tmp, dest string, created, src os.FileInfo) error {
+	now, err := os.Lstat(dest)
+	if err != nil {
+		return err
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is now a symlink; refusing to follow it", dest)
+	}
+	if !now.Mode().IsRegular() {
+		return fmt.Errorf("%s is no longer a regular file", dest)
+	}
+	if src != nil && !Unchanged(src, now) {
+		return fmt.Errorf("%s was replaced after it was last read; refusing to replace it", dest)
+	}
 	f, err := OpenOwn(tmp, created)
 	if err != nil {
 		return err
 	}
-	if err := CopyIdentityTo(f, dest); err != nil {
+	if err := CopyIdentityTo(f, now); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -200,11 +305,11 @@ func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
 	// the file this run created. A foreign entry is reported and left where
 	// it is, because the file it replaced is already gone and removing the
 	// entry could delete the only name of some other file.
-	now, err := os.Lstat(dest)
+	after, err := os.Lstat(dest)
 	if err != nil {
 		return fmt.Errorf("%s after the rename: %v", dest, err)
 	}
-	if !now.Mode().IsRegular() || !os.SameFile(created, now) {
+	if !after.Mode().IsRegular() || !os.SameFile(created, after) {
 		return fmt.Errorf("the entry now at %s is not the file this run created; the file it replaced is gone and the entry was left in place", dest)
 	}
 	return nil
@@ -215,9 +320,12 @@ func ReplaceInPlaceOwn(tmp, dest string, created os.FileInfo) error {
 // name is used again by ReplaceInPlaceOwn. It is nil in production.
 var beforeRename func(tmp, dest string)
 
-// Fsync flushes a written file to stable storage.
+// Fsync flushes a written file to stable storage. The name is opened with
+// OpenRegular, so a symbolic link or a named pipe swapped onto it is
+// refused. A caller that still holds the handle from CreateTemp uses
+// Temp.Sync instead and never opens the name again.
 func Fsync(path string) error {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return err
 	}

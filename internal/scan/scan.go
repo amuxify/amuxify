@@ -14,11 +14,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/sniff"
@@ -33,13 +35,27 @@ type Scanner struct {
 	Profile  *policy.Profile
 	// VerifyTier overrides the profile's verify.tier when non-empty.
 	VerifyTier string
-	// ClamAV forces a clamscan pass regardless of profile.
+	// ClamAV forces a clamscan pass when the profile says off. It never
+	// lowers a profile that says required.
 	ClamAV bool
+	// Timeout bounds the clamscan call; zero means DefaultClamTimeout. The
+	// command line sets it from --timeout, as for the prober and verifier.
+	Timeout time.Duration
 	// Quarantine, when set, moves BLOCK files under this directory.
 	Quarantine string
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(Result)
 	Trace    func(string)
+	// Jobs is the number of files ScanPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
+
+	// claims holds the quarantine destinations this run has taken, so two
+	// files that would be moved to the same place, from two workers or
+	// from two roots, produce exactly one quarantined file (guarantee 1).
+	claims pool.Claims
 }
 
 // MediaExts are extensions treated as media to be probed.
@@ -50,11 +66,18 @@ var MediaExts = map[string]string{
 	"mp3": "audio", "flac": "audio", "wav": "audio", "aac": "audio", "m4a": "audio", "ogg": "audio", "oga": "audio", "opus": "audio", "wma": "audio",
 }
 
-// Result bundles the report and the probe so remux can reuse it.
+// Result bundles the report and the probe so remux can reuse it. Stat is
+// the os.Lstat the scanner took of the file before it read a byte of it,
+// so the verdict is bound to that file: the remuxer and the cleaner, which
+// may act on the path long after the scan, require the entry at the path
+// to still be that file with the same size and modification time before
+// they open it or replace it, and refuse it otherwise. It is nil when the
+// scanner could not examine the path.
 type Result struct {
 	File report.FileResult
 	Info *probe.MediaInfo
 	Kind sniff.Kind
+	Stat os.FileInfo
 }
 
 // IsMedia reports whether a path has a media extension.
@@ -91,18 +114,49 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	// walkErr; those are reported at run level after the readable files.
 	// A quarantine directory inside the tree is not entered.
 	paths, walkErr := Walk(abs, QuarantineExcludes(s.Quarantine)...)
-	var out []Result
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		r := s.ScanFile(ctx, p, scanRoot)
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = s.SerialKeys(p, scanRoot)
+	}
+	results := make([]Result, len(paths))
+	ran := pool.Run(ctx, s.Jobs, len(paths), keys, func(i int) {
+		r := s.ScanFile(ctx, paths[i], scanRoot)
 		if s.Progress != nil {
 			s.Progress(r)
 		}
-		out = append(out, r)
+		results[i] = r
+	})
+	var out []Result
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
+}
+
+// SerialKeys lists what keeps path from being scanned beside another file
+// of the same walk when Jobs is above one: its inode when it has other hard
+// links, so two names of one file are handled one after the other, and the
+// place quarantine would move it to, spelled in lower case, so two files
+// that map to one quarantine destination are decided in walk order. A
+// quarantine name that holds a character outside ASCII also keys its
+// directory, for the filesystems that treat two Unicode spellings of one
+// name as one entry; pool.PathKeys explains the rule.
+func (s *Scanner) SerialKeys(path, root string) []string {
+	var keys []string
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if k := fsutil.InodeKey(fi); k != "" {
+			keys = append(keys, "inode:"+k)
+		}
+	}
+	if s.Quarantine != "" {
+		keys = append(keys, pool.PathKeys("quarantine", s.quarantineDest(path, root))...)
+	}
+	return keys
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
@@ -126,8 +180,17 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 		fr.Addf(CodeUnreadable, report.Fail, "%v", err)
 		return r
 	}
+	r.Stat = fi
 	if fi.Mode()&os.ModeSymlink != 0 {
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
+		return r
+	}
+	// Anything else that is not a regular file is refused before any read:
+	// a named pipe would block the first open until a writer appeared, and
+	// a device or a socket is never media. The path is reported as
+	// unreadable, which is what it is for this run.
+	if !fi.Mode().IsRegular() {
+		fr.Addf(CodeUnreadable, report.Fail, "%s; skipped", entryKind(fi.Mode()))
 		return r
 	}
 	name := filepath.Base(path)
@@ -182,7 +245,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 		fr.Addf(CodePolyglot, report.Block, "%s", poly)
 		return r
 	}
-	if s.clamav(ctx, fr, path) {
+	if s.clamav(ctx, fr, path, fi.Size()) {
 		return r
 	}
 
@@ -250,7 +313,10 @@ func (s *Scanner) checkStreams(fr *report.FileResult, info *probe.MediaInfo, cat
 			if !st.AttachedPic {
 				hasVideo = true
 				if len(st.HDR) > 0 {
-					fr.Addf(CodeHDR, report.Pass, "stream #%d: %s", st.Index, strings.Join(st.HDR, "+"))
+					// The detail lists the values the remux verifier
+					// holds the output to, so a report shows what the
+					// source carried.
+					fr.Add(report.Finding{Code: CodeHDR, Severity: report.Pass, Message: fmt.Sprintf("stream #%d: %s", st.Index, strings.Join(st.HDR, "+")), Detail: st.Color.String()})
 					fr.Info["hdr"] = strings.Join(st.HDR, "+")
 				}
 			}
@@ -318,22 +384,28 @@ func (s *Scanner) checkMkv(ctx context.Context, fr *report.FileResult, info *pro
 }
 
 // sniffAttachment extracts an attachment to a temp file and returns a
-// description when its content is executable or an archive.
+// description when its content is executable or an archive. The file is
+// written under a directory this run creates with mode 0700 and a random
+// name, so no other user can plant an entry at the path mkvextract is
+// given, and it is read back with sniff.File, which refuses anything that
+// is not a regular file without following or waiting on it. An attachment
+// that cannot be extracted or read is not sniffed and the policy decides
+// on its declared type alone.
 func (s *Scanner) sniffAttachment(ctx context.Context, path string, a probe.Attachment) string {
 	if a.Size > 64<<20 || !s.Runner.Have(exec.MKVExtract) {
 		return ""
 	}
-	tmp, err := os.CreateTemp("", "amuxify-att-*")
+	dir, err := os.MkdirTemp("", "amuxify-att-*")
 	if err != nil {
 		return ""
 	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
-	res, err := s.Runner.RunWithTimeout(ctx, 2*time.Minute, exec.MKVExtract, path, "attachments", fmt.Sprintf("%d:%s", a.ID, tmp.Name()))
+	defer os.RemoveAll(dir)
+	tmp := filepath.Join(dir, "attachment")
+	res, err := s.Runner.RunWithTimeout(ctx, 2*time.Minute, exec.MKVExtract, path, "attachments", fmt.Sprintf("%d:%s", a.ID, tmp))
 	if err != nil || res.ExitCode >= 2 {
 		return ""
 	}
-	k, err := sniff.File(tmp.Name())
+	k, err := sniff.File(tmp)
 	if err != nil {
 		return ""
 	}
@@ -387,6 +459,16 @@ func (s *Scanner) checkMP4(fr *report.FileResult, path string) {
 	}
 }
 
+// sortedKeys returns the keys of m in sorted order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo) {
 	sev := report.Warn
 	if s.Profile.Metadata.Links == "fail" {
@@ -398,17 +480,19 @@ func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *p
 			hits = append(hits, where+": "+l)
 		}
 	}
+	// Tags are maps; their keys are visited in sorted order so the finding
+	// reads the same on every run of the same file.
 	add("title", info.Title)
-	for k, v := range info.Tags {
-		add("tag "+k, v)
+	for _, k := range sortedKeys(info.Tags) {
+		add("tag "+k, info.Tags[k])
 	}
 	for _, st := range info.Streams {
 		add(fmt.Sprintf("stream #%d title", st.Index), st.Title)
-		for k, v := range st.Tags {
+		for _, k := range sortedKeys(st.Tags) {
 			if strings.EqualFold(k, "title") || strings.EqualFold(k, "language") {
 				continue
 			}
-			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), v)
+			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), st.Tags[k])
 		}
 	}
 	for i, c := range info.Chapters {
@@ -441,6 +525,16 @@ func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *p
 			fr.Add(report.Finding{Code: CodeLinkInSubs, Severity: ssev,
 				Message: fmt.Sprintf("stream #%d subtitle text contains %d link(s): %s", st.Index, len(links), strings.Join(links, ", ")),
 				Detail:  strings.Join(links, "\n")})
+		}
+		if res.OutputTruncated {
+			// The runner kept only the first part of the track, so a link
+			// placed after the cut was never seen. The track is reported at
+			// the same severity as a link, because a text track longer than
+			// the runner keeps is not something a subtitle needs to be and a
+			// file padded to reach the cut is exactly how a link would hide.
+			fr.Add(report.Finding{Code: CodeLinkInSubs, Severity: ssev,
+				Message: fmt.Sprintf("stream #%d subtitle text is longer than the runner keeps and was not fully checked for links", st.Index),
+				Detail:  fmt.Sprintf("only the first %d bytes of the extracted track were inspected", len(res.Stdout))})
 		}
 	}
 }
@@ -487,7 +581,103 @@ func (s *Scanner) decodeCheck(ctx context.Context, fr *report.FileResult, path s
 	}
 }
 
-func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
+// DefaultClamTimeout bounds one clamscan call when the run sets no
+// --timeout. Loading the signature database and scanning a file of several
+// gigabytes takes minutes on slow hardware; half an hour leaves room for
+// that without letting a hung scanner hold the run forever.
+const DefaultClamTimeout = 30 * time.Minute
+
+// ClamMaxFileSize is the largest file one clamscan call is asked to scan,
+// passed as --max-filesize. libclamav cannot scan a file of 2 GiB or more
+// at all, and its own default limit is 100 MB, above which it reports the
+// file clean without reading it; the value here is the largest whole
+// number of MiB below the hard cap, so every file that libclamav can scan
+// is scanned in full and every file it cannot scan is refused. A file
+// larger than this is CLAMAV_ERROR before clamscan starts, in the same
+// words for every version of the scanner, and --alert-exceeds-max makes
+// clamscan itself exit 2 for one that grew past the limit after the stat.
+const ClamMaxFileSize = 2047 << 20
+
+// clamLimitArgs are the limit options every clamscan call carries. By
+// default libclamav skips a file above --max-filesize, stops reading a
+// file above --max-scansize and gives up on one that takes longer than
+// --max-scantime, and in each case clamscan prints nothing under
+// --infected and exits 0, so a required scan would pass a file that was
+// never read. --alert-exceeds-max turns a skipped file into an alert
+// instead. The scan size and scan time limits are then switched off rather
+// than raised, because an alert on either of them exits 1, which is the
+// exit status of an infected file, and a clean file that was merely slow
+// or large must never be blocked and quarantined as one: the run's own
+// timeout bounds a slow scan and reports it CLAMAV_ERROR, and the file
+// size limit, whose alert exits 2, is the one limit left that can fire.
+// --alert-exceeds-max needs ClamAV 0.103 or newer; an older clamscan
+// refuses the option and exits with an error, which is CLAMAV_ERROR and
+// under a required profile fails the file, and doctor reports the version
+// as too old.
+var clamLimitArgs = []string{
+	fmt.Sprintf("--max-filesize=%dM", ClamMaxFileSize>>20),
+	"--max-scansize=0",
+	"--max-scantime=0",
+	"--alert-exceeds-max",
+}
+
+// The bounds on what a finding keeps of the clamscan output. A scanner
+// that floods its output, or an output crafted to look like a report,
+// cannot grow the finding beyond these. The per-line and message bounds
+// are applied to the raw text before it is sanitised, so an escaped
+// control byte can make a kept line up to six times longer; the bound on
+// the whole detail counts the sanitised lines and holds as written.
+const (
+	clamDetailLines  = 8    // lines kept in the finding detail
+	clamLineBytes    = 512  // bytes kept of each line, before sanitising
+	clamDetailBytes  = 4096 // bytes of sanitised lines kept in the whole detail
+	clamMessageBytes = 200  // bytes kept of the error line in the message, before sanitising
+)
+
+func (s *Scanner) clamTimeout() time.Duration {
+	if s.Timeout > 0 {
+		return s.Timeout
+	}
+	return DefaultClamTimeout
+}
+
+// MaxClamScans is how many clamscan processes amuxify runs at the same time
+// in one process, whatever --jobs says. clamscan loads the whole signature
+// database on every start, which takes well over a gigabyte of memory and
+// tens of seconds, so one process per worker would exhaust the memory of
+// most hosts long before the disks were busy. A worker whose file is due
+// for clamscan waits for a slot; the other checks of the other workers go
+// on meanwhile.
+const MaxClamScans = 1
+
+// clamSlots is the process-wide gate that enforces MaxClamScans. It is one
+// for the whole process rather than one per Scanner because ingest and the
+// hook adapters build their own Scanner and the memory is shared either way.
+var clamSlots = make(chan struct{}, MaxClamScans)
+
+// clamav runs clamscan when the profile or the --clamav flag asks for it
+// and reports the outcome. The verdict rests on the exit status alone
+// (0 clean, 1 infected, anything else an error): nothing printed by the
+// scanner can raise or lower it. What is kept of the output for the
+// finding is bounded and sanitised by clamDetail. It returns true when the
+// scan of this file should stop here.
+//
+// A scanner that produced no verdict, because it could not start, was
+// killed at the timeout or exited with a status other than 0 or 1, is
+// WARN CLAMAV_ERROR under an optional scan and the file is probed like
+// any other. Under a required scan the same outcome is FAIL CLAMAV_ERROR
+// and the scan of the file stops there, the same as a missing scanner:
+// a profile that requires the scan must not let a file through that was
+// never scanned, and both a short --timeout and a scanner without a
+// signature database would otherwise turn "required" into a pass.
+//
+// A file larger than ClamMaxFileSize, which libclamav cannot scan, is the
+// same outcome without starting the scanner: size is the file's size from
+// the scan's own stat, and the finding says in plain words why the file
+// was not scanned. The limit is also passed to clamscan (clamLimitArgs),
+// so a file that grew past it after the stat is refused by the scanner
+// itself rather than reported clean unread.
+func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string, size int64) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
 		mode = "optional"
@@ -502,21 +692,175 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 		}
 		return false
 	}
-	res, err := s.Runner.RunWithTimeout(ctx, 30*time.Minute, exec.ClamScan, "--no-summary", "--infected", "--", path)
+	sev, stop := report.Warn, false
+	if mode == "required" {
+		sev, stop = report.Fail, true
+	}
+	if size > ClamMaxFileSize {
+		fr.Addf(CodeClamError, sev, "file is %d bytes and clamscan cannot scan files larger than %d MiB (libclamav does not support files of 2 GiB or more), so it was not scanned", size, ClamMaxFileSize>>20)
+		return stop
+	}
+	// The wait for a slot gives up when the run is cancelled, so an
+	// interrupt is not held behind another worker's clamscan.
+	select {
+	case clamSlots <- struct{}{}:
+		defer func() { <-clamSlots }()
+	case <-ctx.Done():
+		fr.Addf(CodeClamError, sev, "%v", ctx.Err())
+		return stop
+	}
+	args := append([]string{"--no-summary", "--infected"}, clamLimitArgs...)
+	args = append(args, "--", path)
+	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, args...)
 	if err != nil {
-		fr.Addf(CodeClamError, report.Warn, "%v", err)
-		return false
+		// A start failure or a timeout: the child was killed or never ran,
+		// so there is no exit status to read a verdict from.
+		fr.Addf(CodeClamError, sev, "%s", clamText(err.Error(), clamMessageBytes))
+		return stop
 	}
 	switch res.ExitCode {
 	case 0:
 		return false
 	case 1:
-		fr.Add(report.Finding{Code: CodeClamInfected, Severity: report.Block, Message: "clamscan reports infected", Detail: strings.TrimSpace(string(res.Stdout))})
+		fr.Add(report.Finding{Code: CodeClamInfected, Severity: report.Block, Message: "clamscan reports infected", Detail: clamDetail(res, path)})
 		return true
 	default:
-		fr.Addf(CodeClamError, report.Warn, "clamscan exit %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
-		return false
+		fr.Add(report.Finding{Code: CodeClamError, Severity: sev,
+			Message: clamErrorMessage(res, path),
+			Detail:  clamDetail(res, path)})
+		return stop
 	}
+}
+
+// clamErrorMessage is the message of a CLAMAV_ERROR finding for a scanner
+// that exited with a status other than 0 or 1. It carries the first line
+// of standard error, where libclamav reports a failure to load the
+// signature database, or, when that is empty, the first line about the
+// scanned file on standard output, where clamscan reports a file it could
+// not open ("<path>: Can't open file ERROR"). When neither says anything
+// the message says so rather than ending in a bare colon.
+func clamErrorMessage(res *exec.Result, path string) string {
+	line := firstLine(res.Stderr)
+	if line == "" {
+		line = firstLineWithPrefix(res.Stdout, path+":")
+	}
+	if line == "" {
+		return fmt.Sprintf("clamscan exit %d with no message", res.ExitCode)
+	}
+	return fmt.Sprintf("clamscan exit %d: %s", res.ExitCode, clamText(line, clamMessageBytes))
+}
+
+// clamDetail returns the lines of the clamscan output that refer to the
+// scanned file, which clamscan prints as "<path>: <signature> FOUND" or
+// "<path>: <reason> ERROR", each cut to clamLineBytes and sanitised, at
+// most clamDetailLines of them and clamDetailBytes of sanitised text in
+// all. Every other line is dropped: a summary block, a line about some
+// other path, or text crafted to read like a verdict never reaches the
+// report. When no line refers to the file the detail says so rather than
+// carrying anything else the scanner printed.
+//
+// The output is walked in place, one line at a time, and nothing of it is
+// copied until a line has passed the prefix test, and then no more of it
+// than the per-line bound, so the memory the call takes is bounded by the
+// detail it returns and not by what the scanner printed: the runner keeps
+// up to its MaxOutput of each stream, splitting that into lines first
+// would cost a string header per newline, and a single line as long as
+// the whole stream would otherwise be copied in full before it was cut.
+// A line is sanitised before it is counted against the byte bound, so the
+// bound holds on the sanitised text and a line that would cross it is
+// left out and counted as not shown.
+func clamDetail(res *exec.Result, path string) string {
+	prefix := []byte(path + ":")
+	var lines []string
+	total, more := 0, 0
+	for _, raw := range [][]byte{res.Stdout, res.Stderr} {
+		eachLine(raw, func(line []byte) bool {
+			if !bytes.HasPrefix(line, prefix) {
+				return true
+			}
+			if len(lines) >= clamDetailLines {
+				more++
+				return true
+			}
+			// One byte past the bound is enough for clamText to see that
+			// the line was longer and mark the cut.
+			s := clamText(string(line[:min(len(line), clamLineBytes+1)]), clamLineBytes)
+			if total+len(s) > clamDetailBytes {
+				more++
+				return true
+			}
+			total += len(s)
+			lines = append(lines, s)
+			return true
+		})
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "no line of the clamscan output refers to this file")
+	}
+	if more > 0 {
+		lines = append(lines, fmt.Sprintf("%d more line(s) about this file not shown", more))
+	}
+	if res.OutputTruncated {
+		lines = append(lines, "clamscan output was longer than the runner keeps and was cut")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// eachLine calls fn with every newline-separated line of b, without the
+// trailing newline and without copying b, until fn returns false.
+func eachLine(b []byte, fn func(line []byte) bool) {
+	for len(b) > 0 {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			fn(b)
+			return
+		}
+		if !fn(b[:i]) {
+			return
+		}
+		b = b[i+1:]
+	}
+}
+
+// clamText bounds s to max bytes, cut on a rune boundary, and passes it
+// through the report sanitiser so a control character, an ANSI escape
+// sequence or a bidirectional override in the scanner's output cannot
+// reshape a report line.
+func clamText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "..."
+	}
+	return report.Sanitize(s)
+}
+
+// firstLine returns the first non-blank line of b, or "" when there is
+// none. Like clamDetail it walks b in place so a flood of blank lines
+// costs nothing to skip.
+func firstLine(b []byte) string {
+	return firstLineWithPrefix(b, "")
+}
+
+// firstLineWithPrefix returns the first non-blank line of b that starts
+// with prefix, trimmed, or "" when there is none.
+func firstLineWithPrefix(b []byte, prefix string) string {
+	var found string
+	p := []byte(prefix)
+	eachLine(b, func(line []byte) bool {
+		if !bytes.HasPrefix(line, p) {
+			return true
+		}
+		if t := bytes.TrimSpace(line); len(t) > 0 {
+			found = string(t)
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 var polySigs = [][]byte{
@@ -527,8 +871,10 @@ var polySigs = [][]byte{
 // polyglot looks for archive or executable signatures in the last 1 MiB and
 // for the PE stub string in the first 1 MiB. Matroska and MP4 payloads are
 // compressed video, so these strings essentially never occur by accident.
+// The file is opened with fsutil.OpenRegular, so a named pipe swapped onto
+// the path since the scan's own stat cannot block the read.
 func (s *Scanner) polyglot(path string, size int64) string {
-	f, err := os.Open(path)
+	f, err := fsutil.OpenRegular(path)
 	if err != nil {
 		return ""
 	}
@@ -639,8 +985,11 @@ func CheckQuarantineRoot(root, quarantine string) error {
 	return nil
 }
 
-func (s *Scanner) quarantine(fr *report.FileResult, root string) {
-	rel, err := filepath.Rel(root, fr.Path)
+// quarantineDest is the place under the quarantine directory that path,
+// found under root, is moved to: its path relative to root, or its base
+// name when it does not sit under root.
+func (s *Scanner) quarantineDest(path, root string) string {
+	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "" || rel == "." || escapes(rel) {
 		// A caller that hands the file itself as the root, or a root the
 		// file does not sit under, still gets the file placed under the
@@ -648,13 +997,29 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		// the quarantine root itself. The test is on the first path
 		// component, so a directory whose name merely starts with two dots
 		// keeps its mirrored place.
-		rel = filepath.Base(fr.Path)
+		rel = filepath.Base(path)
 	}
-	dest := filepath.Join(s.Quarantine, rel)
+	return filepath.Join(s.Quarantine, rel)
+}
+
+func (s *Scanner) quarantine(fr *report.FileResult, root string) {
+	dest := s.quarantineDest(fr.Path, root)
 	if dest == filepath.Clean(s.Quarantine) {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
 		return
 	}
+	// The destination is claimed while it is being created: a second
+	// worker of the same run that maps to the same place at the same time
+	// is refused here with the words the move primitive uses for a file
+	// that is already there, so the two never race for one name. The claim
+	// is given back afterwards in every case, because from then on the
+	// disk itself tells a later file that the place is taken, and the move
+	// primitive never replaces what sits there (guarantee 1).
+	if !s.claims.Claim(dest) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", fsutil.ErrExists)
+		return
+	}
+	defer s.claims.Release(dest)
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
 	// elsewhere (guarantee 3).
@@ -690,6 +1055,22 @@ func bidiChars(name string) string {
 		}
 	}
 	return ""
+}
+
+// entryKind names what a directory entry is when it is not a regular file,
+// for the finding that refuses it.
+func entryKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeNamedPipe != 0:
+		return "not a regular file (named pipe)"
+	case m&os.ModeSocket != 0:
+		return "not a regular file (socket)"
+	case m&os.ModeDevice != 0:
+		return "not a regular file (device)"
+	case m&os.ModeDir != 0:
+		return "not a regular file (directory)"
+	}
+	return "not a regular file"
 }
 
 func penultimateExt(name string) string {

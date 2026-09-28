@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amuxify/amuxify/internal/exec"
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/scan"
@@ -59,17 +62,26 @@ type Remuxer struct {
 	Original   string // original language hint for default-audio selection
 	Timeout    time.Duration
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(report.FileResult)
+	// Jobs is the number of files RemuxPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
 
-	// planned holds, per directory, the names earlier files of a dry run
-	// would write, so that a later file mapping to one of them is reported
-	// with the OUTPUT_EXISTS the live run would produce, such as sample.mp4
-	// and sample.avi both becoming sample.mkv. One Remuxer is one run, and
-	// RemuxPath does not reset it because the command calls RemuxPath once
-	// per path named on the command line. caseFold caches, per directory,
-	// whether its filesystem folds case, which decides whether Ep.mkv and
-	// ep.mkv are one name there.
-	planned  map[string][]string
+	// claimed holds, per directory, the output names this run has taken:
+	// in a dry run the names earlier files would write, in a live run the
+	// names of outputs being built or already placed. A later file mapping
+	// to one of them is reported with the OUTPUT_EXISTS the disk would
+	// produce, such as sample.mp4 and sample.avi both becoming sample.mkv,
+	// and with parallel jobs it is what keeps two workers from building the
+	// same output through the same temp name at the same time. One Remuxer
+	// is one run, and RemuxPath does not reset it because the command calls
+	// RemuxPath once per path named on the command line. caseFold caches,
+	// per directory, whether its filesystem folds case, which decides
+	// whether Ep.mkv and ep.mkv are one name there. mu guards both.
+	mu       sync.Mutex
+	claimed  map[string][]string
 	caseFold map[string]bool
 }
 
@@ -120,32 +132,120 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	}
 	inputRoot, outRoot := r.Roots(abs, fi.IsDir())
 	if !r.InPlace && !r.DryRun {
-		if err := os.MkdirAll(outRoot, 0o755); err != nil {
+		if err := r.ensureOutRoot(outRoot); err != nil {
 			return nil, err
 		}
 	}
 	if r.tier() == "none" && r.InPlace {
 		return nil, fmt.Errorf("refusing --in-place together with verify tier none")
 	}
-	// A tree with an unreadable corner still yields every readable file;
-	// the scan error naming the corner is returned after them so the run is
-	// reported as FAIL at run level, the same as scan, clean and ingest do.
-	results, scanErr := r.Scanner.ScanPath(ctx, abs)
-	if scanErr != nil && len(results) == 0 {
-		return nil, scanErr
+	if err := scan.CheckQuarantineRoot(abs, r.Scanner.Quarantine); err != nil {
+		return nil, err
 	}
-	var out []report.FileResult
-	for _, sc := range results {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
+	scanRoot := abs
+	if !fi.IsDir() {
+		scanRoot = filepath.Dir(abs)
+	}
+	// A tree with an unreadable corner still yields every readable file;
+	// the walk error naming the corner is returned after them so the run is
+	// reported as FAIL at run level, the same as scan, clean and ingest do.
+	paths, walkErr := scan.Walk(abs, scan.QuarantineExcludes(r.Scanner.Quarantine)...)
+	if walkErr != nil && len(paths) == 0 {
+		return nil, walkErr
+	}
+	// Every file is scanned before any file is rebuilt, whatever Jobs says.
+	// The scan is the record of the tree as the run found it: with
+	// --in-place and hardlinks set to break, the second name of a
+	// hard-linked pair is reported with the two links it had when the run
+	// began, even though the rebuild of the first name has broken the link
+	// by the time the second is remuxed. Scanning and remuxing each file in
+	// one step would report the second name as a plain file, and the
+	// report would then depend on how far the run had got. The scan phase
+	// changes nothing on disk unless the scanner quarantines, which the
+	// scanner's own keys and claims order; each remux result is still
+	// streamed the moment that file is done.
+	scanKeys := make([][]string, len(paths))
+	for i, p := range paths {
+		scanKeys[i] = r.Scanner.SerialKeys(p, scanRoot)
+	}
+	scanned := make([]scan.Result, len(paths))
+	ran := pool.Run(ctx, r.Jobs, len(paths), scanKeys, func(i int) {
+		sc := r.Scanner.ScanFile(ctx, paths[i], scanRoot)
+		if r.Scanner.Progress != nil {
+			r.Scanner.Progress(sc)
 		}
-		fr := r.RemuxScanned(ctx, sc, inputRoot, outRoot)
+		scanned[i] = sc
+	})
+	if !all(ran) {
+		return nil, ctx.Err()
+	}
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = r.SerialKeys(p, inputRoot, outRoot)
+	}
+	results := make([]report.FileResult, len(paths))
+	ran = pool.Run(ctx, r.Jobs, len(paths), keys, func(i int) {
+		fr := r.RemuxScanned(ctx, scanned[i], inputRoot, outRoot)
 		if r.Progress != nil {
 			r.Progress(fr)
 		}
-		out = append(out, fr)
+		results[i] = fr
+	})
+	var out []report.FileResult
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
 	}
-	return out, scanErr
+	if len(out) < len(paths) {
+		return out, ctx.Err()
+	}
+	return out, walkErr
+}
+
+// all reports whether every item of a pool run ran.
+func all(ran []bool) bool {
+	for _, ok := range ran {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// SerialKeys lists what keeps path from running beside another file of the
+// same walk: its inode when it has other hard links, so two names of one
+// file are handled one after the other, and the outputs it could map to,
+// spelled in lower case, so files that would collide on one destination are
+// decided in walk order and the earlier one wins, as in a sequential run.
+// A destination whose name holds a character outside ASCII also keys its
+// directory, because a filesystem may treat two Unicode spellings of that
+// name as one entry; pool.PathKeys explains the rule. Only a media file gets
+// destination keys: RemuxScanned skips every other file before it computes
+// a destination, so a sidecar that shares its stem with a media file,
+// Movie.nfo beside Movie.mkv, need not wait for that file's rebuild. The
+// claim set guards the destinations whatever the keys say; the keys make
+// the outcome deterministic.
+func (r *Remuxer) SerialKeys(path, inputRoot, outRoot string) []string {
+	var keys []string
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if k := fsutil.InodeKey(fi); k != "" {
+			keys = append(keys, "inode:"+k)
+		}
+	}
+	if !scan.IsMedia(path) {
+		return keys
+	}
+	rel, err := filepath.Rel(inputRoot, path)
+	if err != nil {
+		rel = filepath.Base(path)
+	}
+	stem := strings.TrimSuffix(rel, filepath.Ext(rel)) + ".mkv"
+	keys = append(keys, pool.PathKeys("dest", filepath.Join(outRoot, stem))...)
+	if r.InPlace {
+		keys = append(keys, pool.PathKeys("dest", filepath.Join(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))+".mkv"))...)
+	}
+	return keys
 }
 
 // RemuxScanned remuxes one already scanned file. r.Scanner may be nil.
@@ -177,6 +277,21 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		return fr
 	}
 
+	// The verdict describes the file the scanner examined, and this remux
+	// may begin long after that scan: RemuxPath scans the whole tree before
+	// it rebuilds any file, and under ingest the routing sits between. The
+	// entry at the path must still be that file, with the size and the
+	// modification time the scanner saw, before the verdict is acted on. A
+	// file swapped onto the path since was never scanned, and rebuilding it
+	// on the strength of the earlier verdict would carry it past the scan
+	// (guarantee 9). fi is that entry, and every later check requires the
+	// same file.
+	fi, err := scannedFile(fr.Path, sc)
+	if err != nil {
+		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+		return fr
+	}
+
 	// Destination.
 	rel, err := filepath.Rel(inputRoot, fr.Path)
 	if err != nil {
@@ -185,8 +300,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	rel = strings.TrimSuffix(rel, filepath.Ext(rel)) + ".mkv"
 	dest := filepath.Join(outRoot, rel)
 	inPlace := r.InPlace
-	fi, _ := os.Lstat(fr.Path)
-	if inPlace && fi != nil && fsutil.Nlink(fi) > 1 {
+	if inPlace && fsutil.Nlink(fi) > 1 {
 		switch r.hardlinks() {
 		case "skip":
 			fr.Addf(CodeHardlinked, report.Warn, "file has %d hard links; skipped (safety.hardlinks = skip)", fsutil.Nlink(fi))
@@ -209,7 +323,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		dest = filepath.Join(filepath.Dir(fr.Path), strings.TrimSuffix(filepath.Base(fr.Path), filepath.Ext(fr.Path))+".mkv")
 		if dest != fr.Path {
 			if dfi, err := os.Lstat(dest); err == nil {
-				if fi != nil && os.SameFile(fi, dfi) && !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
+				if os.SameFile(fi, dfi) && !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
 					sameEntry = true
 				} else {
 					fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
@@ -221,12 +335,24 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
-	// A dry run never writes, so the disk cannot tell it that an earlier
-	// file of this run has already taken dest; the run's own plan does.
-	if r.DryRun && r.plannedCollision(dest) {
+	// The run's own claim set is asked before the disk is touched: a dry
+	// run never writes, so only the claims tell it that an earlier file of
+	// this run has taken dest, and in a live run with parallel jobs the
+	// claim is what keeps a second worker from creating the same temp name
+	// while the first is still building the output (guarantee 1). The claim
+	// is given back on every path that leaves nothing behind, so a file
+	// whose remux failed does not block a later file with the same
+	// destination, as it would not in a sequential run.
+	if !r.claim(dest) {
 		fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
 		return fr
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			r.release(dest)
+		}
+	}()
 
 	d := r.Profile.Decide(sc.Info, policy.Options{OriginalLanguage: r.Original})
 	for _, f := range d.Findings {
@@ -237,7 +363,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	}
 	r.describe(&fr, d)
 	if r.DryRun {
-		r.plan(dest)
+		keep = true
 		fr.Addf(CodeDryRun, report.Pass, "would write %s", dest)
 		fr.Output = dest
 		return fr
@@ -255,13 +381,20 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 
 	// In place, the destination sits beside the source in a directory that
 	// exists and was walked without following symlinks. Otherwise the
-	// mirrored directory chain is created component by component so a
-	// symlink planted inside the output tree cannot redirect the remuxed
-	// file outside the root the user named (guarantee 3). The refusal is
-	// reported as REMUX_FAIL because the finding codes are frozen and, from
-	// the caller's point of view, the remux of this file did not happen; the
-	// message carries the reason.
+	// output root is checked first, because a caller may hand a scanned
+	// result to this function without going through RemuxPath, as ingest
+	// and watch do, and a defaulted root must not be a planted link (see
+	// ensureOutRoot); the mirrored directory chain is then
+	// created component by component so a symlink planted inside the output
+	// tree cannot redirect the remuxed file outside the root the user named
+	// (guarantee 3). The refusal is reported as REMUX_FAIL because the
+	// finding codes are frozen and, from the caller's point of view, the
+	// remux of this file did not happen; the message carries the reason.
 	if !inPlace {
+		if err := r.ensureOutRoot(outRoot); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
 		if err := fsutil.MkdirAllUnder(outRoot, filepath.Dir(dest)); err != nil {
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
@@ -342,7 +475,9 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		cleanup()
 		return fr
 	}
-	if err := fsutil.Fsync(tmp); err != nil {
+	// The flush goes through the handle held since the creation, so the
+	// name is not opened again for it.
+	if err := own.Sync(); err != nil {
 		cleanup()
 		fr.Addf(CodeRemuxFail, report.Fail, "fsync: %v", err)
 		return fr
@@ -378,6 +513,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
 		}
+		keep = true
 		fr.Output = dest
 		fr.Addf(CodePlaced, report.Pass, "written and verified")
 		return fr
@@ -416,7 +552,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		if beforeIdentity != nil {
 			beforeIdentity(tmp, fr.Path)
 		}
-		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+		if err := takeIdentity(tmp, fi, created); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 			return fr
@@ -429,6 +565,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "replace: %v", err)
 			return fr
 		}
+		keep = true
 		if err := replacedOwn(fr.Path, created); err != nil {
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
@@ -458,7 +595,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		if beforeIdentity != nil {
 			beforeIdentity(tmp, dest)
 		}
-		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+		if err := takeIdentity(tmp, fi, created); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 			return fr
@@ -486,9 +623,13 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		// The source is checked one last time now that the output sits at
 		// dest: were it replaced in the meantime, removing it would delete
 		// a file that was never rebuilt. The output is then taken back
-		// again, provided dest still is the file this run placed there.
+		// again, provided dest still is the file this run placed there,
+		// and the claim on dest goes with it, so a later file of the run
+		// that maps to dest finds the name free, as the disk says it is.
+		// The claim is kept only once dest holds an output that stays.
 		if err := sourceUnchanged(fr.Path, fi); err != nil {
 			if rerr := removeOwn(dest, created); rerr != nil {
+				keep = true
 				fr.Output = dest
 				fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the rebuilt file stays at %s: %v", err, dest, rerr)
 				return fr
@@ -496,6 +637,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; the source was left untouched and the placed output was removed again", err)
 			return fr
 		}
+		keep = true
 		if err := os.Remove(fr.Path); err != nil {
 			fr.Output = dest
 			fr.Addf(CodeRemuxFail, report.Fail, "the rebuilt file was placed at %s but the source could not be removed: %v", dest, err)
@@ -505,6 +647,33 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	fr.Output = dest
 	fr.Addf(CodePlaced, report.Pass, "written and verified")
 	return fr
+}
+
+// scannedFile returns the entry at path when it still is the regular file
+// the scanner examined, with the size and the modification time the scanner
+// recorded in sc.Stat, and an error otherwise: a symlink planted since the
+// scan, a directory, a device, nothing at all, another regular file renamed
+// onto the path, or the same file written to since. A result that carries
+// no Stat was never examined by the scanner and is refused for that reason,
+// because the verdict it carries cannot be tied to any file.
+func scannedFile(path string, sc scan.Result) (os.FileInfo, error) {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("changed since the scan: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is now a symlink; refusing to follow it (changed since the scan)", path)
+	}
+	if !now.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is no longer a regular file (changed since the scan)", path)
+	}
+	if sc.Stat == nil {
+		return nil, fmt.Errorf("%s was not examined by the scan; nothing can be proven about it", path)
+	}
+	if !fsutil.Unchanged(sc.Stat, now) {
+		return nil, fmt.Errorf("%s changed since the scan; the file that was scanned is not the file at this path", path)
+	}
+	return now, nil
 }
 
 // sourceUnchanged reports an error when path no longer names the regular
@@ -529,8 +698,43 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 	if was == nil {
 		return fmt.Errorf("%s could not be examined when the remux began; nothing was placed", path)
 	}
-	if !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
+	if !fsutil.Unchanged(was, now) {
 		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
+	}
+	return nil
+}
+
+// ensureOutRoot makes sure the output root is a directory this run may
+// write into, creating it when it is missing. A root the user named with
+// --output is the user's choice: it is created with os.MkdirAll and, when
+// it is a symbolic link, followed, as MkdirAllUnder documents for the root
+// it is given. The defaulted root, <root>__remuxed beside the input tree,
+// was named by nobody, and every remux without --output and --in-place
+// writes there, so an entry that already sits at that name is trusted only
+// when it is a real directory: anyone with write access to the parent of
+// the tree, which a shared download directory gives away, could otherwise
+// plant a symbolic link under that name and have every verified output
+// placed wherever it points (guarantee 3). A missing defaulted root is
+// created with a single mkdir, which fails rather than follows when a link
+// appears at the name between the check and the creation, and the entry is
+// examined afterwards without following it, so what is accepted is what is
+// really there.
+func (r *Remuxer) ensureOutRoot(outRoot string) error {
+	if r.OutputRoot != "" {
+		return os.MkdirAll(outRoot, 0o755)
+	}
+	if err := os.Mkdir(outRoot, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("output root %s: %w", outRoot, err)
+	}
+	fi, err := os.Lstat(outRoot)
+	if err != nil {
+		return fmt.Errorf("output root %s: %w", outRoot, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("output root %s is a symlink; refusing to follow it (name the directory it points to with --output to write there)", outRoot)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("output root %s exists and is not a directory", outRoot)
 	}
 	return nil
 }
@@ -554,12 +758,13 @@ func createTemp(tmp string) (*fsutil.Temp, error) {
 }
 
 // tempUnchanged reports an error when tmp no longer names the file
-// createTemp made: a symlink or another entry renamed onto the name, or a
-// hard link added to the file, any of which would let the verification or
-// the placement reach a file this run did not create. mkvmerge and
-// mkvpropedit write into the existing file rather than unlinking and
-// recreating it (checked against mkvmerge and mkvpropedit v102, which keep
-// the inode), so the identity survives both tools.
+// createTemp made: a symlink, a named pipe or another entry renamed onto
+// the name, or a hard link added to the file, any of which would let the
+// verification or the placement reach a file this run did not create, or
+// let a tool that opens the name block on a pipe. mkvmerge and mkvpropedit
+// write into the existing file rather than unlinking and recreating it
+// (checked against mkvmerge and mkvpropedit v102, which keep the inode),
+// so the identity survives both tools.
 func tempUnchanged(tmp string, created os.FileInfo) error {
 	now, err := os.Lstat(tmp)
 	if err != nil {
@@ -578,14 +783,18 @@ func tempUnchanged(tmp string, created os.FileInfo) error {
 }
 
 // takeIdentity gives the temp file the mode, ownership and modification
-// time of the source at src. The temp name is opened without following a
-// symlink and the open file must be the regular file created describes with
-// no other name; the metadata is then written through that descriptor and
-// the descriptor is closed. Nothing is written by name, so a symlink or a
-// different file swapped onto the temp name after the last tempUnchanged
+// time the source had, as src describes it. src is the os.Lstat this remux
+// pinned the source with and checked with sourceUnchanged right before, so
+// nothing is read from the source's name here: a symbolic link swapped onto
+// that name after the check cannot supply the mode or the time of whatever
+// it points at. The temp name is opened without following a symlink and
+// the open file must be the regular file created describes with no other
+// name; the metadata is then written through that descriptor and the
+// descriptor is closed. Nothing is written by name either, so a symlink or
+// a different file swapped onto the temp name after the last tempUnchanged
 // check is refused rather than followed, and the swap is reported in the
 // words tempUnchanged uses.
-func takeIdentity(tmp, src string, created os.FileInfo) error {
+func takeIdentity(tmp string, src, created os.FileInfo) error {
 	f, err := fsutil.OpenOwn(tmp, created)
 	if err != nil {
 		return err
@@ -659,27 +868,69 @@ func removeOwn(path string, own os.FileInfo) error {
 	return os.Remove(path)
 }
 
-// plan records dest as a destination this dry run would write.
+// plan records dest as a destination this run has taken, whether or not it
+// was free. claim is the checked form RemuxScanned uses.
 func (r *Remuxer) plan(dest string) {
-	if r.planned == nil {
-		r.planned = map[string][]string{}
-	}
-	dir := filepath.Dir(dest)
-	r.planned[dir] = append(r.planned[dir], filepath.Base(dest))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.planLocked(dest)
 }
 
-// plannedCollision reports whether an earlier file of this dry run already
-// plans to write dest. Names are compared exactly, and without regard to
-// case as well when the destination directory's filesystem folds case,
-// because there Ep.mkv and ep.mkv are one entry and the live run fails the
-// second file with OUTPUT_EXISTS.
-func (r *Remuxer) plannedCollision(dest string) bool {
+func (r *Remuxer) planLocked(dest string) {
+	if r.claimed == nil {
+		r.claimed = map[string][]string{}
+	}
+	dir := filepath.Dir(dest)
+	r.claimed[dir] = append(r.claimed[dir], filepath.Base(dest))
+}
+
+// claim takes dest for the calling file and reports whether it was free.
+// The check and the record happen under one lock, so two workers that map
+// to the same name cannot both succeed.
+func (r *Remuxer) claim(dest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.collisionLocked(dest) {
+		return false
+	}
+	r.planLocked(dest)
+	return true
+}
+
+// release gives dest back after a remux that placed nothing, so a later
+// file with the same destination gets its turn. Only the exact spelling the
+// claim recorded is removed.
+func (r *Remuxer) release(dest string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir, base := filepath.Dir(dest), filepath.Base(dest)
-	names := r.planned[dir]
+	names := r.claimed[dir]
+	for i, n := range names {
+		if n == base {
+			r.claimed[dir] = append(names[:i:i], names[i+1:]...)
+			return
+		}
+	}
+}
+
+// plannedCollision reports whether an earlier file of this run already
+// took dest. Names are compared exactly, and without regard to case as well
+// when the destination directory's filesystem folds case, because there
+// Ep.mkv and ep.mkv are one entry and the live run fails the second file
+// with OUTPUT_EXISTS.
+func (r *Remuxer) plannedCollision(dest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.collisionLocked(dest)
+}
+
+func (r *Remuxer) collisionLocked(dest string) bool {
+	dir, base := filepath.Dir(dest), filepath.Base(dest)
+	names := r.claimed[dir]
 	if len(names) == 0 {
 		return false
 	}
-	fold := r.foldsCase(dir)
+	fold := r.foldsCaseLocked(dir)
 	for _, n := range names {
 		if n == base || (fold && strings.EqualFold(n, base)) {
 			return true
@@ -700,6 +951,12 @@ func (r *Remuxer) plannedCollision(dest string) bool {
 // continues upward; when it reaches the root without an answer the
 // filesystem is taken to be case-sensitive, which compares names exactly.
 func (r *Remuxer) foldsCase(dir string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.foldsCaseLocked(dir)
+}
+
+func (r *Remuxer) foldsCaseLocked(dir string) bool {
 	if v, ok := r.caseFold[dir]; ok {
 		return v
 	}
@@ -861,6 +1118,9 @@ func (r *Remuxer) mkvmergeArgs(out string, m *probe.MediaInfo, d *policy.Decisio
 		if t.ClearTitle {
 			trackOpts = append(trackOpts, "--track-name", sid+":")
 		}
+		if t.Stream.Type == "video" {
+			trackOpts = append(trackOpts, colourArgs(sid, t.Stream)...)
+		}
 	}
 	args = append(args, "--video-tracks", strings.Join(ids["video"], ","))
 	if len(ids["audio"]) == 0 {
@@ -884,6 +1144,85 @@ func boolFlag(b bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// colourArgs names, for one kept video track, the colour and HDR values
+// that the source's ffprobe view holds and mkvmerge's own view of the same
+// track does not, as the mkvmerge options that write them into the output
+// track header. mkvmerge's MP4 and MOV reader carries the primaries,
+// transfer and matrix of a colr atom into the Matroska Colour element but
+// not the atom's range flag, and it reads neither the mdcv box that holds
+// the mastering display nor the clli box that holds the content light
+// levels, so a plain remux of such a file loses signalling that the
+// verifier then reports as HDR_LOST. A value is named here only when the
+// merged Color holds it, which a malformed value never does, and MkvColor
+// lacks it; a value mkvmerge saw for itself it carries for itself, so a
+// Matroska source gets no option at all. A measured value is written in
+// the decimal form mkvmerge parses and only when that form reads back as
+// the value held, otherwise the option is left out and the verifier
+// reports the loss rather than a wrong value being written. The Dolby
+// Vision configuration record has no mkvmerge option; mkvmerge v102
+// carries it from an MP4 as a block addition mapping on its own, and with
+// a version that does not the verifier reports the record as lost.
+func colourArgs(sid string, s probe.Stream) []string {
+	c, mk := s.Color, s.MkvColor
+	var opts []string
+	if mk.Range == "" {
+		switch c.Range {
+		case "tv":
+			opts = append(opts, "--colour-range", sid+":1")
+		case "pc":
+			opts = append(opts, "--colour-range", sid+":2")
+		}
+	}
+	if m := c.Mastering; m != nil {
+		mkPrimaries := mk.Mastering != nil && mk.Mastering.HasPrimaries
+		mkLuminance := mk.Mastering != nil && mk.Mastering.HasLuminance
+		if m.HasPrimaries && !mkPrimaries {
+			coords, ok := mkvNumbers(m.RedX, m.RedY, m.GreenX, m.GreenY, m.BlueX, m.BlueY)
+			white, ok2 := mkvNumbers(m.WhiteX, m.WhiteY)
+			if ok && ok2 {
+				opts = append(opts, "--chromaticity-coordinates", sid+":"+strings.Join(coords, ","))
+				opts = append(opts, "--white-colour-coordinates", sid+":"+strings.Join(white, ","))
+			}
+		}
+		if m.HasLuminance && !mkLuminance {
+			if lum, ok := mkvNumbers(m.MinLuminance, m.MaxLuminance); ok {
+				opts = append(opts, "--min-luminance", sid+":"+lum[0])
+				opts = append(opts, "--max-luminance", sid+":"+lum[1])
+			}
+		}
+	}
+	if c.Light != nil && mk.Light == nil {
+		opts = append(opts, "--max-content-light", sid+":"+strconv.Itoa(c.Light.MaxCLL))
+		opts = append(opts, "--max-frame-light", sid+":"+strconv.Itoa(c.Light.MaxFALL))
+	}
+	return opts
+}
+
+// mkvNumbers formats validated chromaticity or luminance values for an
+// mkvmerge option. mkvmerge reads a plain decimal with no exponent and
+// misreads a fractional part longer than eighteen digits, so each value
+// is printed in fixed notation rounded to twelve fractional digits with
+// trailing zeros trimmed. The result is false when a rounded string does
+// not parse back to a value the verifier would accept as the same, and
+// the caller then writes nothing for the group. Twelve digits are finer
+// than the verifier's absolute floor, so no value in range fails this
+// today; the check is what makes that a fact rather than an assumption.
+func mkvNumbers(vals ...float64) ([]string, bool) {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		str := strconv.FormatFloat(v, 'f', 12, 64)
+		if strings.Contains(str, ".") {
+			str = strings.TrimRight(strings.TrimRight(str, "0"), ".")
+		}
+		back, err := strconv.ParseFloat(str, 64)
+		if err != nil || !probe.CloseEnough(back, v) {
+			return nil, false
+		}
+		out = append(out, str)
+	}
+	return out, true
 }
 
 // verifyOutput runs the verification battery. Returns false on failure.
@@ -935,12 +1274,18 @@ func (r *Remuxer) verifyOutput(ctx context.Context, fr *report.FileResult, src *
 	if d.StripProvenance && (out.MuxingApp != "" || out.WritingApp != "") {
 		return fail("muxing/writing application still set")
 	}
-	// HDR and Dolby Vision survive only if mkvmerge carried the side data.
-	sv := src.StreamsOf("video")
+	// HDR and Dolby Vision survive only if mkvmerge carried the colour
+	// description, the static metadata and the configuration record. Every
+	// kept video stream is compared with its copy, and any value lost,
+	// gained or changed fails the file (guarantee 5 applies to the
+	// signalling as it does to the packets: the output is discarded).
 	ov := out.StreamsOf("video")
-	if len(sv) > 0 && len(ov) > 0 && len(sv[0].HDR) > 0 {
-		if strings.Join(sv[0].HDR, "+") != strings.Join(ov[0].HDR, "+") {
-			fr.Addf(CodeHDRLost, report.Fail, "source video is %s, output is %s", strings.Join(sv[0].HDR, "+"), orNone(strings.Join(ov[0].HDR, "+")))
+	for i, t := range d.KeptOf("video") {
+		if i >= len(ov) {
+			break
+		}
+		if diffs := hdrDiff(t.Stream, ov[i]); len(diffs) > 0 {
+			fr.Addf(CodeHDRLost, report.Fail, "stream #%d: %s", t.Stream.Index, strings.Join(diffs, "; "))
 			return false
 		}
 	}
@@ -984,6 +1329,21 @@ func orNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// hdrDiff lists what differs in the HDR signalling between a source video
+// stream and the output stream that carries it: the family labels the scan
+// reports (hdr10, hlg, dovi, hdr10plus), and then every colour and HDR
+// property the probe normalised, in the words probe.ColorDiff uses. An SDR
+// source is compared as strictly as an HDR one, so an output that gained
+// signalling is reported too.
+func hdrDiff(src, out probe.Stream) []string {
+	var diffs []string
+	sl, ol := strings.Join(src.HDR, "+"), strings.Join(out.HDR, "+")
+	if sl != ol {
+		diffs = append(diffs, fmt.Sprintf("source video is %s, output is %s", orNone(sl), orNone(ol)))
+	}
+	return append(diffs, probe.ColorDiff(&src.Color, &out.Color)...)
 }
 
 // sameStream compares packet hashes first and falls back to decoded hashes

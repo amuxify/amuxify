@@ -22,7 +22,7 @@ it writes only the skipping line, to stdout normally and to stderr under
 
 | Adapter | What it reads | When it skips | Exit codes |
 |---|---|---|---|
-| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's eight positional parameters (completed directory first, post-processing status seventh) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
+| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's seven or eight positional parameters (completed directory first, post-processing status seventh; see the accepted forms below) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook nzbget` | `NZBPP_TOTALSTATUS`, `NZBPP_FINALDIR` or `NZBPP_DIRECTORY` (the first non-empty one), `NZBPP_NZBNAME`, `NZBPP_CATEGORY`, `NZBPP_STATUS` | `NZBPP_TOTALSTATUS` is not `SUCCESS`, or the category does not match `--category`; exits 95 | 93 when the verdict is below `--fail-on`, 94 at or above it, 95 when skipped, 94 for a usage error or an interruption |
 | `hook sonarr` | `sonarr_eventtype`, `sonarr_episodefile_path` or `sonarr_episodefile_paths`, `sonarr_series_originallanguage`, `sonarr_series_title`, `sonarr_release_title` | every event other than `Download` and `Test`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook radarr` | `radarr_eventtype`, `radarr_moviefile_path`, `radarr_movie_originallanguage`, `radarr_movie_title` | every event other than `Download` and `Test`; exits 0 | as `hook sonarr` |
@@ -57,7 +57,10 @@ fails the job and nothing reaches the library. The Sonarr and Radarr adapters
 run after the import; they sanitise the file that is already in the library and
 cannot block the import, because Sonarr and Radarr only look at the exit code
 of the Test event. Use them when the download client is not yours to configure,
-or for imports that do not come through SABnzbd or NZBGet.
+or for imports that do not come through SABnzbd or NZBGet. When no hook can
+run at all, because amuxify cannot be installed next to the client, `amuxify
+watch` polls the download folder from its own container or from the host; see
+[Watching a folder](#watching-a-folder).
 
 ## SABnzbd
 
@@ -78,6 +81,89 @@ directory in `SAB_COMPLETE_DIR` and the post-processing status in
 (failed verification, unpack or repair); the adapter prints a skipping line
 that quotes `SAB_FAIL_MSG` when SABnzbd set it, and exits 0 so the failure
 stays SABnzbd's own.
+
+### Accepted forms
+
+The adapter reads the job in one of two forms, and refuses everything else
+with exit code 2 and a message that names the problem.
+
+The environment form applies whenever `SAB_COMPLETE_DIR` is set, which every
+supported SABnzbd does. The adapter then also requires `SAB_PP_STATUS`; a
+job with the directory but no status is refused rather than assumed
+successful. `SAB_FINAL_NAME`, `SAB_CAT` and `SAB_FAIL_MSG` are optional. When
+the environment form applies the positional parameters are not read, but
+their count is still checked, since SABnzbd passes both and a wrong count
+means the wrapper line is wrong. A SABnzbd that sets the variables passes
+all eight parameters, so in this form only none or eight are accepted, and
+seven are refused with a message that says a flag took the first one: that
+is what remains when a flag that takes a value, such as `--category` or
+`--state-dir`, is written before `"$@"` in the wrapper and swallows the job
+directory, and the shifted values would otherwise put the failure URL in the
+status slot and the release tree in the flag. Nothing in the positional
+parameters is looked up on disk in this form.
+
+The positional form applies when `SAB_COMPLETE_DIR` is not set, and accepts
+exactly the parameters SABnzbd passes to a script, in SABnzbd's order: the
+final directory of the job, the name of the original NZB file, the clean job
+name, the indexer's report number, the category, the newsgroup, the
+post-processing status, and, from the SABnzbd version that added it, the
+failure URL. Seven parameters are read as an older SABnzbd's call and eight
+as a current one's. The status must not be empty in either form. The
+directory comes from the first parameter, the label from the third (or the
+second when the third is empty), the category from the fifth and the status
+from the seventh; the others are ignored.
+
+No other count of positional arguments is accepted. In particular a lone
+directory is not a way to name the directory to ingest: `hook sabnzbd
+/downloads/job` is a usage error, and so are six, nine or more parameters.
+A wrapper that writes `hook sabnzbd /q "$@"` or `hook sabnzbd "$@" /q`
+against a current SABnzbd gives nine arguments and is refused on count. In
+the positional form one more shape is refused: a directory in front of an
+older SABnzbd's seven parameters, which has the right count but would put
+the added directory where the job's own belongs. In that shape the second
+parameter holds the directory SABnzbd passed first, which is always an
+absolute path, so an existing directory written as a path in that place
+shows that a directory was added in front, and the job is refused rather
+than the wrong directory scanned. SABnzbd's own second parameter is the bare
+name of the original NZB file, which the indexer chooses, and a bare name is
+never looked up: a directory in the script's working directory that happens
+to carry the NZB's name does not refuse the job. The first parameter is not
+required to exist, since a job directory may be gone by the time the script
+runs.
+
+The eighth parameter, the failure URL, is never inspected in either form.
+SABnzbd copies it from the `X-DNZB-Failure` header of the indexer's NZB
+response, so it is the one parameter an indexer writes, and a check that
+refused the job on its value, for instance because it named an existing
+directory, would let an indexer have every job it serves refused before the
+scan. A directory written after an older SABnzbd's seven parameters is
+therefore read as the failure URL and ignored, and the job's own directory
+is still scanned.
+
+When a run is refused because of its arguments, the message names the
+count or the directory found in the wrong place. When a bare `--quarantine`
+is set and the arguments show which one the wrapper added, the message also
+says to write `--quarantine=<dir>` with that argument, because that is the
+usual reason for a stray directory. The hint only ever names a value the
+wrapper added, never one of SABnzbd's own parameters: with nine arguments
+the added directory is the first when the last is empty or a URL, as
+SABnzbd's failure URL is, the eighth is a number, as its status is, and the
+seventh is not one; it is the last when the eighth is empty or a URL and
+the seventh is a number. No hint is printed when neither reading fits, for
+instance when the indexer sent a bare path as the failure URL, or sent a
+number as the failure URL and the wrapper appended an empty argument,
+because a reading that rested on the failure URL alone could be made to
+name the job directory.
+
+Flags such as `--quarantine=DIR`, `--fail-on`, `--category` and
+`--remove-blocked-sidecars` are recognised in any position before the first
+positional parameter, and the global flags such as `--profile` and
+`--dry-run` may go before `hook` or in the same position as the hook flags.
+After the first positional parameter, or after `--`, every argument is a
+parameter, so a directory named like a flag is a directory. Every value in
+either form is carried as data: nothing is split, expanded or executed,
+control characters are escaped in the log lines, and a directory that is a
+symlink is reported as `WARN SYMLINK` and never followed.
 
 SABnzbd only fails a job on a non-zero script exit when its `script_can_fail`
 setting is on; turn it on. With it, every non-zero exit fails the job: 1 for a
@@ -165,13 +251,20 @@ begin with `[NZB]` for any other reason, for example a file name that contains
 a newline, is written as `[INFO] (not a command) [NZB] ...`, so only the
 adapter itself can hand NZBGet a command.
 
-When the run verdict is BLOCK the adapter prints `[NZB] MARK=BAD` as its last
-stdout line, whatever `--fail-on` says. NZBGet then marks the download as bad,
-and Sonarr and Radarr treat a bad download as a failed one: they blocklist the
-release and search for another. A WARN or FAIL verdict never prints that line,
-so a file that is merely damaged or noisy fails the job without making the arr
-re-grab the release; a BLOCK, which means an executable payload, a polyglot or
-a blocked sidecar, is exactly the case where a replacement is wanted.
+Sonarr and Radarr read NZBGet's history and treat any download whose script
+status is not `SUCCESS` or `NONE` as a failed download: they blocklist the
+release and search for another one. Exit 94 sets that status, so a FAIL
+verdict costs you the release on NZBGet exactly as it does on SABnzbd with
+`script_can_fail` on. If a damaged or noisy file should not cost you the
+release, pass `--fail-on block` on the `exec` line: a FAIL then exits 93, the
+file is imported and its findings stay in the log.
+
+When the run verdict is BLOCK the adapter also prints `[NZB] MARK=BAD` as its
+last stdout line, whatever `--fail-on` says. NZBGet then marks the download as
+bad in its own history, which the arrs also read as a failed download, so a
+BLOCK, which means an executable payload, a polyglot or a blocked sidecar, is
+blocklisted even under `--fail-on block`. A WARN or FAIL verdict never prints
+that line.
 
 To keep a JSON report of each run, add `--json-out` with a path that is new for
 each run, for example `--json-out "/reports/$NZBPP_NZBID.json"`, to the `exec`
@@ -249,8 +342,8 @@ names the directory; a bare `--quarantine` uses `<state-dir>/quarantine`
 turns it off again. The directory form must use `=`, because the flag also
 works without a value. A directory written after a bare `--quarantine` is not
 read as its value: `hook sonarr`, `hook radarr` and `hook nzbget` take no
-positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's eight
-parameters, so the stray word is a usage error, and the message says to write
+positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's seven or
+eight parameters, so the stray word is a usage error, and the message says to write
 `--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
 cleared under `--dry-run`. The quarantine directory must lie outside the
 paths being processed: a path that is the quarantine directory or lies inside
@@ -286,13 +379,17 @@ it and never follows a symlink in its place, so give each run its own path. A
 write failure is reported on stderr as `amuxify: json-out: <error>` and does
 not change the exit code.
 
-The global flags apply before the subcommand as everywhere: `--profile`,
-`--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`, `--state-dir`,
-`--allow-root` and `--trace`. `--dry-run` reports what each file would get
-(`ROUTE` under `--verbose` shows the plan) and changes nothing. `AMUXIFY_PROFILE`
-sets the default profile; every wrapper passes it through with `homelab` as the
-fallback, so setting that variable in the client's environment is enough to
-switch profiles without editing the script. The NZBGet wrapper puts its own
+The global flags apply before the subcommand as everywhere, and are accepted
+after it as well: `--profile`, `--json`, `--dry-run`, `--verbose`, `--quiet`,
+`--timeout`, `--state-dir`, `--allow-root`, `--trace` and `--jobs`. A hook
+accepts `--jobs` but always processes one file at a time, whatever value is
+given: the download client decides how many scripts run at once, and one
+script that fans out would take the machine away from the others. `--dry-run`
+reports what each file would get (`ROUTE` under `--verbose` shows the plan)
+and changes nothing. `AMUXIFY_PROFILE` sets the default profile; every
+wrapper passes it through with `homelab` as the fallback, so setting that
+variable in the client's environment is enough to switch profiles without
+editing the script. The NZBGet wrapper puts its own
 `NZBPO_PROFILE` option first and falls back to `AMUXIFY_PROFILE` and then
 `homelab`, like the others.
 
@@ -307,6 +404,140 @@ amuxify ingest /srv/media/incoming
 so they stop being picked up, without deleting anything. The directory may sit
 inside the incoming tree, as above; the walk skips it. `ingest` then rebuilds
 or cleans what is left, in place, and exits with the worst verdict of the run.
+
+A timer runs ingest over the whole folder at fixed times and has no way to
+tell a finished download from one that is still being written. When the
+folder receives files at any time, `amuxify watch` below does the same work
+and waits for each file to stop changing first.
+
+## Watching a folder
+
+```
+amuxify [global flags] watch [--interval 5s] [--settle 30s] [--once] [ingest flags] <dir>
+```
+
+`watch` polls one directory and runs `ingest` on each file once it has stayed
+unchanged for the settle window. It takes the ingest flags (`--quarantine`,
+`--profile` as a global flag, `--verify`, `--hardlinks`, `--force`, `--dry-run`,
+`--remove-blocked-sidecars`) and treats each file exactly as `ingest` would,
+with the same walker, the same quarantine exclusion and the same symlink rules.
+As with `ingest` and the hooks, the quarantine directory is written as
+`--quarantine=DIR`; a bare `--quarantine` followed by a directory leaves that
+directory as a stray positional argument and the watcher refuses to start.
+Files are handed to `ingest` one at a time, so `--jobs` is accepted and has no
+effect under `watch`, as it has none under a hook. It uses polling only, so it
+works on any filesystem, including network shares and Docker bind mounts, where
+change notification is unreliable or absent.
+
+Use `watch` when the hook cannot run inside the download client, for example
+when the client is a stock container you do not want to rebuild, or when the
+files arrive by other means (an rsync target, an SFTP drop, a USB copy). Prefer
+the hook when it is available: the hook knows when the download is complete
+and can fail the job, while a watcher can only infer completion from the file
+having stopped changing, and it cannot stop the client from importing the file
+in the meantime.
+
+Every pass walks the directory and notes the size, modification time and
+identity (device and inode) of every regular file. A file is ingested once it
+has been seen unchanged in all three for at least `--settle`, and then only
+once for that content: it is not ingested again on the next pass. A file that
+changes later, by growing, being rewritten or being replaced by a different
+file under the same name, is a new version and is ingested again once it has
+settled. That includes a file amuxify itself rebuilt or cleaned: the watcher
+does not try to tell its own writes from someone else's, so the rewritten file
+is looked at once more after it settles, and that second ingest finds nothing
+left to change. That second look is a full ingest, with the probe and the
+decode check the first one ran, so a file the watcher rebuilds or edits costs
+roughly twice the processing of the same file under `ingest`. The watcher
+accepts that cost rather than trusting its own writes, because a change from
+someone else that lands while amuxify is writing would otherwise be
+missed. A file that is still growing is never ingested. Right before
+each ingest the watcher checks the path again: it must be the same regular
+file it decided on, still inside the watched directory, reached through real
+directories and not through a symlink. A file that vanished before its turn
+is dropped without a report. Symlinks are listed but never followed, and each
+one is noticed once on stderr unless `--quiet` is given. A subdirectory that
+cannot be read is reported once, and again only when the error changes. The
+watcher keeps only the files present at the last pass in memory, so a folder
+that files pass through does not grow its footprint.
+
+Per-file verdicts stream in the same human format as `ingest`, as each file
+finishes, and a pass that ingested at least one file ends with the usual count
+line. Under `--json` each such pass writes one complete `amuxify.report/1`
+document on a single line, with `command` set to `ingest`, so a consumer reads
+newline-delimited reports and can parse each line as it arrives; the watcher's
+own lines go to stderr. A pass that ingested nothing and met no new error
+prints nothing, so a quiet folder stays quiet; an unreadable subdirectory is
+reported once, with a count line or a document of its own, when it appears or
+changes. The command starts with one line naming the directory, the interval
+and the settle window.
+
+Exit behaviour: without `--once` the command runs until it is interrupted
+(SIGINT or SIGTERM). On an interrupt it finishes the file it is working on,
+reports it, starts no further file, prints `amuxify watch: interrupted,
+stopped` and exits 0, whatever the verdicts were. The file in progress is
+finished for real: a tool that is rebuilding or editing it is left to run to
+its end, bounded only by its usual timeout, so an interrupt never leaves a
+half-written header behind. No temporary file is left behind, because a file
+in progress is either finished or its temporary output is removed, as in
+every other command. With `--once` the command makes one
+pass, waits one settle window, makes a second pass that ingests what has
+settled, and exits with the worst verdict of the run using the usual codes (0
+PASS, 1 WARN, 3 FAIL, 4 BLOCK, 130 interrupted). A `--once` run therefore
+takes at least `--settle`; `--settle 0s` ingests everything present in a single
+pass, which is the cron case from above with the same command line as the
+continuous watcher.
+
+`watch` refuses the quarantine directory itself, or a directory inside it, as
+the watched directory, and refuses a symlink in place of the directory, both
+before any tool runs. A quarantine directory inside the watched tree is not
+entered, exactly as with `ingest`, so a blocked file that was moved there is
+not picked up again. `--verify none` is refused. The root guard is unchanged:
+`watch` refuses to run as root unless `--allow-root` is given.
+
+A compose set-up runs the watcher as its own service over the volume the
+download client writes to. The download client is any stock image; the watcher
+is the plain amuxify image, run as the uid and gid that own the folder:
+
+```yaml
+services:
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - /srv/media/downloads:/downloads
+
+  amuxify:
+    image: ghcr.io/amuxify/amuxify
+    user: "1000:1000"
+    command: >
+      watch --interval 10s --settle 60s
+      --quarantine=/downloads/quarantine --remove-blocked-sidecars
+      /downloads/complete
+    volumes:
+      - /srv/media/downloads:/downloads
+    restart: unless-stopped
+    stop_grace_period: 30m
+```
+
+The watcher sees the folder the client writes to, waits until each file has
+been unchanged for a minute, and then verifies and sanitises it in place; a
+BLOCK file is moved under `/downloads/quarantine`, which the walk never
+enters. Pick a settle window longer than the longest pause your client makes
+between two writes to one file; the default of 30 seconds is enough for a
+client that writes a download in one go, while a client that assembles a file
+from parts may pause longer while it repairs or unpacks. With `--json` the
+service's stdout is one report document per line, so `docker compose logs -f
+amuxify` or a log shipper can follow it. The container stops with exit code 0
+when compose sends its stop signal, once the file in progress is finished.
+Set `stop_grace_period` longer than the longest time a single file takes to
+process, because after that period Docker sends SIGKILL, which ends the
+watcher and its tool at once like a crash would: a rebuild leaves its
+temporary file behind, which the next pass ignores, and an in-place header
+edit can be cut short. Compose's default of ten seconds is far too short for
+a remux.
 
 ## Docker
 
@@ -324,8 +555,8 @@ hide it. This is `contrib/hooks/Dockerfile.sabnzbd`:
 ```Dockerfile
 FROM lscr.io/linuxserver/sabnzbd:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/
 ```
 
 The same four lines work for the other three images; change the base image and
@@ -334,22 +565,22 @@ the wrapper name:
 ```Dockerfile
 FROM lscr.io/linuxserver/nzbget:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-nzbget.sh /usr/local/share/amuxify/hooks/
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/share/amuxify/hooks/amuxify-nzbget.sh /usr/local/share/amuxify/hooks/
 ```
 
 ```Dockerfile
 FROM lscr.io/linuxserver/sonarr:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-sonarr.sh /usr/local/share/amuxify/hooks/
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/share/amuxify/hooks/amuxify-sonarr.sh /usr/local/share/amuxify/hooks/
 ```
 
 ```Dockerfile
 FROM lscr.io/linuxserver/radarr:latest
 RUN apk add --no-cache ffmpeg mkvtoolnix
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
-COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/share/amuxify/hooks/amuxify-radarr.sh /usr/local/share/amuxify/hooks/
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/local/bin/amuxify /usr/local/bin/amuxify
+COPY --from=ghcr.io/amuxify/amuxify:0.4.0 /usr/share/amuxify/hooks/amuxify-radarr.sh /usr/local/share/amuxify/hooks/
 ```
 
 Then point the client at the wrapper where the image put it. In SABnzbd set

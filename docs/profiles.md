@@ -118,6 +118,56 @@ is never silently made silent.
   `ignore` there.
 - `clamav` — `off`, `optional` (scan when clamscan is installed), `required`
   (`doctor` fails without it; infected files are `BLOCK CLAMAV_INFECTED`).
+  See the section on ClamAV below for what each value means at run time.
+
+### ClamAV
+
+When the scan is on, every media file is handed to `clamscan` after the
+content checks and before it is probed. The verdict comes from the exit
+status of clamscan alone: exit 0 is clean and exit 1 is `BLOCK
+CLAMAV_INFECTED`. Any other exit, a scanner that cannot start or one that
+runs past the timeout produced no verdict, and what happens then depends on
+the mode. Under `optional` it is `WARN CLAMAV_ERROR` and the file is probed
+and verified like any other. Under `required` it is `FAIL CLAMAV_ERROR` and
+the scan of that file stops there, the same as when the scanner is not
+installed, so a file that was never scanned is not imported: a `--timeout`
+too short for the scanner to finish, or a clamscan whose signature database
+has not been downloaded (it exits 2 with "No supported database files
+found"), fails the file rather than letting it through. What clamscan
+printed is kept only as the lines that name the scanned file, cut to a few
+lines and passed through the report sanitiser, so a scanner's output can
+neither raise nor lower a verdict nor reshape a report line.
+
+The scan needs ClamAV 0.103 or newer. clamscan skips a file above its size
+limit, 100 MB by default, and reports it clean without reading it, so every
+call raises the limit to 2047 MiB, the most libclamav can scan, switches
+off the scan size and scan time limits, and passes `--alert-exceeds-max`,
+which 0.103 introduced, so that a file the scanner did not read is an
+error and never a pass. A media file larger than 2047 MiB cannot be
+scanned by libclamav at all and is `CLAMAV_ERROR` before clamscan starts,
+with a message that says so: under `optional` it is a warning and the file
+is probed and verified like any other, under `required` it fails the file.
+A library of files that size needs `optional`, not `required`.
+
+The three values of `safety.clamav` and the `scan --clamav` flag combine as
+follows.
+
+| `safety.clamav` | without `--clamav` | with `--clamav` | clamscan missing | clamscan gives no verdict | file above 2047 MiB |
+|---|---|---|---|---|---|
+| `off` | ⏭️ not run | ▶️ run | ⏭️ carries on | ⚠️ `WARN CLAMAV_ERROR` | ⚠️ `WARN CLAMAV_ERROR` |
+| `optional` | ▶️ run | ▶️ run | ⏭️ carries on | ⚠️ `WARN CLAMAV_ERROR` | ⚠️ `WARN CLAMAV_ERROR` |
+| `required` | ▶️ run | ▶️ run | ⛔ `FAIL CLAMAV_MISSING` | ⛔ `FAIL CLAMAV_ERROR` | ⛔ `FAIL CLAMAV_ERROR` |
+
+`--clamav` turns an `off` profile into an optional scan for that run; it never
+lowers a `required` profile, and no flag turns a `required` profile's missing
+scanner, a scanner that gave no verdict, or a file too large to scan into a
+pass. With `required` the file is failed before it is probed, `ingest` and
+the hook adapters refuse it even with `--force`, and `doctor` exits 2 when
+clamscan is not installed, is older than 0.103, cannot be run or has no
+signature database. The clamscan call runs under the run's `--timeout`
+when one is given and under a 30 minute limit otherwise; `--timeout` is one
+value for every tool, so a value lowered for probing applies to clamscan as
+well.
 
 ### `[sidecars]`
 

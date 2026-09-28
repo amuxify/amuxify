@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>amuxify: verify, sanitize and remux media before it enters Plex or Jellyfin</title>
-<meta name="description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Run from SABnzbd or NZBGet, it fails the job when a file is damaged or carries something that has no place in a video file.">
+<meta name="description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Scan, clean or remux files from the command line, or run it as a SABnzbd or NZBGet script that fails the job on a bad file.">
 <link rel="canonical" href="https://amuxify.com/">
 <meta name="author" content="Adrian Noel">
 <link rel="icon" type="image/png" href="amuxify-logo.png">
@@ -12,7 +12,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="amuxify">
 <meta property="og:title" content="amuxify: the ingest gate for self-hosted media">
-<meta property="og:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Run from SABnzbd or NZBGet, it fails the job when a file is damaged or carries something that has no place in a video file.">
+<meta property="og:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Scan, clean or remux files from the command line, or run it as a SABnzbd or NZBGet script that fails the job on a bad file.">
 <meta property="og:image" content="https://amuxify.com/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -21,7 +21,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:creator" content="@theadriannoel">
 <meta name="twitter:title" content="amuxify: the ingest gate for self-hosted media">
-<meta name="twitter:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Run from SABnzbd or NZBGet, it fails the job when a file is damaged or carries something that has no place in a video file.">
+<meta name="twitter:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Scan, clean or remux files from the command line, or run it as a SABnzbd or NZBGet script that fails the job on a bad file.">
 <meta name="twitter:image" content="https://amuxify.com/og.png">
 <script type="application/ld+json">
 {
@@ -29,10 +29,10 @@
   "@type": "SoftwareApplication",
   "name": "amuxify",
   "url": "https://amuxify.com/",
-  "description": "Command-line tool that checks downloaded and purchased video before it goes into a Plex or Jellyfin library. Runs as a SABnzbd, NZBGet, Sonarr or Radarr script, cleans files without re-encoding and checks every stream of a rebuilt file against the original by hash.",
+  "description": "Command-line tool that checks downloaded and purchased video before it goes into a Plex or Jellyfin library. Scans, cleans and remuxes files without re-encoding, checks every stream of a rebuilt file against the original by hash, and can also run as a SABnzbd, NZBGet, Sonarr or Radarr script.",
   "applicationCategory": "MultimediaApplication",
   "operatingSystem": "Linux, macOS",
-  "softwareVersion": "0.3.0",
+  "softwareVersion": "0.4.0",
   "license": "https://opensource.org/licenses/BSD-3-Clause",
   "codeRepository": "https://github.com/amuxify/amuxify",
   "downloadUrl": "https://github.com/amuxify/amuxify/releases",
@@ -68,16 +68,18 @@
   <img class="logo" src="amuxify-logo.webp" alt="amuxify logo" width="112" height="112">
   <h1>amuxify</h1>
   <p class="tagline">Checks downloaded and purchased video before it goes into your Plex or Jellyfin library.</p>
-  <p class="lede">amuxify is a command-line tool that SABnzbd or NZBGet runs on each finished download. When a
-  file is damaged or carries something that has no place in a video file, the job fails and the file never
-  reaches the library. Sonarr and Radarr can also run it after import to clean the file in place. Streams are
-  never re-encoded.</p>
+  <p class="lede">amuxify is a command-line tool for video you downloaded or bought. Run it on the files wherever
+  they landed, on your laptop or on the download box: <code>scan</code> tells you which files are damaged or
+  carry something that has no place in a video file, <code>clean</code> strips the metadata, and
+  <code>remux</code> rebuilds the file into a sanitized MKV. Only then does the file move to your library or
+  NAS. The same commands run unattended as a SABnzbd, NZBGet, Sonarr or Radarr script, where a bad file fails
+  the job and never reaches the library. Streams are never re-encoded.</p>
   <nav class="cta">
     <a class="button primary" href="#install">Install</a>
     <a class="button" href="https://github.com/amuxify/amuxify">Source on GitHub</a>
     <a class="button" href="https://github.com/amuxify/amuxify/tree/main/docs">Documentation</a>
   </nav>
-  <p class="meta">v0.3.0 · Linux, macOS, Docker · BSD-3-Clause</p>
+  <p class="meta">v0.4.0 · Linux, macOS, Docker · BSD-3-Clause</p>
 </header>
 
 <main>
@@ -121,6 +123,9 @@ amuxify does not transcode, rename or organise your library; Sonarr and Radarr s
 <section id="where-it-fits">
 <h2>Where it fits</h2>
 <ul>
+<li><strong>Your own machine:</strong> download or buy the file, run <code>amuxify scan</code> on it, then
+<code>clean</code> or <code>remux</code>, and copy the result to the NAS. Nothing else needs to be installed or
+configured. The hooks below are the same commands wired to a download client so they run without you.</li>
 <li><strong>SABnzbd and NZBGet:</strong> run the hook here if you can. It runs before Sonarr or Radarr import,
 so a failed job keeps the file out of the library. SABnzbd only fails a job on a script's exit code when
 <code>script_can_fail</code> is on (Config, Special). Both clients report a failed job to Sonarr and Radarr,
@@ -182,6 +187,7 @@ guarantees, each with a test.</p>
 <tr><td><code>scan</code></td><td>Report findings and a verdict per file</td><td>nothing, unless <code>--quarantine</code> moves <code>BLOCK</code> files into a mirrored tree under that directory</td></tr>
 <tr><td><code>ingest</code></td><td>Scan, then rebuild into a verified MKV or clean in place</td><td>the file in place; a rebuild is hash-verified before it replaces the original</td></tr>
 <tr><td><code>hook</code></td><td>Run ingest from SABnzbd, NZBGet, Sonarr or Radarr and exit the way that program expects</td><td>as ingest</td></tr>
+<tr><td><code>watch</code></td><td>Poll a directory and run ingest on each file once it has stopped changing; for a sidecar container or a drop folder</td><td>as ingest</td></tr>
 <tr><td><code>remux</code></td><td>Rebuild into a sanitized MKV in a mirrored tree beside the input root, or replace the original with <code>--in-place</code></td><td><code>&lt;root&gt;__remuxed/</code>, <code>--output</code> or <code>--in-place</code></td></tr>
 <tr><td><code>clean</code></td><td>Strip metadata in place, tracks untouched</td><td>the file; MP4, MOV, AVI and FLV are rewritten to a temp file and hash-verified before they replace the original, MKV and WebM headers are edited in place by mkvpropedit</td></tr>
 <tr><td><code>doctor</code></td><td>Check tools, version floors, profile and environment</td><td>nothing</td></tr>

@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -52,6 +55,46 @@ func TestMain(m *testing.M) {
 	case "exit3":
 		fmt.Fprintln(os.Stderr, "helper failing on purpose")
 		os.Exit(3)
+	case "selfkill":
+		fmt.Fprintln(os.Stderr, "helper about to be killed")
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Kill()
+		}
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
+	case "flood":
+		// Write the number of bytes named by the first argument to stdout
+		// and the same to stderr, then exit with the second argument's code
+		// so the caller can tell that the child finished on its own. An
+		// optional third argument of "stdout" or "stderr" floods only that
+		// stream and writes a single line to the other.
+		n, _ := strconv.Atoi(args[0])
+		code, _ := strconv.Atoi(args[1])
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		targets := []*os.File{os.Stdout, os.Stderr}
+		if len(args) > 2 {
+			switch args[2] {
+			case "stdout":
+				targets = targets[:1]
+				fmt.Fprintln(os.Stderr, "one line")
+			case "stderr":
+				targets = targets[1:]
+				fmt.Println("one line")
+			}
+		}
+		for _, w := range targets {
+			for left := n; left > 0; {
+				k := len(chunk)
+				if left < k {
+					k = left
+				}
+				if _, err := w.Write(chunk[:k]); err != nil {
+					os.Exit(98)
+				}
+				left -= k
+			}
+		}
+		os.Exit(code)
 	case "forkexit", "forkhang":
 		// Start a grandchild that inherits this process's stdout and
 		// stderr and sleeps, so the pipes stay open after this process is
@@ -514,11 +557,38 @@ func TestNonZeroExitIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-zero exit surfaced as error: %v", err)
 	}
-	if res.ExitCode != 3 || res.TimedOut {
+	if res.ExitCode != 3 || res.TimedOut || res.Status != "exit status 3" {
 		t.Fatalf("result: %+v", res)
 	}
 	if !strings.Contains(string(res.Stderr), "on purpose") {
 		t.Fatalf("stderr not captured: %q", res.Stderr)
+	}
+}
+
+// A child that dies on a signal is a completed run with no exit code to
+// read: ExitCode is -1 and Status says which signal, so a consumer whose
+// document never arrived can report the death rather than a parse error.
+// A run that exited 0 carries no Status.
+func TestSignalDeathIsReportedInStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no signals on windows")
+	}
+	prefix := helperTool(t, "dyingtool", "selfkill")
+	r := &Runner{}
+	res, err := r.RunWithTimeout(context.Background(), 10*time.Second, "dyingtool", prefix...)
+	if err != nil {
+		t.Fatalf("a signal death surfaced as error: %v", err)
+	}
+	if res.ExitCode != -1 || res.Status != "signal: killed" || res.TimedOut {
+		t.Fatalf("result: %+v", res)
+	}
+	if !strings.Contains(string(res.Stderr), "about to be killed") {
+		t.Fatalf("stderr not captured: %q", res.Stderr)
+	}
+	prefix = helperTool(t, "oktool", "echo")
+	res, err = r.RunWithTimeout(context.Background(), 10*time.Second, "oktool", append(prefix, "hi")...)
+	if err != nil || res.ExitCode != 0 || res.Status != "" {
+		t.Fatalf("exit 0 run: %v %+v", err, res)
 	}
 }
 
@@ -748,6 +818,106 @@ func TestRunStreaming(t *testing.T) {
 	}
 }
 
+// Guarantee 4: a tool that floods its output cannot grow the process
+// without bound. The runner keeps the first MaxOutput bytes of stdout and
+// of stderr, reads and drops the rest so the child never stalls on a full
+// pipe, marks the result as truncated, and still reports the exit status
+// the child ended with. Output under the bound is kept whole and not
+// marked. The bound does not apply to a streaming run, whose stdout goes
+// to the caller's writer.
+func TestRunCapsOutput(t *testing.T) {
+	prefix := helperTool(t, "floodtool", "flood")
+	r := &Runner{MaxOutput: 1 << 20}
+	res, err := r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "3")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != 1<<20 || len(res.Stderr) != 1<<20 {
+		t.Fatalf("kept %d bytes of stdout and %d of stderr, want %d each", len(res.Stdout), len(res.Stderr), 1<<20)
+	}
+	if !res.OutputTruncated || !res.StdoutTruncated || !res.StderrTruncated || res.ExitCode != 3 || res.TimedOut {
+		t.Fatalf("result: truncated=%v/%v/%v exit=%d timedOut=%v", res.OutputTruncated, res.StdoutTruncated, res.StderrTruncated, res.ExitCode, res.TimedOut)
+	}
+	res, err = r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(1000), "0")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != 1000 || len(res.Stderr) != 1000 || res.OutputTruncated {
+		t.Fatalf("under the bound: %d/%d bytes, truncated=%v", len(res.Stdout), len(res.Stderr), res.OutputTruncated)
+	}
+	if (&Runner{}).maxOutput() != DefaultMaxOutput || DefaultMaxOutput < 4<<20 {
+		t.Fatalf("default bound %d", (&Runner{}).maxOutput())
+	}
+	var w countingWriter
+	res, err = r.RunStreaming(context.Background(), 30*time.Second, "floodtool", &w, append(prefix, strconv.Itoa(3<<20), "0")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.b) != 3<<20 || len(res.Stderr) != 1<<20 || !res.OutputTruncated {
+		t.Fatalf("streaming: writer got %d bytes, stderr %d, truncated=%v", len(w.b), len(res.Stderr), res.OutputTruncated)
+	}
+}
+
+// A consumer that parses only standard output must not throw away a
+// complete document because the tool was noisy on standard error, and must
+// not trust a document whose own stream overflowed. The two flags are
+// therefore set per stream, and the combined flag is their union.
+func TestRunReportsTruncationPerStream(t *testing.T) {
+	prefix := helperTool(t, "floodtool", "flood")
+	r := &Runner{MaxOutput: 1 << 20}
+	res, err := r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "0", "stderr")...)
+	if err != nil {
+		t.Fatalf("stderr flood: %v", err)
+	}
+	if res.StdoutTruncated || !res.StderrTruncated || !res.OutputTruncated {
+		t.Fatalf("stderr flood: truncated stdout=%v stderr=%v either=%v", res.StdoutTruncated, res.StderrTruncated, res.OutputTruncated)
+	}
+	if string(res.Stdout) != "one line\n" || len(res.Stderr) != 1<<20 {
+		t.Fatalf("stderr flood: stdout %q, stderr %d bytes", res.Stdout, len(res.Stderr))
+	}
+	res, err = r.RunWithTimeout(context.Background(), 30*time.Second, "floodtool", append(prefix, strconv.Itoa(5<<20), "0", "stdout")...)
+	if err != nil {
+		t.Fatalf("stdout flood: %v", err)
+	}
+	if !res.StdoutTruncated || res.StderrTruncated || !res.OutputTruncated {
+		t.Fatalf("stdout flood: truncated stdout=%v stderr=%v either=%v", res.StdoutTruncated, res.StderrTruncated, res.OutputTruncated)
+	}
+	if len(res.Stdout) != 1<<20 || string(res.Stderr) != "one line\n" {
+		t.Fatalf("stdout flood: stdout %d bytes, stderr %q", len(res.Stdout), res.Stderr)
+	}
+}
+
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// Workers of a parallel run resolve tools through one Runner at the same
+// time; the path cache is filled and read under a lock, so the race
+// detector sees no unsynchronised access and every caller gets the same
+// answer. A hostile override is checked by every caller, not only the first.
+func TestPathConcurrentCallers(t *testing.T) {
+	helperTool(t, "shared", "echo")
+	r := &Runner{}
+	var wg sync.WaitGroup
+	paths := make([]string, 16)
+	errs := make([]error, 16)
+	for i := range paths {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 20; n++ {
+				paths[i], errs[i] = r.Path("shared")
+				if errs[i] != nil {
+					return
+				}
+				_ = r.Have("no-such-tool-anywhere")
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range paths {
+		if errs[i] != nil || paths[i] != paths[0] || paths[i] == "" {
+			t.Errorf("caller %d: %q %v, first %q", i, paths[i], errs[i], paths[0])
+		}
+	}
+}

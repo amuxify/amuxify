@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,9 +38,25 @@ type Result struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
+	// Status is how the child ended when it did not exit 0, in the words
+	// of the operating system: "exit status 1", or "signal: killed" for a
+	// child that died on a signal, which ExitCode reports as -1. Empty for
+	// a run that exited 0.
+	Status   string
 	TimedOut bool
-	Duration time.Duration
-	Cmdline  string
+	// StdoutTruncated and StderrTruncated are set when the child wrote more
+	// than the runner's MaxOutput to that stream; Stdout or Stderr then
+	// holds the first MaxOutput bytes and the rest was dropped while the
+	// child kept running, so the child never blocked on a full pipe.
+	// OutputTruncated is set when either was. A consumer that parses only
+	// standard output checks StdoutTruncated, so that a tool whose
+	// diagnostics on standard error ran past the bound does not have a
+	// complete document on standard output thrown away.
+	StdoutTruncated bool
+	StderrTruncated bool
+	OutputTruncated bool
+	Duration        time.Duration
+	Cmdline         string
 }
 
 // DefaultWaitDelay is how long a run waits, once the child has been killed
@@ -49,6 +66,23 @@ type Result struct {
 // for as long as the grandchild lives.
 const DefaultWaitDelay = 5 * time.Second
 
+// DefaultMaxOutput is how much of the child's standard output and of its
+// standard error a run keeps, each, when the Runner does not set its own
+// bound. A tool that floods its output, such as an antivirus scanner
+// naming every signature it tried or a probe dumping every frame, cannot
+// grow the process without limit; what it printed past the bound is read
+// and dropped. The largest legitimate outputs amuxify reads back are a
+// probe of a file with thousands of chapters and tags and a text subtitle
+// track extracted as SRT for the link check, both of which stay far below
+// this for any real file. Every consumer that reads back a whole output
+// checks Result.StdoutTruncated, or OutputTruncated when it reads both
+// streams, and reports a cut rather than treating the part it kept as the
+// whole: a cut probe is an unparseable file and a cut subtitle track is
+// reported as not fully checked. Streaming runs
+// (RunStreaming) hand standard output to the caller's writer and are not
+// bounded here.
+const DefaultMaxOutput = 16 << 20
+
 // Runner locates and runs tools. Zero value is usable.
 type Runner struct {
 	// Timeout applies to every run unless RunWithTimeout is used.
@@ -56,8 +90,17 @@ type Runner struct {
 	// WaitDelay bounds the wait for the child's output pipes after the child
 	// was killed or exited; zero means DefaultWaitDelay.
 	WaitDelay time.Duration
-	// Trace, when set, receives each command line before it runs.
+	// MaxOutput bounds how many bytes of standard output and of standard
+	// error, each, a run keeps; zero means DefaultMaxOutput.
+	MaxOutput int64
+	// Trace, when set, receives each command line before it runs. With
+	// parallel jobs it is called from several goroutines at once.
 	Trace func(string)
+
+	// mu guards paths, the resolved tool locations, which several workers
+	// read and fill at the same time in a parallel run. A Runner must not
+	// be copied once it is in use.
+	mu    sync.Mutex
 	paths map[string]string
 }
 
@@ -68,11 +111,44 @@ func (r *Runner) waitDelay() time.Duration {
 	return DefaultWaitDelay
 }
 
+func (r *Runner) maxOutput() int64 {
+	if r.MaxOutput > 0 {
+		return r.MaxOutput
+	}
+	return DefaultMaxOutput
+}
+
+// capWriter keeps the first max bytes written to it and counts the rest,
+// which it accepts and drops so the writer never fails and the child never
+// stalls on a full pipe.
+type capWriter struct {
+	buf     bytes.Buffer
+	max     int64
+	dropped int64
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	room := w.max - int64(w.buf.Len())
+	keep := int64(len(p))
+	if keep > room {
+		keep = room
+	}
+	if keep > 0 {
+		w.buf.Write(p[:keep])
+	} else {
+		keep = 0
+	}
+	w.dropped += int64(len(p)) - keep
+	return len(p), nil
+}
+
 // ErrNotFound is returned when a tool is not installed.
 var ErrNotFound = errors.New("tool not found")
 
 // Path resolves a tool, honouring AMUXIFY_<TOOL> overrides, and caches it.
 func (r *Runner) Path(tool string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.paths == nil {
 		r.paths = map[string]string{}
 	}
@@ -161,12 +237,13 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 	cmd.Env = cleanEnv()
 	cmd.Stdin = nil
 	cmd.WaitDelay = r.waitDelay()
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
+	out := &capWriter{max: r.maxOutput()}
+	errb := &capWriter{max: r.maxOutput()}
+	cmd.Stdout = out
 	if stdout != nil {
 		cmd.Stdout = stdout
 	}
-	cmd.Stderr = &errb
+	cmd.Stderr = errb
 	res := &Result{Cmdline: path + " " + strings.Join(args, " ")}
 	if r.Trace != nil {
 		r.Trace(res.Cmdline)
@@ -175,9 +252,12 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 	runErr := cmd.Run()
 	res.Duration = time.Since(start)
 	if stdout == nil {
-		res.Stdout = out.Bytes()
+		res.Stdout = out.buf.Bytes()
 	}
-	res.Stderr = errb.Bytes()
+	res.Stderr = errb.buf.Bytes()
+	res.StdoutTruncated = out.dropped > 0
+	res.StderrTruncated = errb.dropped > 0
+	res.OutputTruncated = res.StdoutTruncated || res.StderrTruncated
 	if ctx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		return res, fmt.Errorf("%s: timed out after %s", tool, timeout)
@@ -190,6 +270,7 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 			var ee *osexec.ExitError
 			if errors.As(runErr, &ee) {
 				res.ExitCode = ee.ExitCode()
+				res.Status = ee.ProcessState.String()
 			}
 		}
 		return res, fmt.Errorf("%s: %w", tool, ctx.Err())
@@ -198,6 +279,7 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 		var ee *osexec.ExitError
 		if errors.As(runErr, &ee) {
 			res.ExitCode = ee.ExitCode()
+			res.Status = ee.ProcessState.String()
 			return res, nil
 		}
 		return res, fmt.Errorf("%s: %w", tool, runErr)

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amuxify/amuxify/internal/exec"
 )
@@ -39,8 +40,16 @@ type Stream struct {
 	ColorTrc     string            `json:"color_transfer,omitempty"`
 	ColorPrim    string            `json:"color_primaries,omitempty"`
 	HDR          []string          `json:"hdr,omitempty"` // hdr10 hlg dovi hdr10plus
+	Color        Color             `json:"color"`         // the full colour and HDR signalling of a video stream
 	TextSubtitle bool              `json:"text_subtitle"`
 	Tags         map[string]string `json:"tags,omitempty"`
+
+	// MkvColor is the colour signalling mkvmerge -J reported for this track
+	// on its own, before it was merged into Color. It tells the remuxer
+	// which of the values in Color mkvmerge will carry into the output
+	// header by itself and which it would drop, so the mkvmerge command
+	// line can name the rest. It is a working view, not part of the report.
+	MkvColor Color `json:"-"`
 }
 
 // Attachment is a Matroska attachment.
@@ -120,13 +129,46 @@ func (p *Prober) Probe(ctx context.Context, path string) (*MediaInfo, error) {
 	if to == 0 {
 		to = 60 * time.Second
 	}
-	res, err := p.Runner.RunWithTimeout(ctx, to, exec.FFprobe,
-		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-show_error", "--", path)
+	res, err := p.runFFprobe(ctx, to, path)
 	if err != nil {
 		return nil, err
 	}
+	if diedOnSignal(res) {
+		// ffprobe crashed. Seen on a loaded three-core host running four
+		// probes beside mkvmerge and ffmpeg: one ffprobe out of hundreds
+		// dies with a segmentation fault on a file it reads fine every
+		// other time. That is a fault in ffprobe, not in the file, and a
+		// run reports the file only for what is in it, so the probe is
+		// made once more. A file that crashes ffprobe every time is still
+		// refused, with both deaths named. The retry is safe because
+		// ffprobe only reads.
+		first := res.Status
+		if res, err = p.runFFprobe(ctx, to, path); err != nil {
+			return nil, err
+		}
+		if diedOnSignal(res) {
+			return nil, fmt.Errorf("ffprobe died twice: %s, then %s: %s", first, res.Status, lastWords(res.Stderr))
+		}
+	}
+	if res.StdoutTruncated {
+		// The runner kept only the first part of the document, which would
+		// fail to parse below; the reason is named instead so the report
+		// does not call a file unparseable for the wrong reason. Only the
+		// document on standard output counts: standard error is read for
+		// the error message alone, so a demuxer that printed diagnostics
+		// past the bound has not cost the run a complete probe.
+		return nil, fmt.Errorf("ffprobe: output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout))
+	}
 	var fp ffprobeOut
 	if jerr := json.Unmarshal(res.Stdout, &fp); jerr != nil {
+		if res.ExitCode != 0 {
+			// ffprobe writes its error document to standard output before
+			// it exits 1, so no document at all means it never got that
+			// far: it died on a signal, or failed before it could print.
+			// The way it ended and its last words say which, where a JSON
+			// parse error would only say the output stopped short.
+			return nil, fmt.Errorf("ffprobe: %s: %s", res.Status, lastWords(res.Stderr))
+		}
 		return nil, fmt.Errorf("ffprobe: unparseable output: %v", jerr)
 	}
 	if res.ExitCode != 0 || fp.Error != nil {
@@ -154,13 +196,16 @@ type ffprobeOut struct {
 		PixFmt         string            `json:"pix_fmt"`
 		ColorTransfer  string            `json:"color_transfer"`
 		ColorPrimaries string            `json:"color_primaries"`
+		ColorSpace     string            `json:"color_space"`
+		ColorRange     string            `json:"color_range"`
 		Channels       int               `json:"channels"`
 		SampleRate     string            `json:"sample_rate"`
 		Disposition    map[string]int    `json:"disposition"`
 		Tags           map[string]string `json:"tags"`
-		SideData       []struct {
-			Type string `json:"side_data_type"`
-		} `json:"side_data_list"`
+		// SideData is kept raw and decoded entry by entry, so that one
+		// malformed entry, or a list of the wrong shape, cannot make the
+		// whole probe fail or hide the other entries.
+		SideData json.RawMessage `json:"side_data_list"`
 	} `json:"streams"`
 	Chapters []struct {
 		Start string            `json:"start_time"`
@@ -210,21 +255,8 @@ func fromFFprobe(path string, fp *ffprobeOut) *MediaInfo {
 			st.TextSubtitle = textSubCodecs[s.CodecName]
 		}
 		if s.CodecType == "video" {
-			if s.ColorTransfer == "smpte2084" {
-				st.HDR = append(st.HDR, "hdr10")
-			}
-			if s.ColorTransfer == "arib-std-b67" {
-				st.HDR = append(st.HDR, "hlg")
-			}
-			for _, sd := range s.SideData {
-				t := strings.ToLower(sd.Type)
-				if strings.Contains(t, "dovi") || strings.Contains(t, "dolby vision") {
-					st.HDR = append(st.HDR, "dovi")
-				}
-				if strings.Contains(t, "hdr10+") || strings.Contains(t, "dynamic hdr") {
-					st.HDR = append(st.HDR, "hdr10plus")
-				}
-			}
+			st.HDR = hdrLabels(s.ColorTransfer, s.SideData)
+			st.Color = colorFromFFprobe(s.ColorPrimaries, s.ColorTransfer, s.ColorSpace, s.ColorRange, s.SideData)
 		}
 		m.Streams = append(m.Streams, st)
 	}
@@ -308,31 +340,96 @@ type mkvOut struct {
 		TrackID    int `json:"track_id"`
 	} `json:"track_tags"`
 	Tracks []struct {
-		ID         int    `json:"id"`
-		Type       string `json:"type"`
-		Codec      string `json:"codec"`
-		Properties struct {
-			Language        string `json:"language"`
-			LanguageIETF    string `json:"language_ietf"`
-			TrackName       string `json:"track_name"`
-			Default         bool   `json:"default_track"`
-			Forced          bool   `json:"forced_track"`
-			Commentary      bool   `json:"flag_commentary"`
-			HearingImpaired bool   `json:"flag_hearing_impaired"`
-			VisualImpaired  bool   `json:"flag_visual_impaired"`
-			Original        bool   `json:"flag_original"`
-			TextSubtitles   bool   `json:"text_subtitles"`
-			CodecID         string `json:"codec_id"`
-		} `json:"properties"`
+		ID         int           `json:"id"`
+		Type       string        `json:"type"`
+		Codec      string        `json:"codec"`
+		Properties mkvTrackProps `json:"properties"`
 	} `json:"tracks"`
+}
+
+// mkvTrackFields are the typed track properties mergeMkv reads directly.
+type mkvTrackFields struct {
+	Language        string `json:"language"`
+	LanguageIETF    string `json:"language_ietf"`
+	TrackName       string `json:"track_name"`
+	Default         bool   `json:"default_track"`
+	Forced          bool   `json:"forced_track"`
+	Commentary      bool   `json:"flag_commentary"`
+	HearingImpaired bool   `json:"flag_hearing_impaired"`
+	VisualImpaired  bool   `json:"flag_visual_impaired"`
+	Original        bool   `json:"flag_original"`
+	TextSubtitles   bool   `json:"text_subtitles"`
+	CodecID         string `json:"codec_id"`
+}
+
+// mkvTrackProps decodes the typed fields and keeps every property raw as
+// well, so the colour properties, whose keys mkvmerge has spelled two ways
+// and whose values must be validated one by one, can be read leniently
+// without a wrong type in one of them failing the whole identification.
+type mkvTrackProps struct {
+	mkvTrackFields
+	raw map[string]json.RawMessage
+}
+
+func (p *mkvTrackProps) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &p.mkvTrackFields); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(b, &p.raw)
+	return nil
 }
 
 // IdentifyMkv runs mkvmerge -J and returns the raw parsed output plus the
 // exit status. Status 1 means warnings only and is not a failure.
+func (p *Prober) runFFprobe(ctx context.Context, to time.Duration, path string) (*exec.Result, error) {
+	return p.Runner.RunWithTimeout(ctx, to, exec.FFprobe,
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-show_error", "--", path)
+}
+
+// diedOnSignal reports whether the child ended on a signal rather than
+// an exit: a crash, or a kill from outside. A run the caller cancelled
+// never reaches here, because the runner returns that as an error.
+func diedOnSignal(res *exec.Result) bool {
+	return res.ExitCode < 0 && strings.HasPrefix(res.Status, "signal:")
+}
+
+// lastWords is the last non-blank line of a tool's standard error, cut to
+// a length that fits in a finding, or "no output on standard error" when
+// there is none. Standard error is tool output and so untrusted: control
+// characters are dropped so a line cannot rewrite the terminal.
+func lastWords(stderr []byte) string {
+	const max = 200
+	lines := strings.Split(strings.TrimSpace(string(stderr)), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		return "no output on standard error"
+	}
+	last = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, last)
+	if len(last) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(last[cut]) {
+			cut--
+		}
+		last = last[:cut] + "..."
+	}
+	return last
+}
+
 func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 	res, err := p.Runner.RunWithTimeout(ctx, to, exec.MKVMerge, "-J", m.Path)
 	if err != nil {
 		m.MkvErrors = append(m.MkvErrors, err.Error())
+		return
+	}
+	if res.StdoutTruncated {
+		if m.IsMatroska() {
+			m.MkvErrors = append(m.MkvErrors, fmt.Sprintf("mkvmerge -J output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout)))
+		}
 		return
 	}
 	var mk mkvOut
@@ -415,6 +512,11 @@ func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 		s.Original = s.Original || t.Properties.Original
 		if typ == "subtitle" {
 			s.TextSubtitle = s.TextSubtitle || t.Properties.TextSubtitles
+		}
+		if typ == "video" && t.Properties.raw != nil {
+			s.MkvColor = colorFromMkv(t.Properties.raw)
+			s.Color.merge(s.MkvColor)
+			s.HDR = addLabel(s.HDR, transferLabel(s.Color.Transfer))
 		}
 	}
 }

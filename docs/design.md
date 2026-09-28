@@ -56,6 +56,40 @@ equality (packet hash, or decoded-frame hash across container families) → head
 and tail decode (or full) → fsync → place without clobber, or replace in place
 preserving identity.
 
+The HDR assertion compares more than a label. The prober reads the colour
+primaries, transfer characteristic, matrix coefficients and range, the
+mastering display chromaticity and luminance, the content light levels and
+the Dolby Vision configuration record from ffprobe's stream fields and side
+data, and fills any gap from the `mkvmerge -J` track properties, into one
+normalised `probe.Color` per video stream. Every number is validated as it is
+read; a value that is not a finite number, is negative, or is beyond what the
+format can express is recorded as malformed instead of trusted. The verifier
+compares the source and output `Color` of every kept video stream and reports
+each value that was lost, gained or changed in one `HDR_LOST` finding for the
+first stream that differs. The comparison exists because this signalling lives
+in the container header, outside the packets that the stream hashes cover, and
+a muxer can drop or alter it without changing a hash.
+
+The remuxer feeds that view back into the mkvmerge command line. mkvmerge's
+MP4 reader carries the colour primaries, transfer and matrix from the `colr`
+box, but not its range flag, and it does not read the mastering display
+(`mdcv`) and content light (`clli`) boxes at all, so a plain remux of an HDR10
+MP4 produces a Matroska file without them and the assertion fails it as
+`HDR_LOST`. For every kept video track the argument builder therefore names
+the range, the chromaticity and white point coordinates, the luminance bounds
+and the content light levels with mkvmerge's colour options whenever the
+source's ffprobe view holds a value that mkvmerge's own `-J` view of the same
+track does not. A value mkvmerge already reads is left to mkvmerge, so a
+Matroska source gets no colour options at all. Each number is written as a
+plain decimal with at most twelve fractional digits, because mkvmerge rejects
+exponent notation and misparses longer decimals, and only when that decimal
+reads back within the verifier's tolerance; otherwise the group is left out
+and the assertion reports the loss rather than passing a substitute. The
+Dolby Vision configuration record has no mkvmerge option. mkvmerge 102 carries
+the `dvcC` box from an MP4 source into a Matroska block addition mapping on
+its own, the `dovi.mp4` fixture pins that, and an older mkvmerge that drops it
+fails the file as `HDR_LOST` instead of passing silently.
+
 ## Decision flow for ingest
 
 ingest is scan plus one of remux or clean, never both on the same file, and a
@@ -95,8 +129,20 @@ implementation. ffmpeg still does the MP4, MOV and AVI metadata rewrite for
 
 ## Roadmap
 
-0.3 (this release): `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and
-Radarr, frozen report schema `amuxify.report/1`, Kodi NFO awareness, a test for
-every guarantee. 0.4: Windows, macOS notarization, parallel full verification, a
-watch mode for set-ups where the hook cannot run inside the client container.
-1.0: fixture matrix complete.
+0.3: `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and Radarr, frozen
+report schema `amuxify.report/1`, Kodi NFO awareness, a test for every
+guarantee. 0.4 (this release): HDR and Dolby Vision assertions, `--jobs` for
+parallel processing, `watch` for set-ups where the hook cannot run inside the
+client container, ClamAV polish, and the fixes carried over from 0.3. 0.5: the
+module path moves to `amuxify.com/amuxify`, served by a static page on the
+project site, so the import path no longer names the hosting provider; macOS
+notarization once an Apple developer account exists, which also removes the
+quarantine step from the Homebrew cask. 0.6: the website redone, with these
+docs rendered on amuxify.com from the files in this directory, a better
+design, and a landing page that describes the local workflow first (download
+or buy, scan, clean or remux, then move to the library) and the download-client
+hooks second; no changes to the binary. A native Windows build is not planned:
+the guarantees rest on POSIX file identity, and Windows users run the Docker
+image through Docker Desktop or the Linux binary under WSL (see
+[install.md](install.md)). 1.0: fixture matrix complete, exit codes and the
+report schema declared stable, `legacy/` removed.

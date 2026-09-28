@@ -2,7 +2,9 @@
 
 Every amuxify command writes the same report. Without `--json` the report is
 printed for a terminal, one line per file as soon as that file is finished,
-followed by the run-level errors and a count line. With `--json` nothing is
+followed by the run-level errors and a count line. Under `--jobs` the lines
+appear in the order the files finish, each file's block whole, while the JSON
+document and the count line keep walk order. With `--json` nothing is
 printed until the run is over and then exactly one JSON object followed by a
 newline is written to stdout. Errors and diagnostics go to stderr in both
 modes, so stdout can be piped straight into a parser. The hook adapters print
@@ -183,7 +185,11 @@ report.
 ## Fields
 
 The top-level object has these keys, in this order. The `command` value is one
-of `scan`, `remux`, `clean`, `ingest` or `doctor`.
+of `scan`, `remux`, `clean`, `ingest` or `doctor`. A hook run and a `watch`
+pass both report `ingest`, because that is the command they ran on the files.
+Every command writes one indented document and nothing else on stdout, except
+`watch`, which writes one complete document per pass on a single line, so its
+stdout is a sequence of newline-delimited reports.
 
 | Key | Type | Always present | Meaning |
 |---|---|---|---|
@@ -308,11 +314,11 @@ on its own.
 | `PURCHASE_ATOM` | WARN or FAIL | scan, clean | Identifying MP4 atoms; the profile decides the severity, and clean reports FAIL when they survive a rewrite. |
 | `PROVENANCE_INFO` | PASS | scan | Encoder and muxer fingerprints; shown in verbose output only. |
 | `LINK_IN_TAG` | WARN or FAIL | scan | A URL or domain in the title, tags, chapters or attachment names; `metadata.links` decides the severity. |
-| `LINK_IN_SUBS` | WARN or FAIL | scan | A URL or domain in a text subtitle track; `subtitles.links` decides the severity. |
+| `LINK_IN_SUBS` | WARN or FAIL | scan | A URL or domain in a text subtitle track, or a text subtitle track longer than the runner keeps of a tool's output (16 MiB), which was therefore not checked in full; `subtitles.links` decides the severity. |
 | `DECODE_FAIL` | FAIL | scan, remux, ingest | ffmpeg reported errors while decoding. |
 | `NO_DURATION` | WARN | scan | The container reports no duration. |
 | `CLAMAV_INFECTED` | BLOCK | scan | clamscan reported a match. |
-| `CLAMAV_ERROR` | WARN | scan | clamscan could not run or failed. |
+| `CLAMAV_ERROR` | WARN, or FAIL when the profile requires the scan | scan | clamscan could not run, ran past the timeout, exited with an error or reported the file as above its size limit, or the file is larger than 2047 MiB, which libclamav cannot scan, and clamscan was not started. Under `safety.clamav = optional` the file is still probed and verified; under `required` the scan of the file stops there and `ingest` refuses it. |
 | `CLAMAV_MISSING` | FAIL | scan | The profile requires clamscan and it is not installed. |
 | `HARDLINKED` | PASS (scan, remux copy) or WARN (remux skip or break, clean skip, ingest) | scan, remux, clean, ingest | More than one link to the inode; scan records the count in `info.nlink`. |
 | `SIDECAR_BLOCKED` | BLOCK | scan | A sidecar extension on the block list. |
@@ -325,8 +331,8 @@ on its own.
 | `UND_TRACK` | PASS | scan, remux | A track without a language tag. |
 | `AUDIO_FALLBACK` | WARN | remux | Policy would have dropped every audio track, so all were kept. |
 | `VIDEO_EXTRA` | WARN | remux, ingest | A secondary video stream was dropped. |
-| `HDR` | PASS | scan | HDR10, HLG, Dolby Vision or HDR10+ was detected. |
-| `HDR_LOST` | FAIL | remux | The output lost HDR or Dolby Vision signalling. |
+| `HDR` | PASS | scan | HDR10, HLG, Dolby Vision or HDR10+ was detected; the detail lists the colour description, mastering display, content light and Dolby Vision values that were read. |
+| `HDR_LOST` | FAIL | remux | The output lost, gained or changed HDR or Dolby Vision signalling; the message names each value that differs. |
 | `QUARANTINED` | BLOCK, or WARN when the move failed | scan | The file was moved under `--quarantine`. |
 | `REFUSED` | FAIL or BLOCK | remux, ingest | The scan verdict prevented the remux; the severity is the scan verdict. |
 | `SKIPPED` | PASS or WARN | remux, clean | There was nothing to do for this file; the message says why. |
@@ -344,5 +350,5 @@ on its own.
 | `XATTR` | PASS, or WARN when an attribute could not be removed | clean | Extended attributes were removed. |
 | `NOTHING_TO_CLEAN` | PASS | clean | The file was already clean or carries no writable metadata. |
 | `CLEAN_FAIL` | FAIL | clean | A cleaning step failed; the source is untouched. |
-| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
+| `MKVMERGE`, `MKVPROPEDIT`, `MKVEXTRACT`, `FFMPEG`, `FFPROBE`, `EXIFTOOL`, `CLAMSCAN`, `CLAMAV-DB`, `LOCALE`, `PROFILE`, `CLAMAV`, `USER`, `STATE-DIR`, `TMPDIR` | PASS, WARN or USAGE | doctor | One row per check; the message is the check's detail line. |
 | `TRACK`, `ATTACHMENT` | reserved | remux | Declared, never emitted. |
