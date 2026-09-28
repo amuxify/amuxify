@@ -1056,6 +1056,12 @@ func TestHDRFindingListsValues(t *testing.T) {
 		{"hdr10.mkv", "hdr10", []string{"primaries=bt2020", "transfer=smpte2084", "matrix=bt2020nc", "range=tv",
 			"red_x=0.708", "white_y=0.329", "min_luminance=0.0001", "max_luminance=1000", "max_cll=1000", "max_fall=400"}},
 		{"hlg.mkv", "hlg", []string{"primaries=bt2020", "transfer=arib-std-b67", "matrix=bt2020nc", "range=tv"}},
+		// The MP4 copies come through ffprobe alone for range, mastering
+		// display and content light, since mkvmerge -J does not read those
+		// boxes; the finding must still list every value.
+		{"hdr10.mp4", "hdr10", []string{"primaries=bt2020", "transfer=smpte2084", "matrix=bt2020nc", "range=tv",
+			"red_x=0.708", "white_y=0.329", "min_luminance=0.0001", "max_luminance=1000", "max_cll=1000", "max_fall=400"}},
+		{"dovi.mp4", "hdr10+dovi", []string{"primaries=bt2020", "transfer=smpte2084", "range=tv", "max_cll=1000", "dv_profile=8"}},
 	} {
 		fr := scanOne(t, s, filepath.Join(root, tc.fixture))
 		expect(t, fr, report.Pass, CodeHDR)
@@ -1134,6 +1140,9 @@ func TestCorpusVerdicts(t *testing.T) {
 		"sample.mpg":       {verdict: report.Pass},
 		"hdr10.mkv":        {verdict: report.Pass, codes: []string{CodeHDR, CodeProvenanceInfo}},
 		"hlg.mkv":          {verdict: report.Pass, codes: []string{CodeHDR, CodeProvenanceInfo}},
+		"sdr709.mp4":       {verdict: report.Pass},
+		"hdr10.mp4":        {verdict: report.Pass, codes: []string{CodeHDR}},
+		"dovi.mp4":         {verdict: report.Pass, codes: []string{CodeHDR}},
 		"links.txt":        {verdict: report.Pass, codes: []string{CodeSidecarOK}},
 		"kodi/movie.nfo":   {nfo: true},
 		"kodi/tvshow.nfo":  {nfo: true},

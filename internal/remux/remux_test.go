@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -432,6 +434,140 @@ func TestMkvmergeArgsGolden(t *testing.T) {
 	got4 := rm.mkvmergeArgs(out, m, d2)
 	if n := len(got4); got4[n-3] != "(" || got4[n-2] != "--no-video" || got4[n-1] != ")" {
 		t.Fatalf("input not bracketed: %q", got4)
+	}
+}
+
+// The command line names, per kept video track, the colour and HDR values
+// that ffprobe read and mkvmerge's own view of the track lacks, and only
+// those: a Matroska source, whose header mkvmerge copies, gets no option;
+// a value mkvmerge saw for itself is not repeated; a malformed value is
+// never written; a measured value is written in a decimal mkvmerge parses
+// and only when that decimal reads back as the value held, and a value
+// strconv would print with an exponent comes out in fixed notation, since
+// mkvmerge rejects the exponent form. Every option is a single argument
+// of the form option, "id:digits", so nothing a probe read can reach the
+// shell or split into a second option.
+func TestMkvmergeArgsCarryColourMkvmergeDrops(t *testing.T) {
+	rm, _ := newRemuxer(t, nil, mustProfile(t, "homelab"))
+	in := filepath.Join(t.TempDir(), "in.mp4")
+	full := probe.Color{
+		Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc", Range: "tv",
+		Mastering: &probe.MasteringDisplay{HasPrimaries: true, RedX: 0.708, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329,
+			HasLuminance: true, MinLuminance: 0.0001, MaxLuminance: 1000},
+		Light: &probe.ContentLight{MaxCLL: 1000, MaxFALL: 400},
+	}
+	clone := func(c probe.Color) probe.Color {
+		b, _ := json.Marshal(c)
+		var out probe.Color
+		_ = json.Unmarshal(b, &out)
+		return out
+	}
+	colrOnly := probe.Color{Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc"}
+	allOpts := []string{
+		"--colour-range", "3:1",
+		"--chromaticity-coordinates", "3:0.708,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329",
+		"--min-luminance", "3:0.0001", "--max-luminance", "3:1000",
+		"--max-content-light", "3:1000", "--max-frame-light", "3:400",
+	}
+	cases := []struct {
+		name string
+		c    probe.Color
+		mk   probe.Color
+		want []string
+	}{
+		{"mp4 with colr, mdcv and clli", full, colrOnly, allOpts},
+		{"matroska source: mkvmerge holds everything", full, clone(full), nil},
+		{"mkvmerge never ran on the file", full, probe.Color{}, allOpts},
+		{"sdr mp4 with colr", probe.Color{Primaries: "bt709", Transfer: "bt709", Matrix: "bt709", Range: "tv"}, probe.Color{Primaries: "bt709", Transfer: "bt709", Matrix: "bt709"},
+			[]string{"--colour-range", "3:1"}},
+		{"full range", probe.Color{Range: "pc"}, probe.Color{}, []string{"--colour-range", "3:2"}},
+		{"range mkvmerge already holds", probe.Color{Range: "tv"}, probe.Color{Range: "tv"}, nil},
+		{"range mkvmerge holds differently is not overridden", probe.Color{Range: "tv"}, probe.Color{Range: "pc"}, nil},
+		{"range name that is not tv or pc", probe.Color{Range: "limited;--attachments"}, probe.Color{}, nil},
+		{"nothing at all", probe.Color{}, probe.Color{}, nil},
+		{"primaries held by mkvmerge, luminance not", full, func() probe.Color {
+			c := clone(full)
+			c.Mastering.HasLuminance = false
+			return c
+		}(), []string{"--min-luminance", "3:0.0001", "--max-luminance", "3:1000"}},
+		{"luminance held by mkvmerge, primaries not", full, func() probe.Color {
+			c := clone(full)
+			c.Mastering.HasPrimaries = false
+			return c
+		}(), []string{"--chromaticity-coordinates", "3:0.708,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329"}},
+		{"light held by mkvmerge", probe.Color{Light: &probe.ContentLight{MaxCLL: 1, MaxFALL: 1}}, probe.Color{Light: &probe.ContentLight{MaxCLL: 1, MaxFALL: 1}}, nil},
+		{"only a flag set, no values", probe.Color{Mastering: &probe.MasteringDisplay{}}, probe.Color{}, nil},
+		// A malformed value is not held by the merged Color, so nothing is
+		// written for it; the verifier then compares it as malformed.
+		{"malformed on the source side", probe.Color{Range: "tv", Malformed: []string{"max_cll", "max_fall", "chromaticity_coordinates"}}, probe.Color{},
+			[]string{"--colour-range", "3:1"}},
+		// Tiny values that strconv would print with an exponent, which
+		// mkvmerge rejects, come out in fixed notation and exact: twelve
+		// fractional digits are finer than the tolerance's absolute floor,
+		// so the round trip the builder checks always holds for a value in
+		// range, and the check is what keeps that true rather than assumed.
+		{"chromaticity of a ten millionth", probe.Color{Mastering: &probe.MasteringDisplay{HasPrimaries: true, RedX: 1e-7, RedY: 0.292, GreenX: 0.17, GreenY: 0.797, BlueX: 0.131, BlueY: 0.046, WhiteX: 0.3127, WhiteY: 0.329}}, probe.Color{},
+			[]string{"--chromaticity-coordinates", "3:0.0000001,0.292,0.17,0.797,0.131,0.046", "--white-colour-coordinates", "3:0.3127,0.329"}},
+		{"luminance of three billionths", probe.Color{Mastering: &probe.MasteringDisplay{HasLuminance: true, MinLuminance: 3e-9, MaxLuminance: 1000}}, probe.Color{},
+			[]string{"--min-luminance", "3:0.000000003", "--max-luminance", "3:1000"}},
+		// The float32 noise ffprobe's rationals carry is rounded to twelve
+		// fractional digits with trailing zeros trimmed, well inside the
+		// eighteen mkvmerge parses correctly.
+		{"values with float32 noise are rounded to twelve digits", probe.Color{Mastering: &probe.MasteringDisplay{HasPrimaries: true,
+			RedX: 11878269.0 / 16777216, RedY: 4898947.0 / 16777216, GreenX: 11408507.0 / 67108864, GreenY: 13371441.0 / 16777216,
+			BlueX: 8791261.0 / 67108864, BlueY: 12348031.0 / 268435456, WhiteX: 10492471.0 / 33554432, WhiteY: 689963.0 / 2097152,
+			HasLuminance: true, MinLuminance: 209800.0 / 2098000053, MaxLuminance: 100000}}, probe.Color{},
+			[]string{"--chromaticity-coordinates", "3:0.708000004292,0.291999995708,0.170000001788,0.79699999094,0.130999997258,0.046000000089", "--white-colour-coordinates", "3:0.312700003386,0.328999996185",
+				"--min-luminance", "3:0.000099999997", "--max-luminance", "3:100000"}},
+		{"zero is written as zero", probe.Color{Mastering: &probe.MasteringDisplay{HasLuminance: true, MinLuminance: 0, MaxLuminance: 1}}, probe.Color{},
+			[]string{"--min-luminance", "3:0", "--max-luminance", "3:1"}},
+		{"content light at the 16-bit bound", probe.Color{Light: &probe.ContentLight{MaxCLL: 65535, MaxFALL: 0}}, probe.Color{},
+			[]string{"--max-content-light", "3:65535", "--max-frame-light", "3:0"}},
+	}
+	value := regexp.MustCompile(`^3:[0-9.,]+$`)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := probe.Stream{Index: 3, MkvID: 3, Type: "video", Color: tc.c, MkvColor: tc.mk}
+			got := colourArgs("3", s)
+			// Every rounded value reads back as the value held, so the
+			// verifier will accept what mkvmerge writes from it.
+			for i := 0; i+1 < len(got); i += 2 {
+				if !strings.HasPrefix(got[i], "--") || !value.MatchString(got[i+1]) {
+					t.Fatalf("option %q %q is not option, id:digits", got[i], got[i+1])
+				}
+				for _, num := range strings.Split(strings.TrimPrefix(got[i+1], "3:"), ",") {
+					if strings.ContainsAny(num, "eE") || len(num)-strings.Index(num, ".")-1 > 18 && strings.Contains(num, ".") {
+						t.Fatalf("value %q is not a decimal mkvmerge parses", num)
+					}
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("options\n got %q\nwant %q", got, tc.want)
+			}
+			// Through the whole builder the options sit with the track's
+			// other per-track options, after the flags of the other tracks.
+			m := &probe.MediaInfo{Path: in, Container: "mp4"}
+			d := &policy.Decision{Tracks: []policy.TrackAction{{Stream: s, Keep: true}, {Stream: probe.Stream{Index: 4, MkvID: 4, Type: "audio"}, Keep: true}}}
+			args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), m, d)
+			joined := strings.Join(args, "\x00")
+			if wantJoined := strings.Join(tc.want, "\x00"); len(tc.want) > 0 && !strings.Contains(joined, wantJoined) {
+				t.Fatalf("builder lacks the options: %q", args)
+			}
+			if len(tc.want) == 0 && strings.Contains(joined, "--colour") {
+				t.Fatalf("builder wrote colour options for nothing: %q", args)
+			}
+			// A dropped track gets nothing.
+			d.Tracks[0].Keep = false
+			if args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), m, d); strings.Contains(strings.Join(args, " "), "--colour") || strings.Contains(strings.Join(args, " "), "-light") {
+				t.Fatalf("a dropped track got colour options: %q", args)
+			}
+		})
+	}
+	// An audio track never gets colour options, whatever its Color holds.
+	a := probe.Stream{Index: 1, MkvID: 1, Type: "audio", Color: full}
+	d := &policy.Decision{Tracks: []policy.TrackAction{{Stream: a, Keep: true}}}
+	if args := rm.mkvmergeArgs(filepath.Join(t.TempDir(), "o.mkv"), &probe.MediaInfo{Path: in}, d); strings.Contains(strings.Join(args, " "), "--colour") {
+		t.Fatalf("an audio track got colour options: %q", args)
 	}
 }
 
