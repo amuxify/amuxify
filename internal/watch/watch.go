@@ -36,7 +36,12 @@ type Watcher struct {
 
 	// Ingest processes one settled file and returns its result. It is called
 	// only after the file has been checked again, immediately before the
-	// call, to be the same regular file at the same place in the tree.
+	// call, to be the same regular file at the same place in the tree. The
+	// context it receives carries the values of the one given to Pass but
+	// is not cancelled by it: a cancellation stops the pass before the next
+	// file, never in the middle of one, so a tool that is rebuilding or
+	// editing a file is left to finish. The per-tool timeouts still bound
+	// each call.
 	Ingest func(ctx context.Context, path string) report.FileResult
 	// Notice, when set, receives one line for each event that is not a file
 	// result: an entry that is not a regular file (a symbolic link, a FIFO,
@@ -121,7 +126,8 @@ func (w *Watcher) checkRoot() error {
 // a directory could not be read. That error is returned only when it is new
 // or different from the one returned by the previous pass, so a caller that
 // reports it does so once per change; the files that could be listed are
-// still processed. A cancelled context ends the pass between two files.
+// still processed. A cancelled context ends the pass between two files: the
+// file in progress is finished and reported, and no further file is started.
 func (w *Watcher) Pass(ctx context.Context) ([]report.FileResult, error) {
 	if w.seen == nil {
 		w.seen = map[string]*entry{}
@@ -169,6 +175,14 @@ func (w *Watcher) Pass(ctx context.Context) ([]report.FileResult, error) {
 			delete(w.seen, p)
 		}
 	}
+	// The file in progress must not be abandoned when the pass is
+	// interrupted: the tools run under exec.CommandContext, which kills the
+	// child the moment its context is cancelled, and a killed mkvpropedit
+	// leaves an in-place header edit half written with no temp file to fall
+	// back on. Each ingest therefore runs under a context that keeps the
+	// caller's values but not its cancellation; the check at the top of the
+	// loop is the only place the interrupt stops the pass.
+	fileCtx := context.WithoutCancel(ctx)
 	var out []report.FileResult
 	for _, p := range candidates {
 		if ctx.Err() != nil {
@@ -183,7 +197,7 @@ func (w *Watcher) Pass(ctx context.Context) ([]report.FileResult, error) {
 			delete(w.seen, p)
 			continue
 		}
-		fr := w.Ingest(ctx, p)
+		fr := w.Ingest(fileCtx, p)
 		out = append(out, fr)
 		w.record(p, e)
 	}
