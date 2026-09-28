@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/amuxify/amuxify/internal/report"
@@ -111,16 +113,27 @@ func (e *SABnzbdArgError) Error() string { return e.Reason }
 // exactly 0 and refuses to guess when the wrapper dropped it.
 //
 // When SAB_COMPLETE_DIR is set the job is read from the environment, and
-// the count and the status are all that is checked. Without it the job is
-// read from the positionals, and one more shape is refused: a directory
-// written in front of an older SABnzbd's seven parameters, which has the
-// right count and would otherwise be ingested in place of the job's own
-// directory, in silence. The tell is the second parameter. SABnzbd's is
-// the name of the original NZB file, never a directory, so an existing
-// directory there, or a symlink to one, means a directory was written in
-// front. The first parameter is not inspected, because the stray directory
-// may be a symlink or may not exist yet and either would let the shifted
-// shape through.
+// the count and the status are all that is checked. Every SABnzbd that sets
+// the variable also passes all eight parameters, so seven in this form is
+// refused too: the usual cause is a flag that takes a value written before
+// "$@" in the wrapper, which swallows the job directory and shifts the rest
+// one place left, and the shifted values must not be read as a job.
+//
+// Without SAB_COMPLETE_DIR the job is read from the positionals, seven are
+// accepted as an older SABnzbd's call, and one more shape is refused: a
+// directory written in front of an older SABnzbd's seven parameters, which
+// has the right count and would otherwise be ingested in place of the
+// job's own directory, in silence. The tell is the second parameter. In the
+// shifted shape it holds the directory SABnzbd passed first, which SABnzbd
+// always writes as an absolute path, so an existing directory there, or a
+// symlink to one, means a directory was written in front. SABnzbd's own
+// second parameter is the name of the original NZB file, a bare name with
+// no path separator that the indexer chose, and it is not looked up at all:
+// only a value that is absolute or contains a separator is checked, so an
+// indexer cannot have a job refused by naming an NZB after a directory in
+// the script's working directory. The first parameter is not inspected,
+// because the stray directory may be a symlink or may not exist yet and
+// either would let the shifted shape through.
 //
 // No other position is looked up on disk, and none at all in the
 // environment form. In particular the eighth parameter, the failure URL, is
@@ -131,15 +144,21 @@ func (e *SABnzbdArgError) Error() string { return e.Reason }
 // read as the failure URL and ignored, which still leaves the job's own
 // directory scanned. Every value is otherwise taken as data.
 func CheckSABnzbdArgs(env, args []string) error {
+	dir, _ := Lookup(env, "SAB_COMPLETE_DIR")
 	switch len(args) {
 	case 0:
 		return nil
-	case SABnzbdParamsWithoutURL, SABnzbdParams:
+	case SABnzbdParams:
+	case SABnzbdParamsWithoutURL:
+		if dir != "" {
+			return &SABnzbdArgError{Reason: fmt.Sprintf(
+				"SABnzbd set SAB_COMPLETE_DIR and passes eight parameters, got %d beginning with %q; a flag that takes a value written before \"$@\" in the wrapper swallows the first one", len(args), args[0])}
+		}
 	default:
 		return &SABnzbdArgError{Arg: strayArg(args), Reason: fmt.Sprintf(
 			"expected no positional arguments or SABnzbd's seven or eight parameters, got %d beginning with %q", len(args), args[0])}
 	}
-	if dir, _ := Lookup(env, "SAB_COMPLETE_DIR"); dir == "" && isDir(args[sabNZBName]) {
+	if dir == "" && isPath(args[sabNZBName]) && isDir(args[sabNZBName]) {
 		return &SABnzbdArgError{Arg: args[sabDir], Reason: fmt.Sprintf(
 			"%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", args[sabNZBName])}
 	}
@@ -151,22 +170,28 @@ func CheckSABnzbdArgs(env, args []string) error {
 
 // strayArg names the argument a wrapper added to a wrong count when the
 // values alone tell where it is: the only argument when there is one, and
-// for nine, one more than SABnzbd's eight, the first or the last. SABnzbd's
-// eighth parameter is empty or a URL and its seventh, the status, is
-// neither, so a last argument of that shape means the stray is first, and
-// an eighth of that shape means the stray is last. Any other count, and a
-// nine whose values fit neither reading, names nothing. Nothing is looked
-// up on disk, so no value SABnzbd itself passed can be named: an indexer
-// that puts a bare path in the failure URL only costs the hint.
+// for nine, one more than SABnzbd's eight, the first or the last. Each
+// reading is accepted only when the status lands where that reading puts
+// it. SABnzbd's eighth parameter is empty or a URL and its seventh, the
+// status, is a number, so a last argument of the eighth's shape with a
+// number before it means the stray is first, and an eighth of that shape
+// with a number before it means the stray is last. The first reading also
+// requires that the seventh argument is not a number: under the second
+// reading it is the status, so an indexer cannot make the first reading
+// fit by sending a number as the failure URL when the wrapper appended an
+// empty argument. Any other count, and a nine whose values fit neither
+// reading, names nothing. Nothing is looked up on disk, so no value SABnzbd
+// itself passed can be named: an indexer that puts a bare path in the
+// failure URL only costs the hint.
 func strayArg(args []string) string {
 	switch len(args) {
 	case 1:
 		return args[0]
 	case SABnzbdParams + 1:
 		switch {
-		case isFailURL(args[SABnzbdParams]):
+		case isFailURL(args[SABnzbdParams]) && isStatus(args[sabFailURL]) && !isStatus(args[sabStatus]):
 			return args[0]
-		case isFailURL(args[sabFailURL]):
+		case isFailURL(args[sabFailURL]) && isStatus(args[sabStatus]):
 			return args[SABnzbdParams]
 		}
 	}
@@ -181,6 +206,20 @@ func isFailURL(s string) bool {
 	}
 	u, err := url.Parse(s)
 	return err == nil && u.Scheme != "" && u.Host != ""
+}
+
+// isStatus reports whether s has the shape of SABnzbd's seventh parameter,
+// the post-processing status, which is a small integer such as 0 or -1.
+func isStatus(s string) bool {
+	_, err := strconv.Atoi(s)
+	return err == nil
+}
+
+// isPath reports whether s is written as a path rather than a bare name:
+// it is absolute or contains a path separator. SABnzbd's job directory is
+// always absolute; its NZB name never contains a separator.
+func isPath(s string) bool {
+	return filepath.IsAbs(s) || strings.ContainsRune(s, '/') || strings.ContainsRune(s, filepath.Separator)
 }
 
 // isDir reports whether path names an existing directory, following a

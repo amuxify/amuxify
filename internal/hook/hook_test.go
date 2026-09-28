@@ -170,6 +170,28 @@ func TestParseSABnzbd(t *testing.T) {
 			t.Errorf("err %v", err)
 		}
 	})
+	t.Run("env with seven positionals is a wrapper mistake, not an older SABnzbd", func(t *testing.T) {
+		// A SABnzbd that sets SAB_COMPLETE_DIR passes eight parameters. Seven
+		// is what remains when a flag that takes a value stands before "$@"
+		// in the wrapper and swallows the job directory; the shifted values
+		// put the failure URL in the status slot, so a job whose indexer set
+		// one would otherwise run, and the category slot holds the report
+		// number. The job is refused whatever the environment says.
+		shifted := []string{"Show.nzb", "Show", "1", "tv", "alt.binaries", "0", "https://indexer/fail/1"}
+		_, err := Parse(SABnzbd, []string{"SAB_COMPLETE_DIR=/dl/Job", "SAB_PP_STATUS=0", "SAB_CAT=tv"}, shifted)
+		want := `SABnzbd set SAB_COMPLETE_DIR and passes eight parameters, got 7 beginning with "Show.nzb"; a flag that takes a value written before "$@" in the wrapper swallows the first one`
+		if err == nil || err.Error() != want {
+			t.Errorf("err %v", err)
+		}
+		var ae *SABnzbdArgError
+		if !errors.As(err, &ae) || ae.Arg != "" {
+			t.Errorf("%T names %q", err, ae.Arg)
+		}
+		// The same seven without the environment are an older SABnzbd's call.
+		if j, err := Parse(SABnzbd, nil, eight[:7]); err != nil || j.Paths[0] != "/argv/dir" {
+			t.Errorf("%+v %v", j, err)
+		}
+	})
 	t.Run("env wins over argv", func(t *testing.T) {
 		args := append([]string(nil), eight...)
 		args[6] = "1"
@@ -192,7 +214,12 @@ func TestParseSABnzbd(t *testing.T) {
 // the job's own directory, and the hint that names a stray must never name
 // a value SABnzbd itself passed, since an indexer influences those. The
 // rows run in both forms: with SAB_COMPLETE_DIR set only the count and the
-// status are checked, without it the shifted shape is refused too.
+// status are checked, and seven is a wrong count because a SABnzbd that
+// sets the variable passes eight; without it seven is an older SABnzbd's
+// call and the shifted shape is refused too. The test runs in a working
+// directory that holds a subdirectory named like the NZB, so that a row's
+// NZB name is only ever refused for what it is, never for what the working
+// directory happens to contain.
 func TestCheckSABnzbdArgs(t *testing.T) {
 	dir := t.TempDir()
 	stray := t.TempDir()
@@ -205,6 +232,16 @@ func TestCheckSABnzbdArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(dir, "missing")
+	// The working directory holds a directory named like the NZB, one named
+	// with a relative path, and one at the stray directory's base name, so
+	// that a bare NZB name is never resolved against it.
+	cwd := t.TempDir()
+	for _, sub := range []string{"job.nzb", filepath.Join("rel", "dir"), filepath.Base(stray)} {
+		if err := os.MkdirAll(filepath.Join(cwd, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(cwd)
 	seven := []string{dir, "job.nzb", "Job", "1", "tv", "alt.binaries", "0"}
 	eight := append(append([]string(nil), seven...), "")
 	with := func(base []string, i int, v string) []string {
@@ -216,6 +253,9 @@ func TestCheckSABnzbdArgs(t *testing.T) {
 	count := func(n int, first string) string {
 		return fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got %d beginning with %q", n, first)
 	}
+	sevenEnv := func(first string) string {
+		return fmt.Sprintf("SABnzbd set SAB_COMPLETE_DIR and passes eight parameters, got 7 beginning with %q; a flag that takes a value written before \"$@\" in the wrapper swallows the first one", first)
+	}
 	shifted := func(second string) string {
 		return fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", second)
 	}
@@ -224,49 +264,56 @@ func TestCheckSABnzbdArgs(t *testing.T) {
 		name string
 		args []string
 		arg  string // the argument a usage message should name, "" for none
-		err  string // "" means accepted
-		env  string // "" means the same in both forms; "argv" means refused only without SAB_COMPLETE_DIR
+		argv string // the error without SAB_COMPLETE_DIR; "" means accepted
+		env  string // the error with SAB_COMPLETE_DIR set; "" means accepted
 	}{
 		{"none", nil, "", "", ""},
-		{"seven", seven, "", "", ""},
+		{"seven", seven, "", "", sevenEnv(dir)},
 		{"eight", eight, "", "", ""},
 		{"eight with a failure URL", with(eight, 7, "https://indexer/report/1"), "", "", ""},
-		{"seven with a missing directory", with(seven, 0, missing), "", "", ""},
+		{"seven with a missing directory", with(seven, 0, missing), "", "", sevenEnv(missing)},
 		{"eight with a file where the NZB name goes", with(eight, 1, file), "", "", ""},
 		{"eight with a missing path where the NZB name goes", with(eight, 1, missing), "", "", ""},
-		{"one directory", []string{dir}, dir, count(1, dir), ""},
-		{"a directory named --quarantine", []string{"--quarantine"}, "--quarantine", count(1, "--quarantine"), ""},
-		{"six names nothing: the stray cannot be told", seven[:6], "", count(6, dir), ""},
-		{"ten names nothing: the stray cannot be told", after(after(eight, stray), stray), "", count(10, dir), ""},
-		{"nine: a directory before eight names the first", append([]string{stray}, eight...), stray, count(9, stray), ""},
-		{"nine: a directory before eight with a failure URL names the first", append([]string{stray}, with(eight, 7, "https://indexer/report/1")...), stray, count(9, stray), ""},
-		{"nine: a directory after eight names the last, not the job directory", after(eight, stray), stray, count(9, dir), ""},
-		{"nine: a directory after eight with a failure URL names the last", after(with(eight, 7, "https://indexer/report/1"), stray), stray, count(9, dir), ""},
-		{"nine: a missing path after eight names the last", after(eight, missing), missing, count(9, dir), ""},
-		{"nine: a bare path as the failure URL and a directory after names nothing", after(with(eight, 7, "/"), stray), "", count(9, dir), ""},
-		{"nine: a directory before and a bare path as the failure URL names nothing", append([]string{stray}, with(eight, 7, "/")...), "", count(9, stray), ""},
-		{"nine: a scheme without a host is not a URL", append([]string{stray}, with(eight, 7, "c:/q")...), "", count(9, stray), ""},
-		{"a directory before seven", append([]string{missing}, seven...), missing, shifted(dir), "argv"},
-		{"a symlink to a directory before seven", append([]string{missing}, with(seven, 0, link)...), missing, shifted(link), "argv"},
+		{"one directory", []string{dir}, dir, count(1, dir), count(1, dir)},
+		{"a directory named --quarantine", []string{"--quarantine"}, "--quarantine", count(1, "--quarantine"), count(1, "--quarantine")},
+		{"six names nothing: the stray cannot be told", seven[:6], "", count(6, dir), count(6, dir)},
+		{"ten names nothing: the stray cannot be told", after(after(eight, stray), stray), "", count(10, dir), count(10, dir)},
+		{"nine: a directory before eight names the first", append([]string{stray}, eight...), stray, count(9, stray), count(9, stray)},
+		{"nine: a directory before eight with a failure URL names the first", append([]string{stray}, with(eight, 7, "https://indexer/report/1")...), stray, count(9, stray), count(9, stray)},
+		{"nine: a directory after eight names the last, not the job directory", after(eight, stray), stray, count(9, dir), count(9, dir)},
+		{"nine: a directory after eight with a failure URL names the last", after(with(eight, 7, "https://indexer/report/1"), stray), stray, count(9, dir), count(9, dir)},
+		{"nine: a missing path after eight names the last", after(eight, missing), missing, count(9, dir), count(9, dir)},
+		{"nine: a bare path as the failure URL and a directory after names nothing", after(with(eight, 7, "/"), stray), "", count(9, dir), count(9, dir)},
+		{"nine: a bare path as the failure URL and an empty argument after names nothing", after(with(eight, 7, "/"), ""), "", count(9, dir), count(9, dir)},
+		{"nine: a number as the failure URL and an empty argument after names nothing", after(with(eight, 7, "0"), ""), "", count(9, dir), count(9, dir)},
+		{"nine: a number as the failure URL and a URL after names nothing", after(with(eight, 7, "-1"), "https://indexer/report/1"), "", count(9, dir), count(9, dir)},
+		{"nine: a directory before and a bare path as the failure URL names nothing", append([]string{stray}, with(eight, 7, "/")...), "", count(9, stray), count(9, stray)},
+		{"nine: a directory before eight with a status that is not a number names nothing", append([]string{stray}, with(eight, 6, "0x")...), "", count(9, stray), count(9, stray)},
+		{"nine: a directory after eight with a status that is not a number names nothing", after(with(eight, 6, "ok"), stray), "", count(9, dir), count(9, dir)},
+		{"nine: a scheme without a host is not a URL", append([]string{stray}, with(eight, 7, "c:/q")...), "", count(9, stray), count(9, stray)},
+		{"a directory before seven", append([]string{missing}, seven...), missing, shifted(dir), ""},
+		{"a symlink to a directory before seven", append([]string{missing}, with(seven, 0, link)...), missing, shifted(link), ""},
+		{"a relative directory before seven", append([]string{missing}, with(seven, 0, filepath.Join("rel", "dir"))...), missing, shifted(filepath.Join("rel", "dir")), ""},
+		{"an NZB named like the stray directory's base name is not looked up", with(eight, 1, filepath.Base(stray)), "", "", ""},
+		{"an NZB named . is not looked up", with(eight, 1, "."), "", "", ""},
+		{"an NZB named .. is not looked up", with(eight, 1, ".."), "", "", ""},
 		{"a directory after seven is the failure URL and is not inspected", after(seven, stray), "", "", ""},
 		{"a symlink to a directory after seven is not inspected", after(seven, link), "", "", ""},
-		{"seven with an empty status", with(seven, 6, ""), "", emptyStatus, ""},
-		{"eight with an empty status", with(eight, 6, ""), "", emptyStatus, ""},
+		{"seven with an empty status", with(seven, 6, ""), "", emptyStatus, sevenEnv(dir)},
+		{"eight with an empty status", with(eight, 6, ""), "", emptyStatus, emptyStatus},
 		{"a NUL where the NZB name goes is data, not a directory", with(eight, 1, dir+"\x00"), "", "", ""},
 		{"a newline where the failure URL goes is data", with(eight, 7, dir+"\n"), "", "", ""},
 	}
 	for _, tc := range tests {
 		for _, env := range [][]string{nil, {"SAB_COMPLETE_DIR=" + dir, "SAB_PP_STATUS=0"}} {
 			form := "argv"
+			wantErr := tc.argv
 			if env != nil {
 				form = "env"
+				wantErr = tc.env
 			}
 			t.Run(tc.name+" ("+form+")", func(t *testing.T) {
 				err := CheckSABnzbdArgs(env, tc.args)
-				wantErr := tc.err
-				if tc.env == "argv" && env != nil {
-					wantErr = ""
-				}
 				if wantErr == "" {
 					if err != nil {
 						t.Fatalf("refused: %v", err)
