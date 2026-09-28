@@ -78,8 +78,10 @@ func validateIngestEnums(o *ingestOpts, cmd string) string {
 
 // newIngester wires Scanner{VerifyTier:"none", Quarantine}, Remuxer{InPlace:true, ...},
 // Cleaner{...}. It returns an error for effective tier none and for a missing
-// mkvpropedit; the caller turns it into a usage error.
-func (g *Global) newIngester(t *tools, o ingestOpts) (*ingest.Ingester, error) {
+// mkvpropedit; the caller turns it into a usage error. jobs is how many
+// files the ingester works on at once; the ingest command passes --jobs and
+// the hook adapters pass one.
+func (g *Global) newIngester(t *tools, o ingestOpts, jobs int) (*ingest.Ingester, error) {
 	if o.tier == "none" {
 		return nil, errors.New("ingest: in-place writes require verification; verify tier none is refused (from --verify)")
 	}
@@ -103,7 +105,7 @@ func (g *Global) newIngester(t *tools, o ingestOpts) (*ingest.Ingester, error) {
 	return &ingest.Ingester{
 		Scanner: sc, Remuxer: rm, Cleaner: cl, Verifier: t.verifier, Profile: t.profile,
 		VerifyTier: o.tier, Hardlinks: o.hardlinks, Force: o.force, Original: o.original,
-		RemoveBlockedSidecars: o.removeSidecars,
+		RemoveBlockedSidecars: o.removeSidecars, Jobs: jobs,
 	}, nil
 }
 
@@ -128,7 +130,7 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 	fs := g.subFlags("ingest")
 	var o ingestOpts
 	g.ingestFlags(fs, &o, true)
-	if err := fs.Parse(args); err != nil {
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if msg := validateIngestOpts(&o, "ingest", fs.Args()); msg != "" {
@@ -143,7 +145,7 @@ func (g *Global) ingest(ctx context.Context, args []string) int {
 	if err != nil {
 		return g.usageErr("%v", err)
 	}
-	in, err := g.newIngester(t, o)
+	in, err := g.newIngester(t, o, g.Jobs)
 	if err != nil {
 		return g.usageErr("%v", err)
 	}

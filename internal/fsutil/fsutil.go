@@ -35,6 +35,17 @@ func Nlink(fi os.FileInfo) uint64 {
 	return 1
 }
 
+// InodeKey names the inode of a file that has more than one hard link, as
+// "device:inode", and returns "" for a file with a single name or when the
+// platform does not expose the numbers. A parallel run uses it to keep two
+// names of one file from being processed at the same time.
+func InodeKey(fi os.FileInfo) string {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+		return fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+	}
+	return ""
+}
+
 // ErrExists is returned by PlaceNoClobber when the destination exists.
 var ErrExists = errors.New("destination already exists")
 

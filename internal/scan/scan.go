@@ -20,6 +20,7 @@ import (
 	"github.com/amuxify/amuxify/internal/fsutil"
 	"github.com/amuxify/amuxify/internal/mp4"
 	"github.com/amuxify/amuxify/internal/policy"
+	"github.com/amuxify/amuxify/internal/pool"
 	"github.com/amuxify/amuxify/internal/probe"
 	"github.com/amuxify/amuxify/internal/report"
 	"github.com/amuxify/amuxify/internal/sniff"
@@ -43,8 +44,18 @@ type Scanner struct {
 	// Quarantine, when set, moves BLOCK files under this directory.
 	Quarantine string
 	// Progress, when set, receives each result as soon as the file is done.
+	// With Jobs above one it is called from several goroutines, one file at
+	// a time each, so it must be safe to call concurrently.
 	Progress func(Result)
 	Trace    func(string)
+	// Jobs is the number of files ScanPath works on at once; zero or one
+	// means one after the other in walk order.
+	Jobs int
+
+	// claims holds the quarantine destinations this run has taken, so two
+	// files that would be moved to the same place, from two workers or
+	// from two roots, produce exactly one quarantined file (guarantee 1).
+	claims pool.Claims
 }
 
 // MediaExts are extensions treated as media to be probed.
@@ -96,18 +107,46 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 	// walkErr; those are reported at run level after the readable files.
 	// A quarantine directory inside the tree is not entered.
 	paths, walkErr := Walk(abs, QuarantineExcludes(s.Quarantine)...)
-	var out []Result
-	for _, p := range paths {
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		r := s.ScanFile(ctx, p, scanRoot)
+	keys := make([][]string, len(paths))
+	for i, p := range paths {
+		keys[i] = s.SerialKeys(p, scanRoot)
+	}
+	results := make([]Result, len(paths))
+	ran := pool.Run(ctx, s.Jobs, len(paths), keys, func(i int) {
+		r := s.ScanFile(ctx, paths[i], scanRoot)
 		if s.Progress != nil {
 			s.Progress(r)
 		}
-		out = append(out, r)
+		results[i] = r
+	})
+	var out []Result
+	for i, ok := range ran {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	if len(out) < len(paths) {
+		return out, ctx.Err()
 	}
 	return out, walkErr
+}
+
+// SerialKeys lists what keeps path from being scanned beside another file
+// of the same walk when Jobs is above one: its inode when it has other hard
+// links, so two names of one file are handled one after the other, and the
+// place quarantine would move it to, spelled in lower case, so two files
+// that map to one quarantine destination are decided in walk order.
+func (s *Scanner) SerialKeys(path, root string) []string {
+	var keys []string
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if k := fsutil.InodeKey(fi); k != "" {
+			keys = append(keys, "inode:"+k)
+		}
+	}
+	if s.Quarantine != "" {
+		keys = append(keys, "quarantine:"+strings.ToLower(s.quarantineDest(path, root)))
+	}
+	return keys
 }
 
 // ScanFile scans one file. root is used for quarantine tree mirroring.
@@ -409,6 +448,16 @@ func (s *Scanner) checkMP4(fr *report.FileResult, path string) {
 	}
 }
 
+// sortedKeys returns the keys of m in sorted order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *probe.MediaInfo) {
 	sev := report.Warn
 	if s.Profile.Metadata.Links == "fail" {
@@ -420,17 +469,19 @@ func (s *Scanner) checkLinks(ctx context.Context, fr *report.FileResult, info *p
 			hits = append(hits, where+": "+l)
 		}
 	}
+	// Tags are maps; their keys are visited in sorted order so the finding
+	// reads the same on every run of the same file.
 	add("title", info.Title)
-	for k, v := range info.Tags {
-		add("tag "+k, v)
+	for _, k := range sortedKeys(info.Tags) {
+		add("tag "+k, info.Tags[k])
 	}
 	for _, st := range info.Streams {
 		add(fmt.Sprintf("stream #%d title", st.Index), st.Title)
-		for k, v := range st.Tags {
+		for _, k := range sortedKeys(st.Tags) {
 			if strings.EqualFold(k, "title") || strings.EqualFold(k, "language") {
 				continue
 			}
-			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), v)
+			add(fmt.Sprintf("stream #%d tag %s", st.Index, k), st.Tags[k])
 		}
 	}
 	for i, c := range info.Chapters {
@@ -560,6 +611,21 @@ func (s *Scanner) clamTimeout() time.Duration {
 // a profile that requires the scan must not let a file through that was
 // never scanned, and both a short --timeout and a scanner without a
 // signature database would otherwise turn "required" into a pass.
+
+// MaxClamScans is how many clamscan processes amuxify runs at the same time
+// in one process, whatever --jobs says. clamscan loads the whole signature
+// database on every start, which takes well over a gigabyte of memory and
+// tens of seconds, so one process per worker would exhaust the memory of
+// most hosts long before the disks were busy. A worker whose file is due
+// for clamscan waits for a slot; the other checks of the other workers go
+// on meanwhile.
+const MaxClamScans = 1
+
+// clamSlots is the process-wide gate that enforces MaxClamScans. It is one
+// for the whole process rather than one per Scanner because ingest and the
+// hook adapters build their own Scanner and the memory is shared either way.
+var clamSlots = make(chan struct{}, MaxClamScans)
+
 func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string) bool {
 	mode := s.Profile.Safety.ClamAV
 	if s.ClamAV && mode == "off" {
@@ -578,6 +644,15 @@ func (s *Scanner) clamav(ctx context.Context, fr *report.FileResult, path string
 	sev, stop := report.Warn, false
 	if mode == "required" {
 		sev, stop = report.Fail, true
+	}
+	// The wait for a slot gives up when the run is cancelled, so an
+	// interrupt is not held behind another worker's clamscan.
+	select {
+	case clamSlots <- struct{}{}:
+		defer func() { <-clamSlots }()
+	case <-ctx.Done():
+		fr.Addf(CodeClamError, sev, "%v", ctx.Err())
+		return stop
 	}
 	res, err := s.Runner.RunWithTimeout(ctx, s.clamTimeout(), exec.ClamScan, "--no-summary", "--infected", "--", path)
 	if err != nil {
@@ -842,8 +917,11 @@ func CheckQuarantineRoot(root, quarantine string) error {
 	return nil
 }
 
-func (s *Scanner) quarantine(fr *report.FileResult, root string) {
-	rel, err := filepath.Rel(root, fr.Path)
+// quarantineDest is the place under the quarantine directory that path,
+// found under root, is moved to: its path relative to root, or its base
+// name when it does not sit under root.
+func (s *Scanner) quarantineDest(path, root string) string {
+	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "" || rel == "." || escapes(rel) {
 		// A caller that hands the file itself as the root, or a root the
 		// file does not sit under, still gets the file placed under the
@@ -851,13 +929,29 @@ func (s *Scanner) quarantine(fr *report.FileResult, root string) {
 		// the quarantine root itself. The test is on the first path
 		// component, so a directory whose name merely starts with two dots
 		// keeps its mirrored place.
-		rel = filepath.Base(fr.Path)
+		rel = filepath.Base(path)
 	}
-	dest := filepath.Join(s.Quarantine, rel)
+	return filepath.Join(s.Quarantine, rel)
+}
+
+func (s *Scanner) quarantine(fr *report.FileResult, root string) {
+	dest := s.quarantineDest(fr.Path, root)
 	if dest == filepath.Clean(s.Quarantine) {
 		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %s has no usable file name", fr.Path)
 		return
 	}
+	// The destination is claimed while it is being created: a second
+	// worker of the same run that maps to the same place at the same time
+	// is refused here with the words the move primitive uses for a file
+	// that is already there, so the two never race for one name. The claim
+	// is given back afterwards in every case, because from then on the
+	// disk itself tells a later file that the place is taken, and the move
+	// primitive never replaces what sits there (guarantee 1).
+	if !s.claims.Claim(dest) {
+		fr.Addf(CodeQuarantined, report.Warn, "quarantine failed: %v", fsutil.ErrExists)
+		return
+	}
+	defer s.claims.Release(dest)
 	// Create the mirrored directory chain without following symlinks so a
 	// planted link inside the quarantine tree cannot redirect the file
 	// elsewhere (guarantee 3).

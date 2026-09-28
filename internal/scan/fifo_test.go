@@ -77,7 +77,7 @@ func TestNamedPipeInputRefused(t *testing.T) {
 			if fr.Has(CodeEmpty) || fr.Has(CodeSymlink) {
 				t.Errorf("%s: %v", fr.Path, codes(fr))
 			}
-			if f, ok := finding(fr, CodeUnreadable); !ok || !strings.Contains(f.Message, "named pipe") {
+			if f, ok := findingOK(fr, CodeUnreadable); !ok || !strings.Contains(f.Message, "named pipe") {
 				t.Errorf("%s: the finding does not name the pipe: %+v", fr.Path, f)
 			}
 			if fi, err := os.Lstat(fr.Path); err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
@@ -101,7 +101,7 @@ func TestNamedPipeInputRefused(t *testing.T) {
 	expect(t, res[0].File, report.Fail, CodeUnreadable)
 }
 
-func finding(fr report.FileResult, code string) (report.Finding, bool) {
+func findingOK(fr report.FileResult, code string) (report.Finding, bool) {
 	for _, f := range fr.Findings {
 		if f.Code == code {
 			return f, true

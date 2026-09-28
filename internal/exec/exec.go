@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,8 +82,14 @@ type Runner struct {
 	// MaxOutput bounds how many bytes of standard output and of standard
 	// error, each, a run keeps; zero means DefaultMaxOutput.
 	MaxOutput int64
-	// Trace, when set, receives each command line before it runs.
+	// Trace, when set, receives each command line before it runs. With
+	// parallel jobs it is called from several goroutines at once.
 	Trace func(string)
+
+	// mu guards paths, the resolved tool locations, which several workers
+	// read and fill at the same time in a parallel run. A Runner must not
+	// be copied once it is in use.
+	mu    sync.Mutex
 	paths map[string]string
 }
 
@@ -129,6 +136,8 @@ var ErrNotFound = errors.New("tool not found")
 
 // Path resolves a tool, honouring AMUXIFY_<TOOL> overrides, and caches it.
 func (r *Runner) Path(tool string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.paths == nil {
 		r.paths = map[string]string{}
 	}
