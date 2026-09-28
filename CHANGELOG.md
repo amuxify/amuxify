@@ -145,6 +145,12 @@ All notable changes to amuxify will be documented in this file.
 
 ### Fixed
 
+- An ffprobe that died before it printed its document, on a signal or on a
+  failure it could not report, made the file `UNPARSEABLE` with the message
+  "unexpected end of JSON input". The message now says how ffprobe ended
+  ("signal: killed", "exit status 1") and quotes its last line on standard
+  error, so a probe lost on a loaded host is told apart from a file ffprobe
+  could not read.
 - A named pipe planted at a path amuxify opens could stall a run for as long
   as the planter liked, because opening a pipe waits for a peer. Every open
   of an input file, a sidecar, the quarantine source and destination, and
