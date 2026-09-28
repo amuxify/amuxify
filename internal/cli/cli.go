@@ -85,7 +85,7 @@ func (g *Global) bind(fs *flag.FlagSet) {
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "directory for quarantine and run logs")
 	fs.BoolVar(&g.AllowRoot, "allow-root", g.AllowRoot, "run even as root (files would be root-owned)")
 	fs.BoolVar(&g.Trace, "trace", g.Trace, "print every external command line to stderr")
-	fs.IntVar(&g.Jobs, "jobs", g.Jobs, "files to process at the same time, 1 to 64; hook always uses 1")
+	fs.IntVar(&g.Jobs, "jobs", g.Jobs, "files to process at the same time, 1 to 64; hook and watch always use 1")
 }
 
 // parse parses args with fs and then checks the global values the flag

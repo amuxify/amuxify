@@ -135,7 +135,10 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) ([]Result, error) {
 // of the same walk when Jobs is above one: its inode when it has other hard
 // links, so two names of one file are handled one after the other, and the
 // place quarantine would move it to, spelled in lower case, so two files
-// that map to one quarantine destination are decided in walk order.
+// that map to one quarantine destination are decided in walk order. A
+// quarantine name that holds a character outside ASCII also keys its
+// directory, for the filesystems that treat two Unicode spellings of one
+// name as one entry; pool.PathKeys explains the rule.
 func (s *Scanner) SerialKeys(path, root string) []string {
 	var keys []string
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
@@ -144,7 +147,7 @@ func (s *Scanner) SerialKeys(path, root string) []string {
 		}
 	}
 	if s.Quarantine != "" {
-		keys = append(keys, "quarantine:"+strings.ToLower(s.quarantineDest(path, root)))
+		keys = append(keys, pool.PathKeys("quarantine", s.quarantineDest(path, root))...)
 	}
 	return keys
 }

@@ -17,7 +17,7 @@ help:
 		'  make build          Build ./bin/amuxify for this machine' \
 		'  make test           go vet + go test' \
 		'  make test-fixtures  Generate fixtures once, then go test' \
-		'  make test-required  Same, failing instead of skipping when tools are missing' \
+		'  make test-required  Same under the race detector, failing instead of skipping when tools are missing' \
 		'  make fixtures       Generate the fixture corpus into $(FIXTURES)' \
 		'  make install        Install the binary under PREFIX (default /usr/local)' \
 		'  make docker         Build the container image locally' \
@@ -39,8 +39,11 @@ test: vet
 test-fixtures: fixtures
 	AMUXIFY_FIXTURES="$(abspath $(FIXTURES))" $(GO) test ./...
 
+# CI runs this target on both platforms. The race detector is on because the
+# --jobs work guards shared state with locks and the tests that exercise
+# those locks only prove anything when an unsynchronised access is reported.
 test-required: fixtures
-	AMUXIFY_FIXTURES="$(abspath $(FIXTURES))" AMUXIFY_REQUIRE_TOOLS=1 $(GO) test ./...
+	AMUXIFY_FIXTURES="$(abspath $(FIXTURES))" AMUXIFY_REQUIRE_TOOLS=1 $(GO) test -race ./...
 
 fixtures:
 	@rm -rf "$(FIXTURES)"
