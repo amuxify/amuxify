@@ -66,11 +66,18 @@ var MediaExts = map[string]string{
 	"mp3": "audio", "flac": "audio", "wav": "audio", "aac": "audio", "m4a": "audio", "ogg": "audio", "oga": "audio", "opus": "audio", "wma": "audio",
 }
 
-// Result bundles the report and the probe so remux can reuse it.
+// Result bundles the report and the probe so remux can reuse it. Stat is
+// the os.Lstat the scanner took of the file before it read a byte of it,
+// so the verdict is bound to that file: the remuxer and the cleaner, which
+// may act on the path long after the scan, require the entry at the path
+// to still be that file with the same size and modification time before
+// they open it or replace it, and refuse it otherwise. It is nil when the
+// scanner could not examine the path.
 type Result struct {
 	File report.FileResult
 	Info *probe.MediaInfo
 	Kind sniff.Kind
+	Stat os.FileInfo
 }
 
 // IsMedia reports whether a path has a media extension.
@@ -170,6 +177,7 @@ func (s *Scanner) ScanFile(ctx context.Context, path, root string) (r Result) {
 		fr.Addf(CodeUnreadable, report.Fail, "%v", err)
 		return r
 	}
+	r.Stat = fi
 	if fi.Mode()&os.ModeSymlink != 0 {
 		fr.Addf(CodeSymlink, report.Warn, "symlink skipped")
 		return r
