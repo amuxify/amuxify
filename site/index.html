@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>amuxify: verify, sanitize and remux media before it enters Plex or Jellyfin</title>
-<meta name="description" content="amuxify checks downloaded video for malware, tracker junk and damage before it reaches Plex or Jellyfin. It strips what does not belong, never re-encodes, and exits with a verdict SABnzbd, NZBGet, Sonarr and Radarr can act on.">
+<meta name="description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Your download client fails the job when a file is damaged or carries something that has no place in a video file.">
 <link rel="canonical" href="https://amuxify.com/">
 <meta name="author" content="Adrian Noel">
 <link rel="icon" type="image/png" href="amuxify-logo.png">
@@ -12,7 +12,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="amuxify">
 <meta property="og:title" content="amuxify: the ingest gate for self-hosted media">
-<meta property="og:description" content="Verify, sanitize and remux downloads into clean MKV before they reach Plex, Jellyfin or your NAS. Stream-hash verified, exit codes for SABnzbd, NZBGet, Sonarr and Radarr.">
+<meta property="og:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Your download client fails the job when a file is damaged or carries something that has no place in a video file.">
 <meta property="og:image" content="https://amuxify.com/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -21,7 +21,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:creator" content="@theadriannoel">
 <meta name="twitter:title" content="amuxify: the ingest gate for self-hosted media">
-<meta name="twitter:description" content="Verify, sanitize and remux downloads into clean MKV before they reach Plex, Jellyfin or your NAS.">
+<meta name="twitter:description" content="amuxify checks downloaded and purchased video before it goes into your Plex or Jellyfin library. Your download client fails the job when a file is damaged or carries something that has no place in a video file.">
 <meta name="twitter:image" content="https://amuxify.com/og.png">
 <script type="application/ld+json">
 {
@@ -29,7 +29,7 @@
   "@type": "SoftwareApplication",
   "name": "amuxify",
   "url": "https://amuxify.com/",
-  "description": "Command-line ingest gate for self-hosted media. Verifies, sanitizes and remuxes downloaded or purchased video into clean MKV files, with per-stream hash verification and exit codes for SABnzbd, NZBGet, Sonarr and Radarr.",
+  "description": "Command-line tool that checks downloaded and purchased video before it goes into a Plex or Jellyfin library. Runs as a SABnzbd, NZBGet, Sonarr or Radarr script, cleans files without re-encoding and verifies every kept stream by hash.",
   "applicationCategory": "MultimediaApplication",
   "operatingSystem": "Linux, macOS",
   "softwareVersion": "0.3.0",
@@ -67,11 +67,10 @@
 <header class="hero">
   <img class="logo" src="amuxify-logo.webp" alt="amuxify logo" width="112" height="112">
   <h1>amuxify</h1>
-  <p class="tagline">Checks downloaded video for malware, tracker junk and damage
-  before it reaches your Plex or Jellyfin library.</p>
-  <p class="lede">A command-line tool that runs after SABnzbd, NZBGet, Sonarr or Radarr and before the library.
-  It strips what does not belong in the file, never re-encodes, and exits with a verdict your download client
-  can fail the job on.</p>
+  <p class="tagline">Checks downloaded and purchased video before it goes into your Plex or Jellyfin library.</p>
+  <p class="lede">amuxify is a command-line tool your download client runs on each finished job. When a file is
+  damaged or carries something that has no place in a video file, the job fails and the file stays out of the
+  library. Streams are never re-encoded.</p>
   <nav class="cta">
     <a class="button primary" href="#install">Install</a>
     <a class="button" href="https://github.com/amuxify/amuxify">Source on GitHub</a>
@@ -91,41 +90,45 @@
       BLOCK ATTACH_EXEC        attachment #1 "font.ttf" (font/ttf, 71 KiB) contains executable PE/DOS executable
 
 BLOCK: 3 file(s) BLOCK=1 PASS=1 WARN=1</code></pre>
-<p>The third file carries a Windows program disguised as a subtitle font. A media server would import it and a
-virus scanner would not flag it. amuxify blocks it.</p>
+<p>The third file has a Windows program packed inside it as a subtitle font. A media server would import it
+without complaint.</p>
 </section>
 
 <section id="what-it-catches">
 <h2>What it catches</h2>
 <ul>
-<li><strong>Programs disguised as fonts or images</strong> inside an MKV, and files that are a valid video and a
-valid ZIP, EXE or script at the same time.</li>
+<li><strong>Programs disguised as fonts or images</strong> inside an MKV, and files that are a valid video and
+also an archive or a Windows, Linux or macOS executable.</li>
 <li><strong>Tracker and release-group links</strong> in tags, titles, chapter names and subtitles.</li>
 <li><strong>Your own account details in purchased files</strong>: account name, purchase date and store IDs in
 MP4 metadata.</li>
 <li><strong>Dangerous files next to the video</strong>: <code>.lnk</code>, <code>.url</code>, <code>.exe</code>,
 <code>.scr</code>, <code>.bat</code>, <code>.ps1</code> and similar.</li>
-<li><strong>Broken or mislabeled files</strong>: wrong extension, truncated, no duration, does not decode.</li>
-<li><strong>Trick filenames</strong> with right-to-left override, zero-width characters or double extensions.</li>
+<li><strong>Broken or mislabeled files</strong>: wrong extension, truncated, does not decode. A file that reports
+no duration gets a warning.</li>
+<li><strong>Filenames with hidden characters</strong> such as right-to-left override or zero-width spaces. A double
+extension like <code>x.exe.mkv</code> gets a warning.</li>
 </ul>
-<p>What a profile allows it to fix, it fixes: it strips metadata, drops commentary tracks, unwanted languages or
-attachments, sets language and default flags, and rebuilds the file as a clean MKV. Every kept stream is hashed
-and compared with the source before the new file replaces anything. It is not a transcoder, a renamer or a
-library manager.</p>
+<p>The profile decides what gets fixed. The default one strips titles, tags and purchase details and keeps every
+track; other profiles also drop commentary, other languages or attachments. Before a rebuilt file replaces the
+original, each stream it kept is hashed and compared with the source. amuxify does not transcode,
+rename or organise your library; Sonarr and Radarr still do that.</p>
 </section>
 
 <section id="where-it-fits">
 <h2>Where it fits</h2>
 <ul>
-<li><strong>SABnzbd and NZBGet:</strong> the best place. The hook runs before Sonarr or Radarr import, so a
-<code>FAIL</code> or <code>BLOCK</code> fails the job and nothing reaches the library. On a <code>BLOCK</code>,
-the arr blocklists the release and grabs another.</li>
-<li><strong>Sonarr and Radarr:</strong> the hook runs after import and cleans the file already in the library,
-with the original language taken from the series or movie. It cannot stop an import; use it when the download
-client is not yours to configure.</li>
+<li><strong>SABnzbd and NZBGet:</strong> run the hook here if you can. It runs before Sonarr or Radarr import,
+so a failed job keeps the file out of the library. SABnzbd only fails a job on a script's exit code when
+<code>script_can_fail</code> is on (Config, Special). SABnzbd reports every failed job to Sonarr and Radarr,
+which blocklist the release and search again; with NZBGet that happens only on a <code>BLOCK</code>.</li>
+<li><strong>Sonarr and Radarr:</strong> the hook runs after import, on the file already in the library, and
+sets the default audio track from the series or movie's original language. It cannot stop an import. Torrent
+imports are usually hard links, which the hook leaves alone unless you pass <code>--hardlinks break</code>.</li>
 <li><strong>qBittorrent, Transmission, Deluge:</strong> they ignore a script's exit code. Use the Sonarr and
-Radarr hooks, or run <code>amuxify scan --quarantine</code> from the completion script to move
-<code>BLOCK</code> files out of the way.</li>
+Radarr hooks with <code>--hardlinks break</code>, or run
+<code>amuxify scan --quarantine=/srv/quarantine "$DIR"</code> from the completion script to move
+<code>BLOCK</code> files out of the download folder.</li>
 <li><strong>Storage:</strong> TrueNAS, Unraid, Synology, NFS and SMB shares. Owner, mode and mtime are kept,
 and hard-linked files you are seeding are never edited in place.</li>
 </ul>
@@ -153,10 +156,12 @@ package names per distro, pinning a version and the Docker image.</p>
 
 <section id="safety">
 <h2>Safety</h2>
-<p>amuxify never overwrites a file, never follows a symlink and never re-encodes. If a kept stream's hash does
-not match the source, the output is deleted and the original stays. It refuses to run as root unless told to,
-and no flag overrides a <code>BLOCK</code>. There are ten guarantees in all, each with a test;
-<a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">docs/safety.md</a> lists them.</p>
+<p>A rebuilt file is written beside the destination and only takes its place once every kept stream's hash matches
+the source; if one does not, the rebuilt file is deleted and the original stays. amuxify will not write over some
+other file that already sits at the destination, and it skips symlinks. It refuses to run as root unless told
+to, and no flag overrides a <code>BLOCK</code>.
+<a href="https://github.com/amuxify/amuxify/blob/main/docs/safety.md">docs/safety.md</a> lists all ten
+guarantees, each with a test.</p>
 </section>
 
 <section id="reference">
@@ -172,9 +177,11 @@ and no flag overrides a <code>BLOCK</code>. There are ten guarantees in all, eac
 <tr><td><code>remux</code></td><td>Rebuild into a sanitized MKV beside the original</td><td><code>&lt;root&gt;__remuxed/</code>, <code>--output</code> or <code>--in-place</code></td></tr>
 <tr><td><code>clean</code></td><td>Strip metadata in place, tracks untouched</td><td>the file, after verification</td></tr>
 <tr><td><code>doctor</code></td><td>Check tools, versions and profile</td><td>nothing</td></tr>
+<tr><td><code>profile</code></td><td>List the built-in profiles or print one</td><td>nothing</td></tr>
 </tbody>
 </table>
-<p>Reads MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB and FLV. Always writes MKV, with mkvmerge.</p>
+<p>Reads MKV, WebM, MP4, M4V, MOV, AVI, MPEG-TS, M2TS, MPG, VOB and FLV. A rebuilt file is always MKV, written
+by mkvmerge; <code>clean</code> keeps MP4-family and AVI files in their own container.</p>
 
 <h3>Verdicts</h3>
 <table>
@@ -183,7 +190,7 @@ and no flag overrides a <code>BLOCK</code>. There are ten guarantees in all, eac
 <tr><td><span class="pass">PASS</span></td><td>0</td><td>Nothing to report</td></tr>
 <tr><td><span class="warn">WARN</span></td><td>1</td><td>Worth knowing; the file is usable</td></tr>
 <tr><td><span class="fail">FAIL</span></td><td>3</td><td>Damaged: truncated, unparseable, mislabeled or a hash mismatch</td></tr>
-<tr><td><span class="block">BLOCK</span></td><td>4</td><td>Dangerous: executable payload, polyglot, trick filename or blocked sidecar</td></tr>
+<tr><td><span class="block">BLOCK</span></td><td>4</td><td>Dangerous: executable payload, polyglot, hidden characters in the filename or blocked sidecar</td></tr>
 </tbody>
 </table>
 <p>The worst verdict of the run is the exit code; 2 means a usage error and 130 an interruption.
@@ -194,7 +201,7 @@ and no flag overrides a <code>BLOCK</code>. There are ten guarantees in all, eac
 <table>
 <thead><tr><th>Profile</th><th>Languages</th><th>Chapters</th><th>Fonts</th><th>Commentary</th><th>Links / provenance</th><th>Verify</th></tr></thead>
 <tbody>
-<tr><td><code>homelab</code> (default)</td><td>keep all</td><td>keep</td><td>keep if text subs</td><td>keep</td><td>warn</td><td>quick</td></tr>
+<tr><td><code>homelab</code> (default)</td><td>keep all, prefer original</td><td>keep</td><td>keep if text subs</td><td>keep</td><td>warn</td><td>quick</td></tr>
 <tr><td><code>anime</code></td><td>keep all, prefer original</td><td>keep</td><td>keep</td><td>drop</td><td>warn</td><td>quick</td></tr>
 <tr><td><code>archive</code></td><td>English only</td><td>drop</td><td>drop</td><td>drop</td><td>fail</td><td>quick</td></tr>
 <tr><td><code>strict</code></td><td>English only</td><td>drop</td><td>drop</td><td>drop</td><td>fail</td><td>full + ClamAV</td></tr>
