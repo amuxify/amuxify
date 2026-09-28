@@ -122,11 +122,14 @@ func utimesOwnName(f *os.File, ts *[2]syscall.Timespec) error {
 	if !ffi.Mode().IsRegular() {
 		return fmt.Errorf("%s is not open on a regular file", path)
 	}
-	if n := Nlink(ffi); n != 1 {
-		return fmt.Errorf("%s has %d hard links; expected 1", path, n)
-	}
+	// The name is checked before the descriptor's link count: a file that
+	// was renamed away from under the name has no links left, and the
+	// refusal should say that the name leads elsewhere, not count links.
 	if err := sameAsOpen(path, ffi); err != nil {
 		return err
+	}
+	if n := Nlink(ffi); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", path, n)
 	}
 	if err := utimensatNoFollow(path, ts); err != nil {
 		return &os.PathError{Op: "utimensat", Path: path, Err: err}
