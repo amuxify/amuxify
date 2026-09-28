@@ -40,10 +40,14 @@ const srtFlood = `i=0; while [ $i -lt 3000 ]; do printf '%d\n00:00:01,000 --> 00
 // the same track is reported for the link itself. The track comes from a
 // stub ffmpeg so its size is under the test's control; ffprobe and mkvmerge
 // are real, on the subtitle-only fixture, so the stream is a genuine text
-// subtitle and the scan reaches the extraction.
+// subtitle and the scan reaches the extraction. The strict profile requires
+// ClamAV and fails closed before the probe when clamscan is missing, so a
+// clean-reporting stub stands in for it and the test does not depend on
+// whether the machine has ClamAV installed.
 func TestSubtitleTrackLongerThanRunnerKeeps(t *testing.T) {
 	r := testutil.Need(t, exec.FFprobe, exec.MKVMerge)
 	stubTool(t, exec.FFmpeg, srtFlood)
+	stubTool(t, exec.ClamScan, "exit 0")
 	for _, profile := range []string{"homelab", "strict"} {
 		sev := report.Warn
 		if profile == "strict" {
