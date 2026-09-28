@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -51,7 +52,8 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return hook.ExitCode(a, report.Pass, report.Fail, hook.UsageError)
 	}
-	if msg := hookPositionals(a, fs.Args(), &o); msg != "" {
+	env := environ()
+	if msg := hookPositionals(a, env, fs.Args(), &o); msg != "" {
 		return usage("hook %s: %s", a, msg)
 	}
 	failOn, err := hook.ParseFailOn(*failOnS)
@@ -64,7 +66,7 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 	if a == hook.NZBGet && g.JSON {
 		return usage("hook nzbget: --json is not supported because NZBGet logs stdout line by line; use --json-out <file>")
 	}
-	job, err := hook.Parse(a, environ(), fs.Args())
+	job, err := hook.Parse(a, env, fs.Args())
 	if err != nil {
 		return usage("hook %s: %v", a, err)
 	}
@@ -171,56 +173,38 @@ func (g *Global) hookTest(ctx context.Context, a hook.Adapter) int {
 }
 
 // hookPositionals refuses positional arguments the adapter does not take,
-// before the environment is read and before anything runs. SABnzbd may pass
-// its parameters in place of the environment: the documented eight, or
-// seven from a version older than the one that added the failure URL as the
-// eighth. Every other caller sets the environment only, so a stray word is a
-// usage error rather than silently ignored. The usual cause is a directory
-// written after a bare --quarantine, which takes no separate value, so the
-// message says how to write it. The count is exact rather than a minimum
-// because SABnzbd appends its parameters after whatever the wrapper wrote,
-// so a stray directory in front of them shows up as one parameter too many
-// and args[0] is that directory.
-//
-// A stray directory in front of an older SABnzbd's seven parameters makes
-// exactly eight, which the count alone accepts, and the parser would then
-// ingest the stray directory as the completed one. The tell is args[1]:
-// SABnzbd's second parameter is the name of the original NZB file, never a
-// directory, while in the shifted shape it is the completed directory. So
-// when a bare --quarantine is set and args[1] is an existing directory, the
-// eight are refused with the same hint. The check keys on args[1] alone and
-// asks nothing of args[0], because the wrapper's quarantine directory may
-// be a symlink or may not exist yet, and either would otherwise let the
-// shifted shape through. A genuine eight-parameter call has a file name in
-// args[1] and is not affected.
-func hookPositionals(a hook.Adapter, args []string, o *ingestOpts) string {
-	bare := o.quarantine.set && o.quarantine.dir == ""
-	switch {
-	case len(args) == 0:
-		return ""
-	case a == hook.SABnzbd && len(args) == 8 && bare && isDir(args[1]):
-		// Refused below: a directory shifted in front of seven parameters.
-	case a == hook.SABnzbd && (len(args) == 7 || len(args) == 8):
+// before the job is read and before anything runs. Only SABnzbd may pass
+// positionals, and hook.CheckSABnzbdArgs defines exactly which shapes are
+// its parameters; every other adapter reads the job from the environment,
+// so for those any word at all is a usage error rather than silently
+// ignored. The usual cause is a directory written after a bare
+// --quarantine, which takes no separate value, so when that flag is set and
+// the stray argument can be told from the others, the message says how it
+// should have been written. The hint never names one of SABnzbd's own
+// parameters, whose values an indexer can influence.
+func hookPositionals(a hook.Adapter, env, args []string, o *ingestOpts) string {
+	if len(args) == 0 {
 		return ""
 	}
-	var msg string
+	var msg, arg string
 	if a == hook.SABnzbd {
-		msg = fmt.Sprintf("expected no positional arguments or SABnzbd's eight parameters, got %d beginning with %q", len(args), args[0])
+		err := hook.CheckSABnzbdArgs(env, args)
+		if err == nil {
+			return ""
+		}
+		msg = err.Error()
+		var ae *hook.SABnzbdArgError
+		if errors.As(err, &ae) {
+			arg = ae.Arg
+		}
 	} else {
 		msg = fmt.Sprintf("unexpected argument %q; the adapter reads the job from the environment", args[0])
+		arg = args[0]
 	}
-	if bare {
-		msg += fmt.Sprintf("; if it was meant as the quarantine directory write --quarantine=%s", report.Sanitize(args[0]))
+	if o.quarantine.set && o.quarantine.dir == "" && arg != "" {
+		msg += fmt.Sprintf("; if it was meant as the quarantine directory write --quarantine=%s", report.Sanitize(arg))
 	}
 	return msg
-}
-
-// isDir reports whether path names an existing directory, following a
-// symlink to one, since a directory reached through a symlink is still a
-// directory SABnzbd would never pass as its second parameter.
-func isDir(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }
 
 // writeJSONOut writes the report to a new file. An existing file, a symlink

@@ -8,8 +8,9 @@ builds:
     main: ./cmd/amuxify
     binary: amuxify
     env: [CGO_ENABLED=0]
-    # Windows is a 0.4 item; internal/fsutil uses syscall.Stat_t and does
-    # not build there yet.
+    # No Windows build: the safety guarantees rest on POSIX file identity
+    # (internal/fsutil reads syscall.Stat_t), and Windows users run the
+    # Docker image or the Linux binary under WSL; see docs/install.md.
     goos: [linux, darwin]
     goarch: [amd64, arm64, arm]
     goarm: ["7"]
@@ -54,12 +55,25 @@ homebrew_casks:
       - formula: mkvtoolnix
     # Release binaries are not notarized; clear the quarantine flag so the
     # first run is not blocked by Gatekeeper.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/amuxify"]
-          end
+    #
+    # goreleaser renders hooks.post.install as a raw `postflight do` block,
+    # which Homebrew 7 reports as deprecated in favour of `postflight_steps`
+    # (goreleaser issue #6870; PR #6873 adds hooks.post.install_steps and is
+    # unreleased as of v2.18.2). Until that ships, custom_block places the
+    # steps stanza in the cask verbatim. Homebrew loads it without a warning;
+    # only its StanzaOrder style cop notes that it precedes `version`, which
+    # `brew style` reports and nothing enforces. Move this back to
+    # hooks.post.install_steps once goreleaser supports it.
+    #
+    # goreleaser runs the whole rendered cask through its Go template engine
+    # once, so Homebrew's own {{staged_path}} token is written as a quoted
+    # Go template literal; the engine turns it back into {{staged_path}}.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/amuxify"]
+        end
+      end
     # auto: skip for pre-release tags (v1.0.0-rc1); true: token not configured.
     # Evaluated before the token, so an unset secret never fails the release.
     skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
