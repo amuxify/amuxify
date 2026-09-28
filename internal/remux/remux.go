@@ -132,7 +132,7 @@ func (r *Remuxer) RemuxPath(ctx context.Context, root string) ([]report.FileResu
 	}
 	inputRoot, outRoot := r.Roots(abs, fi.IsDir())
 	if !r.InPlace && !r.DryRun {
-		if err := os.MkdirAll(outRoot, 0o755); err != nil {
+		if err := r.ensureOutRoot(outRoot); err != nil {
 			return nil, err
 		}
 	}
@@ -277,6 +277,21 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		return fr
 	}
 
+	// The verdict describes the file the scanner examined, and this remux
+	// may begin long after that scan: RemuxPath scans the whole tree before
+	// it rebuilds any file, and under ingest the routing sits between. The
+	// entry at the path must still be that file, with the size and the
+	// modification time the scanner saw, before the verdict is acted on. A
+	// file swapped onto the path since was never scanned, and rebuilding it
+	// on the strength of the earlier verdict would carry it past the scan
+	// (guarantee 9). fi is that entry, and every later check requires the
+	// same file.
+	fi, err := scannedFile(fr.Path, sc)
+	if err != nil {
+		fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+		return fr
+	}
+
 	// Destination.
 	rel, err := filepath.Rel(inputRoot, fr.Path)
 	if err != nil {
@@ -285,8 +300,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	rel = strings.TrimSuffix(rel, filepath.Ext(rel)) + ".mkv"
 	dest := filepath.Join(outRoot, rel)
 	inPlace := r.InPlace
-	fi, _ := os.Lstat(fr.Path)
-	if inPlace && fi != nil && fsutil.Nlink(fi) > 1 {
+	if inPlace && fsutil.Nlink(fi) > 1 {
 		switch r.hardlinks() {
 		case "skip":
 			fr.Addf(CodeHardlinked, report.Warn, "file has %d hard links; skipped (safety.hardlinks = skip)", fsutil.Nlink(fi))
@@ -309,7 +323,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		dest = filepath.Join(filepath.Dir(fr.Path), strings.TrimSuffix(filepath.Base(fr.Path), filepath.Ext(fr.Path))+".mkv")
 		if dest != fr.Path {
 			if dfi, err := os.Lstat(dest); err == nil {
-				if fi != nil && os.SameFile(fi, dfi) && !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
+				if os.SameFile(fi, dfi) && !hasEntry(filepath.Dir(dest), filepath.Base(dest)) {
 					sameEntry = true
 				} else {
 					fr.Addf(CodeOutputExists, report.Fail, "%s already exists", dest)
@@ -367,13 +381,20 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 
 	// In place, the destination sits beside the source in a directory that
 	// exists and was walked without following symlinks. Otherwise the
-	// mirrored directory chain is created component by component so a
-	// symlink planted inside the output tree cannot redirect the remuxed
-	// file outside the root the user named (guarantee 3). The refusal is
-	// reported as REMUX_FAIL because the finding codes are frozen and, from
-	// the caller's point of view, the remux of this file did not happen; the
-	// message carries the reason.
+	// output root is checked first, because a caller may hand a scanned
+	// result to this function without going through RemuxPath, as ingest
+	// and watch do, and a defaulted root must not be a planted link (see
+	// ensureOutRoot); the mirrored directory chain is then
+	// created component by component so a symlink planted inside the output
+	// tree cannot redirect the remuxed file outside the root the user named
+	// (guarantee 3). The refusal is reported as REMUX_FAIL because the
+	// finding codes are frozen and, from the caller's point of view, the
+	// remux of this file did not happen; the message carries the reason.
 	if !inPlace {
+		if err := r.ensureOutRoot(outRoot); err != nil {
+			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
+			return fr
+		}
 		if err := fsutil.MkdirAllUnder(outRoot, filepath.Dir(dest)); err != nil {
 			fr.Addf(CodeRemuxFail, report.Fail, "%v", err)
 			return fr
@@ -531,7 +552,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		if beforeIdentity != nil {
 			beforeIdentity(tmp, fr.Path)
 		}
-		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+		if err := takeIdentity(tmp, fi, created); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 			return fr
@@ -574,7 +595,7 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 		if beforeIdentity != nil {
 			beforeIdentity(tmp, dest)
 		}
-		if err := takeIdentity(tmp, fr.Path, created); err != nil {
+		if err := takeIdentity(tmp, fi, created); err != nil {
 			cleanup()
 			fr.Addf(CodeRemuxFail, report.Fail, "%v; nothing was placed", err)
 			return fr
@@ -628,6 +649,33 @@ func (r *Remuxer) RemuxScanned(ctx context.Context, sc scan.Result, inputRoot, o
 	return fr
 }
 
+// scannedFile returns the entry at path when it still is the regular file
+// the scanner examined, with the size and the modification time the scanner
+// recorded in sc.Stat, and an error otherwise: a symlink planted since the
+// scan, a directory, a device, nothing at all, another regular file renamed
+// onto the path, or the same file written to since. A result that carries
+// no Stat was never examined by the scanner and is refused for that reason,
+// because the verdict it carries cannot be tied to any file.
+func scannedFile(path string, sc scan.Result) (os.FileInfo, error) {
+	now, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("changed since the scan: %v", err)
+	}
+	if now.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is now a symlink; refusing to follow it (changed since the scan)", path)
+	}
+	if !now.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is no longer a regular file (changed since the scan)", path)
+	}
+	if sc.Stat == nil {
+		return nil, fmt.Errorf("%s was not examined by the scan; nothing can be proven about it", path)
+	}
+	if !fsutil.Unchanged(sc.Stat, now) {
+		return nil, fmt.Errorf("%s changed since the scan; the file that was scanned is not the file at this path", path)
+	}
+	return now, nil
+}
+
 // sourceUnchanged reports an error when path no longer names the regular
 // file described by was: a symlink planted after the scan, a directory, a
 // device, nothing at all, or another regular file renamed onto the path,
@@ -650,8 +698,43 @@ func sourceUnchanged(path string, was os.FileInfo) error {
 	if was == nil {
 		return fmt.Errorf("%s could not be examined when the remux began; nothing was placed", path)
 	}
-	if !os.SameFile(was, now) || was.Size() != now.Size() || !was.ModTime().Equal(now.ModTime()) {
+	if !fsutil.Unchanged(was, now) {
 		return fmt.Errorf("%s was replaced while it was being rebuilt", path)
+	}
+	return nil
+}
+
+// ensureOutRoot makes sure the output root is a directory this run may
+// write into, creating it when it is missing. A root the user named with
+// --output is the user's choice: it is created with os.MkdirAll and, when
+// it is a symbolic link, followed, as MkdirAllUnder documents for the root
+// it is given. The defaulted root, <root>__remuxed beside the input tree,
+// was named by nobody, and every remux without --output and --in-place
+// writes there, so an entry that already sits at that name is trusted only
+// when it is a real directory: anyone with write access to the parent of
+// the tree, which a shared download directory gives away, could otherwise
+// plant a symbolic link under that name and have every verified output
+// placed wherever it points (guarantee 3). A missing defaulted root is
+// created with a single mkdir, which fails rather than follows when a link
+// appears at the name between the check and the creation, and the entry is
+// examined afterwards without following it, so what is accepted is what is
+// really there.
+func (r *Remuxer) ensureOutRoot(outRoot string) error {
+	if r.OutputRoot != "" {
+		return os.MkdirAll(outRoot, 0o755)
+	}
+	if err := os.Mkdir(outRoot, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("output root %s: %w", outRoot, err)
+	}
+	fi, err := os.Lstat(outRoot)
+	if err != nil {
+		return fmt.Errorf("output root %s: %w", outRoot, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("output root %s is a symlink; refusing to follow it (name the directory it points to with --output to write there)", outRoot)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("output root %s exists and is not a directory", outRoot)
 	}
 	return nil
 }
@@ -700,14 +783,18 @@ func tempUnchanged(tmp string, created os.FileInfo) error {
 }
 
 // takeIdentity gives the temp file the mode, ownership and modification
-// time of the source at src. The temp name is opened without following a
-// symlink and the open file must be the regular file created describes with
-// no other name; the metadata is then written through that descriptor and
-// the descriptor is closed. Nothing is written by name, so a symlink or a
-// different file swapped onto the temp name after the last tempUnchanged
+// time the source had, as src describes it. src is the os.Lstat this remux
+// pinned the source with and checked with sourceUnchanged right before, so
+// nothing is read from the source's name here: a symbolic link swapped onto
+// that name after the check cannot supply the mode or the time of whatever
+// it points at. The temp name is opened without following a symlink and
+// the open file must be the regular file created describes with no other
+// name; the metadata is then written through that descriptor and the
+// descriptor is closed. Nothing is written by name either, so a symlink or
+// a different file swapped onto the temp name after the last tempUnchanged
 // check is refused rather than followed, and the swap is reported in the
 // words tempUnchanged uses.
-func takeIdentity(tmp, src string, created os.FileInfo) error {
+func takeIdentity(tmp string, src, created os.FileInfo) error {
 	f, err := fsutil.OpenOwn(tmp, created)
 	if err != nil {
 		return err

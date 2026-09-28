@@ -19,9 +19,15 @@ import (
 // one succeeds), fstat then tells what was opened, and anything that is
 // not a regular file is closed again and refused with an error that names
 // its kind. O_NONBLOCK is cleared before the file is returned, so ordinary
-// reads and writes on it behave as they always have.
+// reads and writes on it behave as they always have. O_NOCTTY covers the
+// one effect an open can have before fstat refuses the entry: a process
+// that leads its session and has no controlling terminal, which a run under
+// a container init, systemd or setsid is, would otherwise acquire a
+// terminal device planted at the name as its controlling terminal for the
+// rest of the run, and a hangup on that terminal would then reach it as
+// SIGHUP. The flag has no effect on a regular file or a pipe.
 func openNoFollow(path string, flag int) (*os.File, error) {
-	fd, err := openRetry(path, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC)
+	fd, err := openRetry(path, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOCTTY)
 	if err != nil {
 		if errors.Is(err, syscall.ENXIO) {
 			return nil, fmt.Errorf("%s is a named pipe or a socket; refusing to open it", path)

@@ -570,11 +570,13 @@ func identityOfPath(t *testing.T, path string) (os.FileMode, time.Time) {
 	return fi.Mode().Perm(), fi.ModTime()
 }
 
-// Guarantee 3: CopyIdentityTo writes through the descriptor it was handed.
-// The file is opened, then its name is replaced by a symbolic link to a
-// victim with a different mode and time. The copy must land on the file
-// behind the descriptor and the victim behind the link must keep its mode
-// and its modification time.
+// Guarantee 3: CopyIdentityTo writes through the descriptor it was handed
+// and reads from the os.FileInfo it was handed. The file is opened, then
+// its name is replaced by a symbolic link to a victim with a different mode
+// and time; the source's name is replaced by a symbolic link to the same
+// victim as well. The copy must land on the file behind the descriptor, it
+// must carry the pinned source's mode and time rather than the victim's,
+// and the victim behind either link must keep its own.
 func TestCopyIdentityToNeverFollowsSymlinkAtFormerName(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits and symlinks differ on windows")
@@ -610,8 +612,22 @@ func TestCopyIdentityToNeverFollowsSymlinkAtFormerName(t *testing.T) {
 	if err := os.Symlink(victim, tmp); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	// The source is pinned by the caller before the swap, as the remuxer
+	// and the cleaner pin it, and then its name too is swapped for a link
+	// to the victim: a copy that read the source's name again would take
+	// the victim's mode and stamp.
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, src); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := CopyIdentityTo(f, src); err != nil {
+	if err := CopyIdentityTo(f, srcInfo); err != nil {
 		t.Fatal(err)
 	}
 	if mode, mtime := identityOfPath(t, victim); mode != 0o600 || !mtime.Equal(victimStamp) {
@@ -634,9 +650,10 @@ func TestCopyIdentityToNeverFollowsSymlinkAtFormerName(t *testing.T) {
 	if target, err := os.Readlink(tmp); err != nil || target != victim {
 		t.Fatalf("the planted link was replaced: %q %v", target, err)
 	}
-	// A missing source is an error and the open file is left alone.
-	if err := CopyIdentityTo(f, filepath.Join(dir, "missing")); err == nil {
-		t.Fatal("CopyIdentityTo accepted a missing source")
+	// A source that was never examined is an error and the open file is
+	// left alone.
+	if err := CopyIdentityTo(f, nil); err == nil {
+		t.Fatal("CopyIdentityTo accepted a nil source")
 	}
 	if fi2, _ := f.Stat(); fi2 == nil || fi2.Mode().Perm() != 0o666 {
 		t.Fatal("the open file changed after a failed CopyIdentityTo")
@@ -796,7 +813,7 @@ func TestReplaceInPlaceRefusesSwappedTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, tmp, "foreign", 0o644)
-	err = ReplaceInPlaceOwn(tmp, dest, created)
+	err = ReplaceInPlaceOwn(tmp, dest, created, nil)
 	if err == nil || !strings.Contains(err.Error(), "not the file this run created") {
 		t.Fatalf("ReplaceInPlaceOwn with a foreign file at the temp name: %v", err)
 	}
@@ -816,7 +833,7 @@ func TestReplaceInPlaceRefusesSwappedTemp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ReplaceInPlaceOwn(tmp, dest, created); err != nil {
+	if err := ReplaceInPlaceOwn(tmp, dest, created, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, dest); got != "replacement" {
@@ -892,7 +909,7 @@ func TestReplaceInPlaceOwnReportsSwapBeforeRename(t *testing.T) {
 				tc.plant()
 			}
 			t.Cleanup(func() { beforeRename = nil })
-			err := ReplaceInPlaceOwn(tmp, dest, created)
+			err := ReplaceInPlaceOwn(tmp, dest, created, nil)
 			if !fired {
 				t.Fatal("the seam never ran")
 			}
@@ -1005,7 +1022,7 @@ func TestReplaceInPlaceOwnFailsWhenTimeCannotBeSet(t *testing.T) {
 	defer own.Close()
 	writeFile(t, tmp, "replacement", 0o600)
 
-	err = ReplaceInPlaceOwn(tmp, dest, own.Info())
+	err = ReplaceInPlaceOwn(tmp, dest, own.Info(), nil)
 	if err == nil || !strings.Contains(err.Error(), "utimensat refused for the test") {
 		t.Fatalf("ReplaceInPlaceOwn with the time call refused: %v", err)
 	}
@@ -1029,7 +1046,11 @@ func TestReplaceInPlaceOwnFailsWhenTimeCannotBeSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := CopyIdentityTo(f, dest); err == nil || !strings.Contains(err.Error(), "utimensat refused for the test") {
+	destInfo, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyIdentityTo(f, destInfo); err == nil || !strings.Contains(err.Error(), "utimensat refused for the test") {
 		t.Fatalf("CopyIdentityTo with the time call refused: %v", err)
 	}
 }

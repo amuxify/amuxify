@@ -94,13 +94,25 @@ func futimes(f *os.File, atime, mtime time.Time) error {
 
 // utimesOwnName sets the times of f by its name, after checking that the
 // name still leads to the very file f is open on: not a symbolic link, a
-// regular file, and the same device and inode as the descriptor. The call
-// itself never follows a link, so the window that remains between the
-// check and the call can only be filled by a hard link to another file
-// renamed onto the name; the name is looked at once more afterwards so a
-// swap in that window is returned as an error rather than passed over.
-// The error reaches CopyIdentityTo, which returns it, and the in-place
-// callers then stop before the rename with the source still in place.
+// regular file, the same device and inode as the descriptor, and a file
+// with that one name and no other. The call itself never follows a link,
+// so the window that remains between the check and the call can only be
+// filled by a hard link to another file renamed onto the name. The name is
+// looked at once more afterwards with the same requirements. What the two
+// looks prove is exactly this: immediately before the call and immediately
+// after it, the name led to the open file and that file had no other name.
+// They do not prove that nothing sat at the name in between. A planter
+// with write access to the directory who renamed a victim onto the name
+// for the duration of the call and then put the temp file back would pass
+// the second look, but putting the temp file back needs a second name of
+// it, made after the first look and gone again before the second, and
+// making that link needs ownership of the temp file or write access to it
+// wherever fs.protected_hardlinks is set, which the runs this fallback is
+// kept for (a container without /proc) have on by default. The times a
+// planter could land that way are the source's, on a file the planter can
+// already write to. The error reaches CopyIdentityTo, which returns it,
+// and the in-place callers then stop before the rename with the source
+// still in place.
 func utimesOwnName(f *os.File, ts *[2]syscall.Timespec) error {
 	path := f.Name()
 	ffi, err := f.Stat()
@@ -109,6 +121,9 @@ func utimesOwnName(f *os.File, ts *[2]syscall.Timespec) error {
 	}
 	if !ffi.Mode().IsRegular() {
 		return fmt.Errorf("%s is not open on a regular file", path)
+	}
+	if n := Nlink(ffi); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", path, n)
 	}
 	if err := sameAsOpen(path, ffi); err != nil {
 		return err
@@ -120,7 +135,7 @@ func utimesOwnName(f *os.File, ts *[2]syscall.Timespec) error {
 }
 
 // sameAsOpen reports an error when path does not name the regular file
-// described by ffi.
+// described by ffi, or names it under more than one hard link.
 func sameAsOpen(path string, ffi os.FileInfo) error {
 	lfi, err := os.Lstat(path)
 	if err != nil {
@@ -131,6 +146,9 @@ func sameAsOpen(path string, ffi os.FileInfo) error {
 	}
 	if !lfi.Mode().IsRegular() || !os.SameFile(ffi, lfi) {
 		return fmt.Errorf("%s no longer names the file that was opened", path)
+	}
+	if n := Nlink(lfi); n != 1 {
+		return fmt.Errorf("%s has %d hard links; expected 1", path, n)
 	}
 	return nil
 }
