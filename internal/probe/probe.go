@@ -42,6 +42,13 @@ type Stream struct {
 	Color        Color             `json:"color"`         // the full colour and HDR signalling of a video stream
 	TextSubtitle bool              `json:"text_subtitle"`
 	Tags         map[string]string `json:"tags,omitempty"`
+
+	// MkvColor is the colour signalling mkvmerge -J reported for this track
+	// on its own, before it was merged into Color. It tells the remuxer
+	// which of the values in Color mkvmerge will carry into the output
+	// header by itself and which it would drop, so the mkvmerge command
+	// line can name the rest. It is a working view, not part of the report.
+	MkvColor Color `json:"-"`
 }
 
 // Attachment is a Matroska attachment.
@@ -126,10 +133,13 @@ func (p *Prober) Probe(ctx context.Context, path string) (*MediaInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if res.OutputTruncated {
+	if res.StdoutTruncated {
 		// The runner kept only the first part of the document, which would
 		// fail to parse below; the reason is named instead so the report
-		// does not call a file unparseable for the wrong reason.
+		// does not call a file unparseable for the wrong reason. Only the
+		// document on standard output counts: standard error is read for
+		// the error message alone, so a demuxer that printed diagnostics
+		// past the bound has not cost the run a complete probe.
 		return nil, fmt.Errorf("ffprobe: output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout))
 	}
 	var fp ffprobeOut
@@ -352,7 +362,7 @@ func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 		m.MkvErrors = append(m.MkvErrors, err.Error())
 		return
 	}
-	if res.OutputTruncated {
+	if res.StdoutTruncated {
 		if m.IsMatroska() {
 			m.MkvErrors = append(m.MkvErrors, fmt.Sprintf("mkvmerge -J output was longer than the runner keeps (%d bytes) and was cut", len(res.Stdout)))
 		}
@@ -440,7 +450,8 @@ func (p *Prober) mergeMkv(ctx context.Context, to time.Duration, m *MediaInfo) {
 			s.TextSubtitle = s.TextSubtitle || t.Properties.TextSubtitles
 		}
 		if typ == "video" && t.Properties.raw != nil {
-			s.Color.merge(colorFromMkv(t.Properties.raw))
+			s.MkvColor = colorFromMkv(t.Properties.raw)
+			s.Color.merge(s.MkvColor)
 			s.HDR = addLabel(s.HDR, transferLabel(s.Color.Transfer))
 		}
 	}

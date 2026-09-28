@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,10 +204,22 @@ func TestColorHostileFFprobeJSON(t *testing.T) {
 		}},
 		{"content light above 16 bits", side(`[{"side_data_type":"Content light level metadata","max_content":65536,"max_average":400}]`), []string{"max_cll"}, nil},
 		{"content light negative", side(`[{"side_data_type":"Content light level metadata","max_content":1000,"max_average":-1}]`), []string{"max_fall"}, nil},
-		{"content light missing field", side(`[{"side_data_type":"Content light level metadata","max_content":1000}]`), nil, func(t *testing.T, s Stream) {
+		// A half entry is malformed on the missing side, as a partial set
+		// of chromaticity coordinates is, so that a source with a half
+		// entry and an output with no entry never compare as equal.
+		{"content light missing fall", side(`[{"side_data_type":"Content light level metadata","max_content":1000}]`), []string{"max_fall"}, func(t *testing.T, s Stream) {
 			c := s.Color
 			if c.Light != nil {
 				t.Fatalf("half a content light level was kept: %+v", c.Light)
+			}
+			if d := ColorDiff(&c, &Color{Transfer: "smpte2084"}); !reflect.DeepEqual(d, []string{"max_fall lost (was malformed)"}) {
+				t.Fatalf("a half entry compared as no entry: %q", d)
+			}
+		}},
+		{"content light missing cll", side(`[{"side_data_type":"Content light level metadata","max_average":400}]`), []string{"max_cll"}, nil},
+		{"content light missing both", side(`[{"side_data_type":"Content light level metadata"}]`), nil, func(t *testing.T, s Stream) {
+			if s.Color.Light != nil {
+				t.Fatalf("an empty entry was kept: %+v", s.Color.Light)
 			}
 		}},
 		{"dolby vision profile out of range", side(`[{"side_data_type":"DOVI configuration record","dv_profile":128,"dv_level":6,"rpu_present_flag":1,"el_present_flag":0,"bl_present_flag":1,"dv_bl_signal_compatibility_id":1}]`), []string{"dv_profile"}, func(t *testing.T, s Stream) {
@@ -563,6 +578,14 @@ func TestColorDiff(t *testing.T) {
 		}, []string{"red_x changed from 0.708 to 0.7087", "max_luminance changed from 1000 to 1000.9"}},
 		{"value nudged by ten parts per million", hdr, func() Color { c := clone(hdr); c.Mastering.MaxLuminance = 1000.01; return c },
 			[]string{"max_luminance changed from 1000 to 1000.01"}},
+		// A nudge above the tolerance but below what six digits show is
+		// still reported, and the message then carries the exact values so
+		// it never reads as a change from a value to itself. 0.31270035 is
+		// representable in float32, so mkvpropedit can write it, and it is
+		// 1.1 parts per million from 0.3127.
+		{"value nudged below the display precision", func() Color { c := clone(hdr); c.Mastering.WhiteX = 0.3127; return c }(),
+			func() Color { c := clone(hdr); c.Mastering.WhiteX = 0.31270035; return c },
+			[]string{"white_x changed from 0.3127 (0.3127) to 0.3127 (0.31270035)"}},
 		{"luminance half lost", hdr, func() Color { c := clone(hdr); c.Mastering.HasLuminance = false; return c },
 			[]string{"min_luminance lost (was 0.0001)", "max_luminance lost (was 1000)"}},
 		{"max cll changed", hdr, func() Color { c := clone(hdr); c.Light.MaxCLL = 999; return c }, []string{"max_cll changed from 1000 to 999"}},
@@ -646,5 +669,110 @@ func TestProbeHDRFixtures(t *testing.T) {
 	}
 	if v = m.StreamsOf("video"); len(v[0].HDR) != 0 || !v[0].Color.Empty() {
 		t.Fatalf("clean.mkv reports colour: %v %s", v[0].HDR, v[0].Color.String())
+	}
+}
+
+// MkvColor is mkvmerge's own view of a video track, kept apart from the
+// merged Color so the remuxer can tell what mkvmerge will carry by itself.
+// For a Matroska source it holds the whole header; for an MP4 source
+// mkvmerge reads the colr primaries, transfer and matrix but not the range
+// flag, the mastering display or the content light levels, and the merged
+// Color holds those from ffprobe alone. The MP4 half of this test is what
+// the remuxer's colour options rest on, so a change in mkvmerge's MP4
+// reader shows up here first.
+func TestProbeKeepsMkvmergeColourView(t *testing.T) {
+	r := testutil.Need(t, exec.FFprobe, exec.MKVMerge)
+	root := testutil.Fixtures(t)
+	p := &Prober{Runner: r, Timeout: time.Minute}
+	m, err := p.Probe(context.Background(), root+"/hdr10.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := m.StreamsOf("video")[0].MkvColor
+	if mk.Range != "tv" || mk.Mastering == nil || !mk.Mastering.HasPrimaries || !mk.Mastering.HasLuminance || mk.Light == nil {
+		t.Fatalf("hdr10.mkv: mkvmerge's view lacks header values: %s", mk.String())
+	}
+	if diffs := ColorDiff(&m.StreamsOf("video")[0].Color, &mk); len(diffs) != 0 {
+		t.Fatalf("hdr10.mkv: mkvmerge's view differs from the merged one: %v", diffs)
+	}
+	m, err = p.Probe(context.Background(), root+"/hdr10.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.StreamsOf("video")[0]
+	if !m.MkvIdentified {
+		t.Fatal("hdr10.mp4: mkvmerge did not identify the file")
+	}
+	mk = s.MkvColor
+	if mk.Primaries != "bt2020" || mk.Transfer != "smpte2084" || mk.Matrix != "bt2020nc" {
+		t.Fatalf("hdr10.mp4: mkvmerge did not read the colr atom: %s", mk.String())
+	}
+	if mk.Range != "" || mk.Mastering != nil || mk.Light != nil || len(mk.Malformed) != 0 {
+		t.Fatalf("hdr10.mp4: mkvmerge's MP4 reader now carries more than it did; the remuxer's colour options rest on this: %s", mk.String())
+	}
+	c := s.Color
+	if c.Range != "tv" || c.Mastering == nil || !c.Mastering.HasPrimaries || !c.Mastering.HasLuminance || c.Light == nil {
+		t.Fatalf("hdr10.mp4: the merged view lost ffprobe's values: %s", c.String())
+	}
+	want := probeJSON(t, hdr10Stream).Streams[0].Color
+	if diffs := ColorDiff(&want, &c); len(diffs) != 0 {
+		t.Fatalf("hdr10.mp4: %v\n%s", diffs, c.String())
+	}
+	// The MkvColor of a stream mkvmerge never matched is empty, as is that
+	// of a file mkvmerge did not run on.
+	m, err = p.Probe(context.Background(), root+"/sample.avi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := m.StreamsOf("video"); len(v) != 1 || !v[0].MkvColor.Empty() {
+		t.Fatalf("sample.avi: %s", v[0].MkvColor.String())
+	}
+}
+
+// A probe whose ffprobe printed a complete document on standard output
+// but ran past the runner's bound on standard error is a complete probe:
+// standard error is read for the error message alone, so its overflow
+// must not discard the document or be reported as a cut document with a
+// standard output byte count. The converse still fails closed: a document
+// that itself runs past the bound is refused with the cut named.
+func TestProbeStderrOverflowKeepsDocument(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	dir := t.TempDir()
+	doc := `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","color_range":"tv"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"4.0"}}`
+	// flood writes about 130 KiB with shell builtins alone, since the
+	// runner hands the child a scrubbed environment with no PATH.
+	flood := func(fd string) string {
+		return "i=0\nwhile [ $i -lt 2000 ]; do printf '%s\\n' '" + strings.Repeat("x", 64) + "' " + fd + "; i=$((i+1)); done\n"
+	}
+	stub := func(body string) {
+		t.Helper()
+		script := filepath.Join(dir, "ffprobe")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"exit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AMUXIFY_FFPROBE", script)
+	}
+	t.Setenv("AMUXIFY_MKVMERGE", filepath.Join(dir, "no-such-mkvmerge"))
+	r := &exec.Runner{MaxOutput: 8192}
+	p := &Prober{Runner: r, Timeout: time.Minute}
+
+	stub("printf '%s' '" + doc + "'\n" + flood("1>&2"))
+	m, err := p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
+	if err != nil {
+		t.Fatalf("a complete document was refused because standard error overflowed: %v", err)
+	}
+	if m.Container != "mp4" || len(m.Streams) != 1 || m.Streams[0].Color.Range != "tv" {
+		t.Fatalf("document not read whole: %+v", m)
+	}
+
+	stub("printf '%s' '" + strings.TrimSuffix(doc, "}") + ",\"tags\":{\"comment\":\"'\n" + flood("") + "printf '\"}}}'\n")
+	_, err = p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
+	if err == nil || !strings.Contains(err.Error(), "longer than the runner keeps (8192 bytes)") {
+		t.Fatalf("a cut document was not refused by name: %v", err)
 	}
 }
