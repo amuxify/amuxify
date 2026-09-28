@@ -173,10 +173,6 @@ func TestScanPathParallelOrderAndCancel(t *testing.T) {
 	}
 }
 
-// Guarantee 1 for the quarantine claim itself, with the disk taken out of
-// the decision. The move primitive is held open for the first file to
-// quarantine, so that nothing sits at the destination yet, and a second
-// file that maps to the same place is scanned while that is so. It must be
 // Two blocked files whose names differ only in Unicode normalisation, the
 // composed and the decomposed spelling of an accented letter, quarantine to
 // one directory entry on a filesystem such as APFS, while their quarantine
@@ -203,6 +199,10 @@ func TestSerialKeysNormalisationSharesDirectoryKey(t *testing.T) {
 	}
 }
 
+// Guarantee 1 for the quarantine claim itself, with the disk taken out of
+// the decision. The move primitive is held open for the first file to
+// quarantine, so that nothing sits at the destination yet, and a second
+// file that maps to the same place is scanned while that is so. It must be
 // refused by the run-wide claim, with the words the disk would use, before
 // it reaches the directory creation or the move; the primitive runs exactly
 // once, the first file is moved once the hold is lifted, and the second

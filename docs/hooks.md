@@ -432,11 +432,11 @@ missed. A file that is still growing is never ingested. Right before
 each ingest the watcher checks the path again: it must be the same regular
 file it decided on, still inside the watched directory, reached through real
 directories and not through a symlink. A file that vanished before its turn
-is dropped without a report. Symlinks are listed but never followed, and each one
-is noticed once on stderr. A subdirectory that cannot be read is reported once,
-and again only when the error changes. The watcher keeps only the files
-present at the last pass in memory, so a folder that files pass through does
-not grow its footprint.
+is dropped without a report. Symlinks are listed but never followed, and each
+one is noticed once on stderr unless `--quiet` is given. A subdirectory that
+cannot be read is reported once, and again only when the error changes. The
+watcher keeps only the files present at the last pass in memory, so a folder
+that files pass through does not grow its footprint.
 
 Per-file verdicts stream in the same human format as `ingest`, as each file
 finishes, and a pass that ingested at least one file ends with the usual count

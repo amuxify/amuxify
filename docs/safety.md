@@ -264,9 +264,9 @@ the command line are still processed one after the other, and a file that
 quarantines to a name an earlier root already took meets that file on disk.
 The hook adapters and `watch` always use one job, because the download
 client, or the watcher's own polling, decides how many files are handed over
-at once. Whatever the job count, at most one `clamscan` process
-runs at a time, because each one loads the whole signature database; a
-worker whose file is due for it waits its turn.
+at once. Whatever the job count, at most one `clamscan` process runs at a
+time, because each one loads the whole signature database; a worker whose
+file is due for it waits its turn.
    Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
 `remux.TestParallelHardLinksSerialised`, `remux.TestSerialKeysOnlyMediaGetDestKeys`,
 `scan.TestScanPathParallelOrderAndCancel`, `scan.TestClamScanRunsOneAtATime`,
