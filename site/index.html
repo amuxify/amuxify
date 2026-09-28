@@ -138,6 +138,7 @@ package names per distro, pinning a version and the Docker image.</p>
 <tr><td><code>amuxify clean</code></td><td>Strip metadata, provenance atoms and extended attributes in place, tracks untouched</td><td>the file, after verification</td></tr>
 <tr><td><code>amuxify ingest</code></td><td>Scan, then rebuild into a verified MKV or clean in place, one pass per file</td><td>the file in place, after verification</td></tr>
 <tr><td><code>amuxify hook</code></td><td>Run ingest from SABnzbd, NZBGet, Sonarr or Radarr and exit the way that caller expects</td><td>as ingest</td></tr>
+<tr><td><code>amuxify watch</code></td><td>Poll a directory and run ingest on each file once it has stopped changing; for a sidecar container or a drop folder</td><td>as ingest</td></tr>
 <tr><td><code>amuxify doctor</code></td><td>Check tools, version floors, profile and environment</td><td>nothing</td></tr>
 <tr><td><code>amuxify profile</code></td><td>List or print built-in profiles</td><td>nothing</td></tr>
 </tbody>
