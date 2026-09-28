@@ -70,7 +70,6 @@ pre.terminal { background: var(--term-bg); color: var(--term-fg); }
 table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .95rem; }
 th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
-.guarantees li { margin: .35rem 0; }
 footer { padding: 2rem 1rem 3rem; color: var(--muted); text-align: center; border-top: 1px solid var(--line); margin-top: 2rem; }
 footer a { color: var(--muted); }
 @media (max-width: 640px) {
@@ -78,3 +77,5 @@ footer a { color: var(--muted); }
   .hero h1 { font-size: 2.1rem; }
   table { display: block; overflow-x: auto; }
 }
+.meta { color: var(--muted); font-size: .9rem; margin: 1rem 0 0; }
+h3 { font-size: 1.1rem; margin: 1.5rem 0 .4rem; }
