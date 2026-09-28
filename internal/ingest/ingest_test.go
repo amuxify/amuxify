@@ -213,7 +213,11 @@ func result(path string, verdict report.Severity, info *probe.MediaInfo) scan.Re
 		info.Path = path
 		fr.Info["container"] = info.Container
 	}
-	return scan.Result{File: fr, Info: info}
+	// The identity is recorded as the scanner would have recorded it, so a
+	// test that swaps the file after building the result exercises the
+	// check against the scan.
+	stat, _ := os.Lstat(path)
+	return scan.Result{File: fr, Info: info, Stat: stat}
 }
 
 func mkvInfo(streams ...probe.Stream) *probe.MediaInfo {
@@ -2314,5 +2318,72 @@ func TestClamscanErrorRefusedUnderStrict(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Guarantee 9 for the cleaner under ingest: the scan's verdict describes
+// the file the scanner examined, and the cleaner acts on it without a probe
+// of its own. A different regular file renamed onto the path since, the
+// same file written to since, or a result that never recorded what was
+// examined must all be refused before any tool runs; the entry at the path
+// keeps its bytes.
+func TestCleanScannedRefusesFileChangedAfterScan(t *testing.T) {
+	noTools(t)
+	dirty := mkvInfo()
+	dirty.Title = "Some Title"
+	for _, tc := range []struct {
+		name  string
+		alter func(t *testing.T, path string, sc *scan.Result)
+	}{
+		{"another file renamed onto the path", func(t *testing.T, path string, _ *scan.Result) {
+			other := write(t, filepath.Join(t.TempDir(), "other.mkv"), ebml+"other")
+			if err := os.Rename(other, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"the file written to since", func(t *testing.T, path string, _ *scan.Result) {
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("more"); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}},
+		{"no record of what was scanned", func(_ *testing.T, _ string, sc *scan.Result) {
+			sc.Stat = nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := write(t, filepath.Join(dir, "a.mkv"), ebml)
+			info := *dirty
+			sc := result(path, report.Pass, &info)
+			tc.alter(t, path, &sc)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in, tr := newIngester(t, nil, mustProfile(t, "homelab"))
+			fr := in.Cleaner.CleanScanned(context.Background(), sc)
+			f, ok := finding(fr, clean.CodeCleanFail)
+			if !ok || f.Severity != report.Fail || !strings.Contains(f.Message, "changed since the scan") {
+				t.Fatalf("%s %v: %+v", fr.Verdict, codes(fr), f)
+			}
+			if fr.Has(clean.CodeMetadata) {
+				t.Fatalf("reported as cleaned: %v", codes(fr))
+			}
+			if len(tr.all()) != 0 {
+				t.Fatalf("tools ran on a file the scan never examined: %v", tr.all())
+			}
+			if after, _ := os.ReadFile(path); string(after) != string(before) {
+				t.Fatal("the file at the path was changed")
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 1 {
+				t.Fatalf("directory holds %d entries, want one", len(entries))
+			}
+		})
 	}
 }

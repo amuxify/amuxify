@@ -120,7 +120,9 @@ func leftovers(t *testing.T, roots ...string) []string {
 }
 
 // mediaResult builds a scan result for a fake video file so remuxScanned can
-// be exercised without any tool.
+// be exercised without any tool. The result carries the file's identity as
+// the scanner would have recorded it, taken now, so a test that swaps the
+// file afterwards exercises the same check a real scan would.
 func mediaResult(path string, verdict report.Severity) scan.Result {
 	fr := report.FileResult{Path: path, Info: map[string]string{}}
 	switch verdict {
@@ -131,8 +133,10 @@ func mediaResult(path string, verdict report.Severity) scan.Result {
 	case report.Warn:
 		fr.Addf(scan.CodeLinkInTag, report.Warn, "test warn")
 	}
+	stat, _ := os.Lstat(path)
 	return scan.Result{
 		File: fr,
+		Stat: stat,
 		Info: &probe.MediaInfo{
 			Path: path, Container: "matroska", MkvSupported: true, MkvIdentified: true,
 			Streams: []probe.Stream{
@@ -2473,5 +2477,384 @@ func TestFoldsCaseDetection(t *testing.T) {
 		if got := flipCase(in); got != out {
 			t.Errorf("flipCase(%q) = %q, want %q", in, got, out)
 		}
+	}
+}
+
+// Guarantee 9 across the scan-to-remux window: the scan's verdict describes
+// the file the scanner examined, and a different regular file renamed onto
+// the name before the rebuild has never been scanned. It must be refused,
+// no tool may run against it, and it must keep its bytes. The first rows
+// hand a finished scan result to RemuxScanned, the way ingest and watch do;
+// the last row swaps inside RemuxPath, between its scan phase and its
+// rebuild phase, through the scanner's progress callback. The swapped-in
+// file carries an executable attachment and would be blocked by a scan of
+// its own, so an unchecked rebuild would remux a file the run never vetted.
+func TestSourceSwappedForUnscannedFileRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	for _, tc := range []struct {
+		name    string
+		inPlace bool
+		viaPath bool
+	}{
+		{"scanned result in place", true, false},
+		{"scanned result to output tree", false, false},
+		{"between the phases of RemuxPath", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.mkv")
+			if err := os.Rename(testutil.Copy(t, "clean.mkv"), path); err != nil {
+				t.Fatal(err)
+			}
+			swap := testutil.Copy(t, "exe_attach.mkv")
+			swapSum := fileSHA(t, swap)
+			if swapSum == fileSHA(t, path) {
+				t.Fatal("test setup: the swap must differ from the source")
+			}
+			outRoot := filepath.Join(t.TempDir(), "out")
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			rm.InPlace = tc.inPlace
+			if !tc.inPlace {
+				rm.OutputRoot = outRoot
+			}
+			doSwap := func() {
+				if err := os.Rename(swap, path); err != nil {
+					t.Fatalf("swap: %v", err)
+				}
+			}
+			var fr report.FileResult
+			var scanned int
+			if tc.viaPath {
+				rm.Scanner.Progress = func(sc scan.Result) {
+					if sc.File.Verdict >= report.Fail {
+						t.Errorf("scan of the real source failed: %v", codes(sc.File))
+					}
+					doSwap()
+					scanned = len(tr.all())
+				}
+				res, err := rm.RemuxPath(context.Background(), dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(res) != 1 {
+					t.Fatalf("%d results", len(res))
+				}
+				fr = res[0]
+			} else {
+				sc := rm.Scanner.ScanFile(context.Background(), path, dir)
+				if sc.Info == nil || sc.File.Verdict >= report.Fail {
+					t.Fatalf("scan: %v", codes(sc.File))
+				}
+				doSwap()
+				scanned = len(tr.all())
+				fr = rm.RemuxScanned(context.Background(), sc, dir, outRoot)
+			}
+			if _, err := os.Lstat(swap); err == nil {
+				t.Fatal("the swap never happened; the window was not exercised")
+			}
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "changed since the scan") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not say the file changed since the scan: %v", fr.Findings)
+			}
+			if got := tr.all()[scanned:]; len(got) != 0 {
+				t.Fatalf("tools ran against the unscanned file: %v", got)
+			}
+			if fileSHA(t, path) != swapSum {
+				t.Fatal("the unscanned file was rebuilt or removed")
+			}
+			if _, err := os.Lstat(outRoot); err == nil {
+				t.Fatal("output root created for a refused file")
+			}
+			if l := leftovers(t, dir); len(l) != 0 {
+				t.Fatalf("temp files left: %v", l)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 1 {
+				t.Fatalf("directory holds %d entries, want only the swapped-in file", len(entries))
+			}
+		})
+	}
+}
+
+// A scan result that carries no record of the file the scanner examined
+// says nothing about what sits at the path now, and the remuxer must not
+// take the verdict on trust. Nothing may run and the file must be left
+// alone.
+func TestScanResultWithoutIdentityRefused(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	src := testutil.Copy(t, "clean.mkv")
+	dir := filepath.Dir(src)
+	before := fileSHA(t, src)
+	rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+	rm.InPlace = true
+	sc := rm.Scanner.ScanFile(context.Background(), src, dir)
+	if sc.Info == nil || sc.File.Verdict >= report.Fail {
+		t.Fatalf("scan: %v", codes(sc.File))
+	}
+	sc.Stat = nil
+	scanned := len(tr.all())
+	fr := rm.RemuxScanned(context.Background(), sc, dir, "")
+	if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+		t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+	}
+	if got := tr.all()[scanned:]; len(got) != 0 {
+		t.Fatalf("tools ran on an unproven result: %v", got)
+	}
+	if fileSHA(t, src) != before {
+		t.Fatal("source changed")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+// Guarantee 3 and 6 in the identity window of the in-place rebuild: the
+// output takes the mode, ownership and time of the source that was
+// examined, never of whatever sits at the source's name at that moment. The
+// seam removes the source and plants a symlink to a world-writable victim
+// in its place right before the identity copy. A copy that read the name
+// would follow the link and hand the placed output the victim's 0777. The
+// pinned identity of the examined source (0640, an old stamp) must win, and
+// the victim must keep its own mode and time.
+func TestIdentityCopiedFromExaminedSourceNotFromSwappedLink(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits and symlinks differ on windows")
+	}
+	src := testutil.Copy(t, "clean.mkv")
+	dir := filepath.Dir(src)
+	if err := os.Chmod(src, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	srcStamp := time.Date(2010, 11, 12, 13, 14, 15, 0, time.UTC)
+	if err := os.Chtimes(src, srcStamp, srcStamp); err != nil {
+		t.Fatal(err)
+	}
+	victim := testutil.Copy(t, "clean.mkv")
+	victimBefore := fileSHA(t, victim)
+	if err := os.Chmod(victim, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	victimStamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(victim, victimStamp, victimStamp); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	t.Cleanup(func() { beforeIdentity = nil })
+	beforeIdentity = func(_, dest string) {
+		if dest != src {
+			t.Fatalf("seam ran for %s, want %s", dest, src)
+		}
+		if err := os.Remove(src); err != nil {
+			t.Fatalf("swap: %v", err)
+		}
+		if err := os.Symlink(victim, src); err != nil {
+			t.Fatalf("swap: %v", err)
+		}
+		swapped = true
+	}
+	rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+	rm.InPlace = true
+	res, err := rm.RemuxPath(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%d results", len(res))
+	}
+	fr := res[0]
+	if len(tr.writes()) == 0 {
+		t.Fatalf("mkvmerge never ran: %v", codes(fr))
+	}
+	if !swapped {
+		t.Fatalf("the seam never ran; the window was not exercised: %v", codes(fr))
+	}
+	// The rename over the source cannot see the link first (the comment in
+	// remux.go says why), so the built file lands at the source's name and
+	// is reported as placed; what this test pins down is whose identity it
+	// carries.
+	fi, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("nothing was placed over the planted link: %v", codes(fr))
+	}
+	if fi.Mode().Perm() == 0o777 {
+		t.Fatalf("the placed output took the victim's mode through the swapped link: %v", codes(fr))
+	}
+	if fi.Mode().Perm() != 0o640 || !fi.ModTime().Equal(srcStamp) {
+		t.Fatalf("placed output carries mode %o mtime %v, want the examined source's 0640 %v", fi.Mode().Perm(), fi.ModTime(), srcStamp)
+	}
+	vfi, err := os.Lstat(victim)
+	if err != nil || !vfi.Mode().IsRegular() || fsutil.Nlink(vfi) != 1 {
+		t.Fatalf("victim is no longer a plain regular file with one name: %v", err)
+	}
+	if vfi.Mode().Perm() != 0o777 || !vfi.ModTime().Equal(victimStamp) {
+		t.Fatalf("victim identity rewritten through the planted link: mode %o mtime %v", vfi.Mode().Perm(), vfi.ModTime())
+	}
+	if fileSHA(t, victim) != victimBefore {
+		t.Fatal("victim bytes changed")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+// Guarantee 3 for the output root amuxify names itself: a symlink planted
+// at <root>__remuxed, the sibling every run without --output writes into,
+// must not turn the run into a write somewhere else. The defaulted root is
+// refused before any file is rebuilt, nothing is written through the link,
+// and the link is left in place. Naming a symlink with --output stays the
+// user's own choice and keeps working; that row proves the refusal is
+// confined to the name amuxify picked. The last rows hand a scanned result
+// straight to RemuxScanned with the defaulted root, the way ingest and
+// watch do, and expect the per-file refusal.
+func TestDefaultOutputRootRefusesPlantedSymlink(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract)
+	plant := func(t *testing.T) (root, elsewhere string) {
+		parent := t.TempDir()
+		root = filepath.Join(parent, "in")
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "clean.mkv"), filepath.Join(root, "clean.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		elsewhere = t.TempDir()
+		if err := os.Symlink(elsewhere, root+"__remuxed"); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return root, elsewhere
+	}
+	untouched := func(t *testing.T, root, elsewhere string) {
+		t.Helper()
+		if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+			t.Fatalf("written through the planted link: %v", entries)
+		}
+		if fi, err := os.Lstat(root + "__remuxed"); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("planted symlink was replaced or removed: %v", err)
+		}
+		if l := leftovers(t, root, elsewhere); len(l) != 0 {
+			t.Fatalf("temp files left: %v", l)
+		}
+	}
+
+	t.Run("defaulted root through RemuxPath", func(t *testing.T) {
+		root, elsewhere := plant(t)
+		before := fileSHA(t, filepath.Join(root, "clean.mkv"))
+		rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err == nil {
+			t.Fatalf("RemuxPath accepted a symlink at the defaulted output root: %d results", len(res))
+		}
+		if !strings.Contains(err.Error(), "symlink") || !strings.Contains(err.Error(), root+"__remuxed") {
+			t.Fatalf("error does not name the symlink at the output root: %v", err)
+		}
+		if len(tr.all()) != 0 {
+			t.Fatalf("tools ran before the output root was refused: %v", tr.all())
+		}
+		if fileSHA(t, filepath.Join(root, "clean.mkv")) != before {
+			t.Fatal("source changed")
+		}
+		untouched(t, root, elsewhere)
+	})
+
+	t.Run("defaulted root that is a regular file", func(t *testing.T) {
+		parent := t.TempDir()
+		root := filepath.Join(parent, "in")
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(testutil.Copy(t, "clean.mkv"), filepath.Join(root, "clean.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(root+"__remuxed", []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+		_, err := rm.RemuxPath(context.Background(), root)
+		if err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("want a refusal naming the non-directory, got %v", err)
+		}
+		if len(tr.all()) != 0 {
+			t.Fatalf("tools ran before the output root was refused: %v", tr.all())
+		}
+		if b, err := os.ReadFile(root + "__remuxed"); err != nil || string(b) != "not a directory" {
+			t.Fatalf("the file at the defaulted root was changed: %q %v", b, err)
+		}
+	})
+
+	t.Run("explicit --output naming a symlink is honoured", func(t *testing.T) {
+		root, elsewhere := plant(t)
+		rm, _ := newRemuxer(t, r, mustProfile(t, "homelab"))
+		rm.OutputRoot = root + "__remuxed"
+		res, err := rm.RemuxPath(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 || res[0].Verdict >= report.Fail || !res[0].Has(CodePlaced) {
+			t.Fatalf("explicit output root refused: %v", codes(res[0]))
+		}
+		if _, err := os.Lstat(filepath.Join(elsewhere, "clean.mkv")); err != nil {
+			t.Fatalf("output not placed where --output pointed: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		isDir bool
+	}{
+		{"scanned result with the defaulted root of a directory", true},
+		{"scanned result with the defaulted root of a single file", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, elsewhere := plant(t)
+			path := filepath.Join(root, "clean.mkv")
+			before := fileSHA(t, path)
+			rm, tr := newRemuxer(t, r, mustProfile(t, "homelab"))
+			sc := rm.Scanner.ScanFile(context.Background(), path, root)
+			if sc.Info == nil || sc.File.Verdict >= report.Fail {
+				t.Fatalf("scan: %v", codes(sc.File))
+			}
+			scanned := len(tr.all())
+			var inputRoot, outRoot string
+			if tc.isDir {
+				inputRoot, outRoot = rm.Roots(root, true)
+			} else {
+				inputRoot, outRoot = rm.Roots(path, false)
+			}
+			if outRoot != root+"__remuxed" {
+				t.Fatalf("test setup: defaulted root is %s", outRoot)
+			}
+			fr := rm.RemuxScanned(context.Background(), sc, inputRoot, outRoot)
+			if fr.Verdict != report.Fail || !fr.Has(CodeRemuxFail) || fr.Has(CodePlaced) || fr.Output != "" {
+				t.Fatalf("%s %v output=%q", fr.Verdict, codes(fr), fr.Output)
+			}
+			said := false
+			for _, f := range fr.Findings {
+				if f.Code == CodeRemuxFail && strings.Contains(f.Message, "symlink") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+			}
+			if got := tr.all()[scanned:]; len(got) != 0 {
+				t.Fatalf("tools ran before the output root was refused: %v", got)
+			}
+			if fileSHA(t, path) != before {
+				t.Fatal("source changed")
+			}
+			untouched(t, root, elsewhere)
+		})
 	}
 }

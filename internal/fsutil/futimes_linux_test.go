@@ -93,14 +93,22 @@ func TestFutimesFallsBackWithoutProc(t *testing.T) {
 // The name-based fallback is the one place a name is used after the file
 // was opened, so it must refuse a name that no longer leads to that file:
 // another file renamed onto it, a symlink planted at it, or nothing at
-// all. The entry now at the name keeps its own times, and so does the file
-// that was opened.
+// all. It must also refuse the file that was opened once it has a second
+// name, because a second name is what a planter needs to put the file back
+// after renaming a victim onto the name for the duration of the call. The
+// entry now at the name keeps its own times, and so does the file that was
+// opened.
 func TestFutimesPathFallbackRefusesSwappedFile(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		swap func(t *testing.T, path, victim string)
 		want string
 	}{
+		{"second name of the opened file", func(t *testing.T, path, _ string) {
+			if err := os.Link(path, path+".second"); err != nil {
+				t.Fatal(err)
+			}
+		}, "hard links; expected 1"},
 		{"other file renamed onto the name", func(t *testing.T, path, victim string) {
 			if err := os.Rename(victim, path); err != nil {
 				t.Fatal(err)
@@ -268,7 +276,7 @@ func TestReplaceInPlaceOwnRefusesSwapDuringPathFallback(t *testing.T) {
 			}
 			t.Cleanup(func() { futimensFd = orig })
 
-			err = ReplaceInPlaceOwn(tmp, dest, own.Info())
+			err = ReplaceInPlaceOwn(tmp, dest, own.Info(), nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want a refusal saying %q", err, tc.want)
 			}

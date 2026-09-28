@@ -80,6 +80,21 @@ SECURITY.md.
    run reports the timeout as a failed remux or clean. The flush before
    placement goes through the descriptor held since the temp file was
    created, never through the name.
+   A terminal device planted at a name is refused the same way, and the
+   open is made with `O_NOCTTY`, so a run that leads its session and has no
+   controlling terminal (under a container init, systemd or setsid) does not
+   acquire the device as one before the refusal.
+   The source is pinned as well: the entry that was examined at the start
+   of a clean or a remux is recorded, and its name is checked against that
+   record right before every tool that opens it by name (mkvpropedit, ffmpeg,
+   mkvmerge) and right before the source is replaced or removed, so a link
+   swapped onto the source in any of those windows is refused rather than
+   edited or renamed over. The identity copied to an in-place output is
+   that pinned record, never a fresh look at the name.
+   The output root a remux names itself, `<root>__remuxed`, is created
+   without following a link and refused when a symlink or anything but a
+   directory sits at that name; a root named with `--output` is the user's
+   own choice and is followed.
     `watch` lists symlinks without following them, refuses a directory that
    was replaced by a symlink between two passes, and checks the whole path
    again right before each ingest.
@@ -87,8 +102,15 @@ SECURITY.md.
    `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
    `fsutil.TestCreateTempPinsInode`,
    `remux.TestTempSwappedBeforePlacementRefused`,
+   `remux.TestSourceSwappedForSymlinkRefused`,
+   `remux.TestIdentityCopiedFromExaminedSourceNotFromSwappedLink`,
+   `remux.TestDefaultOutputRootRefusesPlantedSymlink`,
+   `cli.TestDefaultOutputRootRefusesPlantedSymlink`,
    `clean.TestMp4RewriteRefusesSwappedTemp`,
+   `clean.TestMatroskaEditRefusesSourceSwappedForSymlinkAfterProbe`,
+   `clean.TestMp4RewriteRefusesSourceSwappedAfterHashes`,
    `fsutil.TestOpenRegularRefusesNamedPipeAndEveryOtherKind`,
+   `fsutil.TestOpenRegularDoesNotAcquireControllingTerminal`,
    `fsutil.TestOpenOwnRefusesNamedPipe`,
    `fsutil.TestReplaceInPlaceOwnRefusesNamedPipeAtTemp`,
    `fsutil.TestCreateTempReplacesPlantedPipe`,
@@ -178,8 +200,18 @@ SECURITY.md.
    modification time is set with `utimensat` on that descriptor, which does
    not need `/proc`; the `/proc/self/fd` form the Go standard library uses
    is the second attempt, and only when both are refused is the file's own
-   name used, after a check that the name still leads to the open file and
-   with a call that never follows a symlink. A mode or a modification time
+   name used. That fallback checks, immediately before the call and again
+   immediately after it, that the name leads to the open file and that the
+   file has that one name and no other, and the call itself never follows
+   a symlink. What those two looks prove is exactly that; they do not prove
+   that nothing sat at the name in between, and the fallback comment in
+   `internal/fsutil/futimes_linux.go` says what such a swap would need
+   (a second link to the temp file, which `fs.protected_hardlinks` denies
+   a different user) and what it could land (the source's time on a file the
+   planter can already write). The identity that is copied is the source's
+   as it was examined at the start, never a fresh look at the source's
+   name, so a source swapped for a link during the run cannot hand the
+   output its target's mode. A mode or a modification time
    that cannot be set is an error, not a best-effort step: the run stops
    before the rename, the source keeps its name, and the file is reported
    as a failed replacement. The same happens when the name-based fallback
@@ -187,6 +219,7 @@ SECURITY.md.
    wrong identity is never placed. Only ownership is best effort, because
    a non-root user cannot give a file away.
    Test: `fsutil.TestReplaceInPlacePreservesModeAndMtime`, `remux.TestInPlacePreservesIdentity`,
+   `remux.TestIdentityCopiedFromExaminedSourceNotFromSwappedLink`,
    `fsutil.TestReplaceInPlaceOwnFailsWhenTimeCannotBeSet`,
    `fsutil.TestFutimesFallsBackWithoutProc`, `fsutil.TestFutimesPathFallbackRefusesSwappedFile`,
    `fsutil.TestFutimesDescriptorCallIgnoresTheName`,
@@ -215,8 +248,18 @@ SECURITY.md.
    larger than 2047 MiB, which libclamav cannot scan at all, is
    `CLAMAV_ERROR` before the scanner starts: FAIL and refused under a
    profile that requires the scan, WARN and probed like any other file
-   under an optional one, and never reported clean.
+   under an optional one, and never reported clean. A verdict belongs to the
+   file the scanner examined: the scan records that file's identity, size
+   and modification time, and a remux or a clean that acts on the verdict
+   without a probe of its own first checks that the entry at the path is
+   still that file. A file swapped onto the path after the scan, the same
+   file written to since, or a result with no record of what was examined is
+   refused before any tool runs, so nothing passes on the strength of
+   another file's scan.
    Test: `remux.TestBlockRefusedEvenWithForce`,
+   `remux.TestSourceSwappedForUnscannedFileRefused`,
+   `remux.TestScanResultWithoutIdentityRefused`,
+   `ingest.TestCleanScannedRefusesFileChangedAfterScan`,
    `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`,
    `scan.TestClamscanInfectedBlocks`,
    `scan.TestClamAVFlagForcesAndNeverDowngrades`,
