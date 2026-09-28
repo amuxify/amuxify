@@ -147,12 +147,13 @@ says to write `--quarantine=<dir>` with that argument, because that is the
 usual reason for a stray directory. The hint only ever names a value the
 wrapper added, never one of SABnzbd's own parameters: with nine arguments
 the added directory is the first when the last is empty or a URL, as
-SABnzbd's failure URL is, and the eighth is a number, as its status is; it
-is the last when the eighth is empty or a URL and the seventh is a number.
-No hint is printed when neither reading fits, for instance when the indexer
-sent a bare path or a number as the failure URL and the wrapper appended an
-empty argument, because a reading that rested on the failure URL alone
-could be made to name the job directory.
+SABnzbd's failure URL is, the eighth is a number, as its status is, and the
+seventh is not one; it is the last when the eighth is empty or a URL and
+the seventh is a number. No hint is printed when neither reading fits, for
+instance when the indexer sent a bare path as the failure URL, or sent a
+number as the failure URL and the wrapper appended an empty argument,
+because a reading that rested on the failure URL alone could be made to
+name the job directory.
 
 Flags such as `--quarantine=DIR`, `--fail-on`, `--category` and
 `--remove-blocked-sidecars` are recognised in any position before the first
