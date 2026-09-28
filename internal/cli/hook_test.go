@@ -1344,7 +1344,11 @@ func TestHookSABnzbdArgumentForms(t *testing.T) {
 		// and never SABnzbd's job directory, which is first: a user who
 		// followed a hint naming the job directory would make a downloaded
 		// release tree the quarantine root. When the indexer's failure URL
-		// is a bare path the shape cannot be told and no hint is printed.
+		// is a bare path or a number the shape cannot be told and no hint is
+		// printed, also when the wrapper's stray argument is empty, as
+		// `hook sabnzbd --quarantine "$@" "$EXTRA"` gives with EXTRA unset:
+		// an empty last argument has the failure URL's shape, and only the
+		// status slot then tells the two readings apart.
 		stray := t.TempDir()
 		for _, env := range [][]string{jobEnv("sabnzbd", dir), nil} {
 			for _, failURL := range []string{"", "https://indexer/report/1"} {
@@ -1369,13 +1373,20 @@ func TestHookSABnzbdArgumentForms(t *testing.T) {
 					}
 				}
 			}
-			hookEnv(t, env...)
-			eight := sab(dir)
-			eight[7] = "/"
-			code, out, errs := run(t, append(append([]string{"hook", "sabnzbd", "--quarantine"}, eight...), stray)...)
-			want := "hook sabnzbd: expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with " + fmt.Sprintf("%q", dir) + "\n"
-			if code != 2 || out != "" || !strings.HasSuffix(errs, want) {
-				t.Errorf("env=%v bare path as the failure URL: exit %d stdout %q stderr %q", env != nil, code, out, errs)
+			for _, failURL := range []string{"/", "0", "-1"} {
+				for _, last := range []string{stray, ""} {
+					hookEnv(t, env...)
+					eight := sab(dir)
+					eight[7] = failURL
+					code, out, errs := run(t, append(append([]string{"hook", "sabnzbd", "--quarantine"}, eight...), last)...)
+					want := "hook sabnzbd: expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with " + fmt.Sprintf("%q", dir) + "\n"
+					if code != 2 || out != "" || !strings.HasSuffix(errs, want) {
+						t.Errorf("env=%v url=%q last=%q: exit %d stdout %q stderr %q", env != nil, failURL, last, code, out, errs)
+					}
+					if strings.Contains(errs, "--quarantine=") {
+						t.Errorf("env=%v url=%q last=%q: a hint was printed: %q", env != nil, failURL, last, errs)
+					}
+				}
 			}
 		}
 		if entries, err := os.ReadDir(stray); err != nil || len(entries) != 0 {
@@ -1458,6 +1469,102 @@ func TestHookSABnzbdArgumentForms(t *testing.T) {
 			}
 		}
 		unchanged(t, before, tree(t, dir))
+	})
+	t.Run("an NZB named like a directory in the working directory never refuses the job", func(t *testing.T) {
+		// The second parameter is the original NZB name, which the indexer
+		// chooses, and the shifted-shape check must not resolve it against
+		// the script's working directory: a subdirectory of that name would
+		// otherwise refuse every job served under it, which under SABnzbd's
+		// default script_can_fail=off leaves the job successful and unscanned.
+		// A bare name is never looked up, so the seven- and eight-parameter
+		// jobs are scanned, with and without a bare --quarantine, and the
+		// subdirectory is neither entered nor written to. A directory named
+		// with a path in that place is still the shifted shape.
+		cwd := t.TempDir()
+		named := filepath.Join(cwd, "Show.S01E01.nzb")
+		if err := os.MkdirAll(filepath.Join(cwd, "rel", "dir"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(named, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(cwd)
+		state := t.TempDir()
+		for _, n := range []int{7, 8} {
+			for _, bare := range []bool{false, true} {
+				hookEnv(t)
+				args := []string{"--dry-run", "--state-dir", state, "hook", "sabnzbd", "--remove-blocked-sidecars"}
+				if bare {
+					args = append(args, "--quarantine")
+				}
+				code, out, errs := run(t, append(args, sab(dir)[:n]...)...)
+				if code != 1 || errs != "" || !strings.HasPrefix(out, "amuxify hook sabnzbd: Show (pp status 0)\n") || !strings.Contains(out, "BLOCK "+url+"\n") {
+					t.Errorf("%d parameters bare=%v: exit %d\n%s%s", n, bare, code, out, errs)
+				}
+				if strings.Contains(out, named) || strings.Contains(errs, "second parameter") {
+					t.Errorf("%d parameters bare=%v: the NZB name was looked up:\n%s%s", n, bare, out, errs)
+				}
+			}
+		}
+		if entries, err := os.ReadDir(named); err != nil || len(entries) != 0 {
+			t.Errorf("the directory named like the NZB was written to: %v %v", entries, err)
+		}
+		hookEnv(t)
+		shifted := append([]string{filepath.Join(t.TempDir(), "q"), filepath.Join("rel", "dir")}, sab(dir)[1:7]...)
+		code, out, errs := run(t, append([]string{"--dry-run", "--state-dir", state, "hook", "sabnzbd"}, shifted...)...)
+		if code != 2 || out != "" || !strings.Contains(errs, fmt.Sprintf("%q", filepath.Join("rel", "dir"))+" is a directory where SABnzbd's second parameter") {
+			t.Errorf("relative directory second: exit %d stdout %q stderr %q", code, out, errs)
+		}
+		unchanged(t, before, tree(t, dir))
+	})
+	t.Run("seven parameters under the environment form are refused", func(t *testing.T) {
+		// A SABnzbd that sets SAB_COMPLETE_DIR passes eight parameters, so
+		// seven means a flag that takes a value stands before "$@" in the
+		// wrapper and swallowed the job directory. With `--category "$@"`
+		// the job directory becomes the category and the failure URL lands
+		// in the status slot, so a job whose indexer set one would run and
+		// then be skipped as a category mismatch; with `--state-dir "$@"`
+		// and a bare --quarantine the state directory would be the release
+		// tree and BLOCK files would be quarantined into it. Both are
+		// refused before anything runs, the message says what happened, no
+		// hint names a value, and nothing is created under the job.
+		jdir := t.TempDir()
+		jurl := write(t, filepath.Join(jdir, "a.url"), "x\n")
+		jbefore := tree(t, jdir)
+		rest := []string{"Show.nzb", "Show", "1", "tv", "alt.binaries", "0"}
+		want := `hook sabnzbd: SABnzbd set SAB_COMPLETE_DIR and passes eight parameters, got 7 beginning with "Show.nzb"; a flag that takes a value written before "$@" in the wrapper swallows the first one` + "\n"
+		for _, tc := range []struct {
+			name string
+			args []string
+		}{
+			{"--category swallows the directory", append(append([]string{"hook", "sabnzbd", "--category", jdir}, rest...), "https://indexer/fail/1")},
+			{"--category swallows the directory and the indexer set no failure URL", append(append([]string{"hook", "sabnzbd", "--category", jdir}, rest...), "")},
+			{"--state-dir swallows the directory under a bare --quarantine", append(append([]string{"hook", "sabnzbd", "--state-dir", jdir, "--quarantine", "--remove-blocked-sidecars"}, rest...), "https://indexer/fail/1")},
+			{"--json-out swallows the directory", append(append([]string{"hook", "sabnzbd", "--json-out", jdir}, rest...), "")},
+		} {
+			hookEnv(t, jobEnv("sabnzbd", jdir)...)
+			code, out, errs := run(t, tc.args...)
+			if code != 2 || out != "" || !strings.HasSuffix(errs, want) {
+				t.Errorf("%s: exit %d stdout %q stderr %q", tc.name, code, out, errs)
+			}
+			if strings.Contains(errs, "--quarantine=") {
+				t.Errorf("%s: a hint was printed: %q", tc.name, errs)
+			}
+			if _, err := os.Lstat(jurl); err != nil {
+				t.Errorf("%s: the block file was moved or removed", tc.name)
+			}
+			unchanged(t, jbefore, tree(t, jdir))
+		}
+		if _, err := os.Lstat(filepath.Join(jdir, "quarantine")); err == nil {
+			t.Error("a quarantine directory was created inside the release tree")
+		}
+		// The same seven without the environment are an older SABnzbd's
+		// call and are scanned.
+		hookEnv(t)
+		code, out, errs := run(t, append([]string{"--dry-run", "hook", "sabnzbd", jdir}, rest...)...)
+		if code != 1 || errs != "" || !strings.Contains(out, "BLOCK "+jurl+"\n") {
+			t.Errorf("positional form: exit %d\n%s%s", code, out, errs)
+		}
 	})
 	t.Run("status -1 with a directory that does not exist", func(t *testing.T) {
 		// A failed job is skipped on the status alone. The directory is
