@@ -174,7 +174,7 @@ func TestClamscanMissingWithStrictProfile(t *testing.T) {
 	if code != 2 || !strings.Contains(out, "MISSING  clamav       profile requires clamscan but it is not installed\n") {
 		t.Errorf("doctor: exit %d\n%s", code, out)
 	}
-	if !strings.Contains(out, "WARN     clamscan     not found (optional: safety.clamav = optional|required)\n") || strings.Contains(out, "clamav-db") {
+	if !strings.Contains(out, "WARN     clamscan     not found (ClamAV 0.103 or newer for --alert-exceeds-max; optional: safety.clamav = optional|required)\n") || strings.Contains(out, "clamav-db") {
 		t.Errorf("doctor tool rows:\n%s", out)
 	}
 	code, out, _ = run(t, "--profile", "strict", "--json", "doctor")
