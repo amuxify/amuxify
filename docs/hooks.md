@@ -251,13 +251,20 @@ begin with `[NZB]` for any other reason, for example a file name that contains
 a newline, is written as `[INFO] (not a command) [NZB] ...`, so only the
 adapter itself can hand NZBGet a command.
 
-When the run verdict is BLOCK the adapter prints `[NZB] MARK=BAD` as its last
-stdout line, whatever `--fail-on` says. NZBGet then marks the download as bad,
-and Sonarr and Radarr treat a bad download as a failed one: they blocklist the
-release and search for another. A WARN or FAIL verdict never prints that line,
-so a file that is merely damaged or noisy fails the job without making the arr
-re-grab the release; a BLOCK, which means an executable payload, a polyglot or
-a blocked sidecar, is exactly the case where a replacement is wanted.
+Sonarr and Radarr read NZBGet's history and treat any download whose script
+status is not `SUCCESS` or `NONE` as a failed download: they blocklist the
+release and search for another one. Exit 94 sets that status, so a FAIL
+verdict costs you the release on NZBGet exactly as it does on SABnzbd with
+`script_can_fail` on. If a damaged or noisy file should not cost you the
+release, pass `--fail-on block` on the `exec` line: a FAIL then exits 93, the
+file is imported and its findings stay in the log.
+
+When the run verdict is BLOCK the adapter also prints `[NZB] MARK=BAD` as its
+last stdout line, whatever `--fail-on` says. NZBGet then marks the download as
+bad in its own history, which the arrs also read as a failed download, so a
+BLOCK, which means an executable payload, a polyglot or a blocked sidecar, is
+blocklisted even under `--fail-on block`. A WARN or FAIL verdict never prints
+that line.
 
 To keep a JSON report of each run, add `--json-out` with a path that is new for
 each run, for example `--json-out "/reports/$NZBPP_NZBID.json"`, to the `exec`
