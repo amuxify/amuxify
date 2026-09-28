@@ -116,8 +116,9 @@ make build && ./bin/amuxify doctor
 ```
 
 amuxify drives external tools: **MKVToolNix 50+** (mkvmerge, mkvpropedit) and
-**ffmpeg 4.4+** (5.0+ recommended). exiftool and clamscan are optional.
-`amuxify doctor` tells you what is missing. See [docs/install.md](docs/install.md).
+**ffmpeg 4.4+** (5.0+ recommended). exiftool and clamscan (ClamAV 0.103+)
+are optional. `amuxify doctor` tells you what is missing. See
+[docs/install.md](docs/install.md).
 
 ## Safety guarantees
 

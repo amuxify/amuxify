@@ -266,6 +266,88 @@ func TestClamscanMissingWithRequiredProfile(t *testing.T) {
 	}
 }
 
+// A clamscan that is installed and executable but cannot be run at all,
+// here one whose interpreter does not exist, is a third state between
+// missing and present: the tool row can only warn that the version could
+// not be read. Under a profile that requires the scan every media file
+// would be FAIL CLAMAV_ERROR, so the doctor must report a missing
+// requirement (exit 2 in the CLI) and not a warning; under an optional
+// profile the warning is all there is.
+func TestClamscanCannotRunWithRequiredProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub is a POSIX interpreter line")
+	}
+	p := filepath.Join(t.TempDir(), "clamscan")
+	if err := os.WriteFile(p, []byte("#!"+filepath.Join(t.TempDir(), "no-such-shell")+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_CLAMSCAN", p)
+	checks, worst := runProfile(t, "strict", exec.ClamScan, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract, exec.FFmpeg, exec.FFprobe)
+	tool, ok := checkOf(checks, "clamscan")
+	if !ok || tool.Status != report.Warn || !strings.Contains(tool.Detail, "cannot read version") {
+		t.Fatalf("clamscan row %+v", tool)
+	}
+	c, ok := checkOf(checks, "clamav")
+	if !ok || c.Status != report.Usage || !c.Required || !strings.HasPrefix(c.Detail, "profile requires clamscan but it cannot be run: ") {
+		t.Fatalf("clamav row %+v", c)
+	}
+	if worst != report.Usage {
+		t.Fatalf("worst %s", worst)
+	}
+	if _, ok := checkOf(checks, "clamav-db"); ok {
+		t.Fatal("clamav-db row present for a clamscan that printed no version")
+	}
+	if n := strings.Count(Format(checks), "MISSING  clamav "); n != 1 {
+		t.Fatalf("%d MISSING clamav rows in the terminal form:\n%s", n, Format(checks))
+	}
+	checks, _ = runProfile(t, "archive", exec.ClamScan, exec.MKVMerge, exec.MKVPropedit, exec.MKVExtract, exec.FFmpeg, exec.FFprobe)
+	if _, ok := checkOf(checks, "clamav"); ok {
+		t.Fatal("optional profile produced the required-clamscan row")
+	}
+	other := report.Pass
+	for _, c := range checks {
+		if c.Name != "clamscan" && c.Status > other {
+			other = c.Status
+		}
+	}
+	if tool, _ := checkOf(checks, "clamscan"); tool.Status != report.Warn || other > report.Warn {
+		t.Fatalf("archive: clamscan row %+v, other rows %s", tool, other)
+	}
+}
+
+// The scan passes --alert-exceeds-max, which ClamAV 0.103 introduced, so
+// the doctor holds clamscan to that floor the way it holds the other tools
+// to theirs: an older release is reported too old (exit 2 in the CLI,
+// since every scan with it would be CLAMAV_ERROR), the floor release and
+// every later one pass, and a version line the floor cannot be read from
+// is a warning rather than a pass.
+func TestClamscanVersionFloor(t *testing.T) {
+	cases := []struct {
+		line string
+		want report.Severity
+	}{
+		{"ClamAV 0.102.4/27000/Sat Sep 26 08:33:45 2026", report.Usage},
+		{"ClamAV 0.99.4", report.Usage},
+		{"ClamAV 0.103.0/27000/Sat Sep 26 08:33:45 2026", report.Pass},
+		{"ClamAV 0.103.8/27000/Sat Sep 26 08:33:45 2026", report.Pass},
+		{"ClamAV 1.5.4/28134/Fri Sep 25 08:25:58 2026", report.Pass},
+		{"clamscan, no version here", report.Warn},
+	}
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			fakeTool(t, exec.ClamScan, tc.line, "", 0)
+			checks, _ := runProfile(t, "archive", exec.ClamScan)
+			tool, ok := checkOf(checks, "clamscan")
+			if !ok || tool.Status != tc.want {
+				t.Fatalf("clamscan row %+v, want %s", tool, tc.want)
+			}
+			if tc.want == report.Usage && !strings.Contains(tool.Detail, "is older than ClamAV 0.103 or newer for --alert-exceeds-max") {
+				t.Fatalf("detail %q", tool.Detail)
+			}
+		})
+	}
+}
+
 // Under a profile that requires the scan, a clamscan with no signature
 // database is a missing requirement (exit 2 in the CLI), because every
 // scan would exit 2 and fail every media file; with a database, old or

@@ -318,7 +318,7 @@ on its own.
 | `DECODE_FAIL` | FAIL | scan, remux, ingest | ffmpeg reported errors while decoding. |
 | `NO_DURATION` | WARN | scan | The container reports no duration. |
 | `CLAMAV_INFECTED` | BLOCK | scan | clamscan reported a match. |
-| `CLAMAV_ERROR` | WARN, or FAIL when the profile requires the scan | scan | clamscan could not run, ran past the timeout or exited with an error. Under `safety.clamav = optional` the file is still probed and verified; under `required` the scan of the file stops there and `ingest` refuses it. |
+| `CLAMAV_ERROR` | WARN, or FAIL when the profile requires the scan | scan | clamscan could not run, ran past the timeout, exited with an error or reported the file as above its size limit, or the file is larger than 2047 MiB, which libclamav cannot scan, and clamscan was not started. Under `safety.clamav = optional` the file is still probed and verified; under `required` the scan of the file stops there and `ingest` refuses it. |
 | `CLAMAV_MISSING` | FAIL | scan | The profile requires clamscan and it is not installed. |
 | `HARDLINKED` | PASS (scan, remux copy) or WARN (remux skip or break, clean skip, ingest) | scan, remux, clean, ingest | More than one link to the inode; scan records the count in `info.nlink`. |
 | `SIDECAR_BLOCKED` | BLOCK | scan | A sidecar extension on the block list. |
