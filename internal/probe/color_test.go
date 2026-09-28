@@ -779,13 +779,18 @@ func TestProbeStderrOverflowKeepsDocument(t *testing.T) {
 }
 
 // ffprobe that never printed its document did not run to its exit: it
-// died on a signal, or failed before it could write. The error names how
-// it ended and its last line on standard error, so a run that lost a
-// probe to a kill on a loaded host says so instead of "unexpected end of
-// JSON input". Standard error is untrusted tool output: a line carrying
-// terminal escapes is stripped of them and a long one is cut, and an
-// ffprobe that exited 0 with a broken document is still reported for the
-// parse error, since it did run to the end.
+// died on a signal, or failed before it could write. A signal death is a
+// fault in ffprobe, seen once in hundreds of probes on a loaded host, so
+// the probe is made once more and a second death is reported with both
+// signals named; an ffprobe that crashed once and then answered has
+// answered. An exit without a document is not retried, and the error
+// names the exit and the last line on standard error, so a run says what
+// happened instead of "unexpected end of JSON input". Standard error is
+// untrusted tool output: a line carrying terminal escapes is stripped of
+// them and a long one is cut. An ffprobe that exited 0 with a broken
+// document is still reported for the parse error, since it ran to the
+// end. The retry is the only path that runs ffprobe twice: an exit 1
+// runs it once, and so does a crash that answers on the second run.
 func TestProbeDeadFFprobeNamesTheSignal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the stub is a POSIX shell script")
@@ -794,48 +799,73 @@ func TestProbeDeadFFprobeNamesTheSignal(t *testing.T) {
 		t.Skipf("no /bin/sh: %v", err)
 	}
 	dir := t.TempDir()
+	// Every stub counts its runs in a file, with shell builtins alone,
+	// since the runner hands the child a scrubbed environment with no
+	// PATH; the count is read back to prove how many times ffprobe ran.
+	runs := filepath.Join(dir, "runs")
 	stub := func(body string) {
 		t.Helper()
-		script := filepath.Join(dir, "ffprobe")
-		if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		os.Remove(runs)
+		script := "#!/bin/sh\necho run >> " + runs + "\n" + body + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "ffprobe"), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("AMUXIFY_FFPROBE", script)
+		t.Setenv("AMUXIFY_FFPROBE", filepath.Join(dir, "ffprobe"))
+	}
+	ran := func() int {
+		b, _ := os.ReadFile(runs)
+		return strings.Count(string(b), "run\n")
 	}
 	t.Setenv("AMUXIFY_MKVMERGE", filepath.Join(dir, "no-such-mkvmerge"))
 	p := &Prober{Runner: &exec.Runner{MaxOutput: 8192}, Timeout: time.Minute}
-	probe := func() string {
+	probe := func(want int) string {
 		t.Helper()
 		_, err := p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
 		if err == nil {
 			t.Fatal("a probe with no document succeeded")
 		}
+		if n := ran(); n != want {
+			t.Fatalf("ffprobe ran %d times, want %d: %v", n, want, err)
+		}
 		return err.Error()
 	}
+	doc := `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"4.0"}}`
 
 	stub("echo 'x.mp4: Operation not permitted' >&2\nkill -9 $$")
-	if got := probe(); got != "ffprobe: signal: killed: x.mp4: Operation not permitted" {
+	if got := probe(2); got != "ffprobe died twice: signal: killed, then signal: killed: x.mp4: Operation not permitted" {
 		t.Fatalf("killed ffprobe: %q", got)
 	}
 	stub("kill -9 $$")
-	if got := probe(); got != "ffprobe: signal: killed: no output on standard error" {
+	if got := probe(2); got != "ffprobe died twice: signal: killed, then signal: killed: no output on standard error" {
 		t.Fatalf("killed ffprobe, silent: %q", got)
 	}
+	// Crashed once, answered on the second run: the answer is used.
+	stub("if [ -e " + runs + ".once ]; then printf '%s' '" + doc + "'; exit 0; fi\n: > " + runs + ".once\nkill -11 $$")
+	m, err := p.Probe(context.Background(), filepath.Join(dir, "x.mp4"))
+	if err != nil || ran() != 2 || m.Container != "mp4" || len(m.Streams) != 1 {
+		t.Fatalf("crash then answer: err %v, ran %d, %+v", err, ran(), m)
+	}
+	// Crashed, then answered with an exit 1 and no document: reported for
+	// the second run, since it did not crash.
+	stub("if [ -e " + runs + ".twice ]; then echo 'could not open' >&2; exit 1; fi\n: > " + runs + ".twice\nkill -11 $$")
+	if got := probe(2); got != "ffprobe: exit status 1: could not open" {
+		t.Fatalf("crash then exit 1: %q", got)
+	}
 	stub("echo 'first line' >&2\necho 'could not open' >&2\nexit 1")
-	if got := probe(); got != "ffprobe: exit status 1: could not open" {
+	if got := probe(1); got != "ffprobe: exit status 1: could not open" {
 		t.Fatalf("ffprobe exit 1 without a document: %q", got)
 	}
 	stub("printf '\\033[2J\\033]0;owned\\007bad \\r\\n' >&2\nexit 2")
-	if got := probe(); got != "ffprobe: exit status 2: [2J]0;ownedbad" {
+	if got := probe(1); got != "ffprobe: exit status 2: [2J]0;ownedbad" {
 		t.Fatalf("control characters not stripped: %q", got)
 	}
 	stub("printf '%s\\n' '" + strings.Repeat("é", 150) + "' >&2\nexit 1")
-	got := probe()
+	got := probe(1)
 	if !strings.HasSuffix(got, "...") || !utf8.ValidString(got) || utf8.RuneCountInString(got) > len("ffprobe: exit status 1: ")+101+3 {
 		t.Fatalf("long line not cut on a rune boundary: %d runes %q", utf8.RuneCountInString(got), got)
 	}
 	stub("printf '{\"streams\":[' \nexit 0")
-	if got := probe(); !strings.HasPrefix(got, "ffprobe: unparseable output: ") {
+	if got := probe(1); !strings.HasPrefix(got, "ffprobe: unparseable output: ") {
 		t.Fatalf("a broken document from an ffprobe that exited 0: %q", got)
 	}
 }
