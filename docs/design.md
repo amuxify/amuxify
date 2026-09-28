@@ -137,7 +137,11 @@ client container, ClamAV polish, and the fixes carried over from 0.3. 0.5: the
 module path moves to `amuxify.com/amuxify`, served by a static page on the
 project site, so the import path no longer names the hosting provider; macOS
 notarization once an Apple developer account exists, which also removes the
-quarantine step from the Homebrew cask. A native Windows build is not planned:
+quarantine step from the Homebrew cask. 0.6: the website redone, with these
+docs rendered on amuxify.com from the files in this directory, a better
+design, and a landing page that describes the local workflow first (download
+or buy, scan, clean or remux, then move to the library) and the download-client
+hooks second; no changes to the binary. A native Windows build is not planned:
 the guarantees rest on POSIX file identity, and Windows users run the Docker
 image through Docker Desktop or the Linux binary under WSL (see
 [install.md](install.md)). 1.0: fixture matrix complete, exit codes and the
