@@ -93,8 +93,14 @@ job with the directory but no status is refused rather than assumed
 successful. `SAB_FINAL_NAME`, `SAB_CAT` and `SAB_FAIL_MSG` are optional. When
 the environment form applies the positional parameters are not read, but
 their count is still checked, since SABnzbd passes both and a wrong count
-means the wrapper line is wrong. Nothing in the positional parameters is
-looked up on disk in this form.
+means the wrapper line is wrong. A SABnzbd that sets the variables passes
+all eight parameters, so in this form only none or eight are accepted, and
+seven are refused with a message that says a flag took the first one: that
+is what remains when a flag that takes a value, such as `--category` or
+`--state-dir`, is written before `"$@"` in the wrapper and swallows the job
+directory, and the shifted values would otherwise put the failure URL in the
+status slot and the release tree in the flag. Nothing in the positional
+parameters is looked up on disk in this form.
 
 The positional form applies when `SAB_COMPLETE_DIR` is not set, and accepts
 exactly the parameters SABnzbd passes to a script, in SABnzbd's order: the
@@ -114,11 +120,16 @@ A wrapper that writes `hook sabnzbd /q "$@"` or `hook sabnzbd "$@" /q`
 against a current SABnzbd gives nine arguments and is refused on count. In
 the positional form one more shape is refused: a directory in front of an
 older SABnzbd's seven parameters, which has the right count but would put
-the added directory where the job's own belongs. SABnzbd's second parameter
-is an NZB file name, so an existing directory in that place shows that a
-directory was added in front, and the job is refused rather than the wrong
-directory scanned. The first parameter is not required to exist, since a
-job directory may be gone by the time the script runs.
+the added directory where the job's own belongs. In that shape the second
+parameter holds the directory SABnzbd passed first, which is always an
+absolute path, so an existing directory written as a path in that place
+shows that a directory was added in front, and the job is refused rather
+than the wrong directory scanned. SABnzbd's own second parameter is the bare
+name of the original NZB file, which the indexer chooses, and a bare name is
+never looked up: a directory in the script's working directory that happens
+to carry the NZB's name does not refuse the job. The first parameter is not
+required to exist, since a job directory may be gone by the time the script
+runs.
 
 The eighth parameter, the failure URL, is never inspected in either form.
 SABnzbd copies it from the `X-DNZB-Failure` header of the indexer's NZB
@@ -136,8 +147,13 @@ says to write `--quarantine=<dir>` with that argument, because that is the
 usual reason for a stray directory. The hint only ever names a value the
 wrapper added, never one of SABnzbd's own parameters: with nine arguments
 the added directory is the first when the last is empty or a URL, as
-SABnzbd's failure URL is, and the last when the eighth is, and no hint is
-printed when neither reading fits.
+SABnzbd's failure URL is, the eighth is a number, as its status is, and the
+seventh is not one; it is the last when the eighth is empty or a URL and
+the seventh is a number. No hint is printed when neither reading fits, for
+instance when the indexer sent a bare path as the failure URL, or sent a
+number as the failure URL and the wrapper appended an empty argument,
+because a reading that rested on the failure URL alone could be made to
+name the job directory.
 
 Flags such as `--quarantine=DIR`, `--fail-on`, `--category` and
 `--remove-blocked-sidecars` are recognised in any position before the first
