@@ -64,7 +64,7 @@ SECURITY.md.
    `scan.TestAttachmentSwappedForPipeDoesNotBlock`, `clean.TestNamedPipeInputRefused`,
    `clean.TestMp4RewriteRefusesPipeAtTemp`, `remux.TestNamedPipeInputRefused`,
    `remux.TestTempSwappedForPipeAfterMkvmerge`, `remux.TestTakeIdentityRefusesPipeAtTemp`,
-   `remux.TestMkvmergeBlockedOnPipeIsKilled`, `ingest.TestNamedPipeInputRefused`.
+   `remux.TestMkvmergeBlockedOnPipeIsKilled`, `ingest.TestNamedPipeInputRefused`, `cli.TestHookSABnzbdArgumentForms/SAB_COMPLETE_DIR_is_a_symlink`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make
@@ -171,6 +171,25 @@ edited by the same mkvpropedit call `clean` uses, or left alone, and a
 hard-linked file is never edited in place. Every guarantee above applies to
 them unchanged. A hook never turns a client job into a failed one for a WARN
 or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
+
+Everything a hook receives from its caller is untrusted, and some of it
+comes from further away: SABnzbd passes the indexer's `X-DNZB-Failure`
+header as its eighth parameter unchanged. Positional arguments are accepted
+only in the shapes the caller is documented to produce (for SABnzbd, none or
+its seven or eight parameters, with a directory added in front of an older
+SABnzbd's seven refused rather than scanned in place of the job's own), a
+job whose status is missing is refused rather than assumed successful, a job
+directory that is or lies inside the quarantine directory is refused before
+anything runs, and every value is carried as data: nothing is split,
+expanded or executed, and control characters never reach the log raw. No
+value an indexer can write is ever a reason to refuse a job, because a
+refusal is a usage exit and SABnzbd's default settings leave a job
+successful on one; the failure URL is never inspected, and the hint that
+names a stray argument never names one of SABnzbd's own.
+Test: `hook.TestCheckSABnzbdArgs`, `hook.TestSABnzbdFailureURLNeverRefuses`,
+`hook.TestParseKeepsHostileValuesAsData`,
+`cli.TestHookSABnzbdArgumentForms`, `cli.TestHookArgumentInjection`,
+`cli.TestHookEnvironmentInjection`.
 
 ## What scan looks at
 

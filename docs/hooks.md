@@ -22,7 +22,7 @@ it writes only the skipping line, to stdout normally and to stderr under
 
 | Adapter | What it reads | When it skips | Exit codes |
 |---|---|---|---|
-| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's eight positional parameters (completed directory first, post-processing status seventh) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
+| `hook sabnzbd` | `SAB_COMPLETE_DIR` (the directory to ingest), `SAB_PP_STATUS`, `SAB_FINAL_NAME`, `SAB_CAT`, `SAB_FAIL_MSG`; without the variables, SABnzbd's seven or eight positional parameters (completed directory first, post-processing status seventh; see the accepted forms below) | `SAB_PP_STATUS` is not `0`, or the category does not match `--category`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook nzbget` | `NZBPP_TOTALSTATUS`, `NZBPP_FINALDIR` or `NZBPP_DIRECTORY` (the first non-empty one), `NZBPP_NZBNAME`, `NZBPP_CATEGORY`, `NZBPP_STATUS` | `NZBPP_TOTALSTATUS` is not `SUCCESS`, or the category does not match `--category`; exits 95 | 93 when the verdict is below `--fail-on`, 94 at or above it, 95 when skipped, 94 for a usage error or an interruption |
 | `hook sonarr` | `sonarr_eventtype`, `sonarr_episodefile_path` or `sonarr_episodefile_paths`, `sonarr_series_originallanguage`, `sonarr_series_title`, `sonarr_release_title` | every event other than `Download` and `Test`; exits 0 | 0 when the verdict is below `--fail-on`, 1 at or above it, 2 for a usage error, 130 when interrupted |
 | `hook radarr` | `radarr_eventtype`, `radarr_moviefile_path`, `radarr_movie_originallanguage`, `radarr_movie_title` | every event other than `Download` and `Test`; exits 0 | as `hook sonarr` |
@@ -78,6 +78,73 @@ directory in `SAB_COMPLETE_DIR` and the post-processing status in
 (failed verification, unpack or repair); the adapter prints a skipping line
 that quotes `SAB_FAIL_MSG` when SABnzbd set it, and exits 0 so the failure
 stays SABnzbd's own.
+
+### Accepted forms
+
+The adapter reads the job in one of two forms, and refuses everything else
+with exit code 2 and a message that names the problem.
+
+The environment form applies whenever `SAB_COMPLETE_DIR` is set, which every
+supported SABnzbd does. The adapter then also requires `SAB_PP_STATUS`; a
+job with the directory but no status is refused rather than assumed
+successful. `SAB_FINAL_NAME`, `SAB_CAT` and `SAB_FAIL_MSG` are optional. When
+the environment form applies the positional parameters are not read, but
+their count is still checked, since SABnzbd passes both and a wrong count
+means the wrapper line is wrong. Nothing in the positional parameters is
+looked up on disk in this form.
+
+The positional form applies when `SAB_COMPLETE_DIR` is not set, and accepts
+exactly the parameters SABnzbd passes to a script, in SABnzbd's order: the
+final directory of the job, the name of the original NZB file, the clean job
+name, the indexer's report number, the category, the newsgroup, the
+post-processing status, and, from the SABnzbd version that added it, the
+failure URL. Seven parameters are read as an older SABnzbd's call and eight
+as a current one's. The status must not be empty in either form. The
+directory comes from the first parameter, the label from the third (or the
+second when the third is empty), the category from the fifth and the status
+from the seventh; the others are ignored.
+
+No other count of positional arguments is accepted. In particular a lone
+directory is not a way to name the directory to ingest: `hook sabnzbd
+/downloads/job` is a usage error, and so are six, nine or more parameters.
+A wrapper that writes `hook sabnzbd /q "$@"` or `hook sabnzbd "$@" /q`
+against a current SABnzbd gives nine arguments and is refused on count. In
+the positional form one more shape is refused: a directory in front of an
+older SABnzbd's seven parameters, which has the right count but would put
+the added directory where the job's own belongs. SABnzbd's second parameter
+is an NZB file name, so an existing directory in that place shows that a
+directory was added in front, and the job is refused rather than the wrong
+directory scanned. The first parameter is not required to exist, since a
+job directory may be gone by the time the script runs.
+
+The eighth parameter, the failure URL, is never inspected in either form.
+SABnzbd copies it from the `X-DNZB-Failure` header of the indexer's NZB
+response, so it is the one parameter an indexer writes, and a check that
+refused the job on its value, for instance because it named an existing
+directory, would let an indexer have every job it serves refused before the
+scan. A directory written after an older SABnzbd's seven parameters is
+therefore read as the failure URL and ignored, and the job's own directory
+is still scanned.
+
+When a run is refused because of its arguments, the message names the
+count or the directory found in the wrong place. When a bare `--quarantine`
+is set and the arguments show which one the wrapper added, the message also
+says to write `--quarantine=<dir>` with that argument, because that is the
+usual reason for a stray directory. The hint only ever names a value the
+wrapper added, never one of SABnzbd's own parameters: with nine arguments
+the added directory is the first when the last is empty or a URL, as
+SABnzbd's failure URL is, and the last when the eighth is, and no hint is
+printed when neither reading fits.
+
+Flags such as `--quarantine=DIR`, `--fail-on`, `--category` and
+`--remove-blocked-sidecars` are recognised in any position before the first
+positional parameter, and the global flags such as `--profile` and
+`--dry-run` may go before `hook` or in the same position as the hook flags.
+After the first positional parameter, or after `--`, every argument is a
+parameter, so a directory named like a flag is a directory. Every value in
+either form is carried as data: nothing is split, expanded or executed,
+control characters are escaped in the log lines, and a directory that is a
+symlink is reported as `WARN SYMLINK` and never followed.
 
 SABnzbd only fails a job on a non-zero script exit when its `script_can_fail`
 setting is on; turn it on. With it, every non-zero exit fails the job: 1 for a
@@ -249,8 +316,8 @@ names the directory; a bare `--quarantine` uses `<state-dir>/quarantine`
 turns it off again. The directory form must use `=`, because the flag also
 works without a value. A directory written after a bare `--quarantine` is not
 read as its value: `hook sonarr`, `hook radarr` and `hook nzbget` take no
-positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's eight
-parameters, so the stray word is a usage error, and the message says to write
+positional arguments at all, and `hook sabnzbd` takes none or SABnzbd's seven or
+eight parameters, so the stray word is a usage error, and the message says to write
 `--quarantine=<dir>` instead. Nothing runs before that check. Quarantine is
 cleared under `--dry-run`. The quarantine directory must lie outside the
 paths being processed: a path that is the quarantine directory or lies inside
@@ -286,13 +353,14 @@ it and never follows a symlink in its place, so give each run its own path. A
 write failure is reported on stderr as `amuxify: json-out: <error>` and does
 not change the exit code.
 
-The global flags apply before the subcommand as everywhere: `--profile`,
-`--json`, `--dry-run`, `--verbose`, `--quiet`, `--timeout`, `--state-dir`,
-`--allow-root` and `--trace`. `--dry-run` reports what each file would get
-(`ROUTE` under `--verbose` shows the plan) and changes nothing. `AMUXIFY_PROFILE`
-sets the default profile; every wrapper passes it through with `homelab` as the
-fallback, so setting that variable in the client's environment is enough to
-switch profiles without editing the script. The NZBGet wrapper puts its own
+The global flags apply before the subcommand as everywhere, and are accepted
+after it as well: `--profile`, `--json`, `--dry-run`, `--verbose`, `--quiet`,
+`--timeout`, `--state-dir`, `--allow-root` and `--trace`. `--dry-run`
+reports what each file would get (`ROUTE` under `--verbose` shows the plan)
+and changes nothing. `AMUXIFY_PROFILE` sets the default profile; every
+wrapper passes it through with `homelab` as the fallback, so setting that
+variable in the client's environment is enough to switch profiles without
+editing the script. The NZBGet wrapper puts its own
 `NZBPO_PROFILE` option first and falls back to `AMUXIFY_PROFILE` and then
 `homelab`, like the others.
 
