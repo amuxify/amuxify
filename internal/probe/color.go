@@ -237,7 +237,7 @@ func ColorDiff(src, out *Color) []string {
 			diffs = append(diffs, fmt.Sprintf("%s lost (was %s)", s.name, s.str))
 		case s.float && o.float:
 			if !closeEnough(s.num, o.num) {
-				diffs = append(diffs, fmt.Sprintf("%s changed from %s to %s", s.name, s.str, o.str))
+				diffs = append(diffs, fmt.Sprintf("%s changed from %s to %s", s.name, exactIfSame(s, o), exactIfSame(o, s)))
 			}
 		case s.str != o.str:
 			diffs = append(diffs, fmt.Sprintf("%s changed from %s to %s", s.name, s.str, o.str))
@@ -262,8 +262,30 @@ func closeEnough(a, b float64) bool {
 	return d <= 1e-9 || d <= 1e-6*math.Max(math.Abs(a), math.Abs(b))
 }
 
+// CloseEnough is closeEnough for callers outside the package that need to
+// know whether ColorDiff would report two measured values as different,
+// such as the remuxer checking that a value it is about to hand to
+// mkvmerge in decimal will read back as the value it holds.
+func CloseEnough(a, b float64) bool { return closeEnough(a, b) }
+
+// formatNum prints a measured value with six significant digits, which is
+// what a chromaticity or luminance carries in any container and what a
+// reader expects to see (0.3127, not 0.31270000000000001).
 func formatNum(v float64) string {
 	return strconv.FormatFloat(v, 'g', 6, 64)
+}
+
+// exactIfSame returns f's display string, and appends the shortest exact
+// representation of its value in parentheses when the other side of a
+// reported change prints as the same six digits. closeEnough tells values
+// apart from one part in a million, which is finer than six digits show,
+// so without this a nudge in that band would read as a change from a
+// value to itself.
+func exactIfSame(f, other colorField) string {
+	if f.str != other.str {
+		return f.str
+	}
+	return f.str + " (" + strconv.FormatFloat(f.num, 'g', -1, 64) + ")"
 }
 
 // colorSetter accumulates a Color while parsing one tool's output. Each
@@ -545,20 +567,31 @@ func (s *colorSetter) mastering(sd map[string]json.RawMessage) *MasteringDisplay
 	return m
 }
 
+// contentLight reads a content light level entry. The two levels are
+// signalled together, so an entry that carries only one of them is
+// recorded with the missing one as malformed, as mastering() does for a
+// partial coordinate set: a half entry in the source then never compares
+// equal to no entry in the output. An entry with neither key is treated as
+// absent.
 func (s *colorSetter) contentLight(sd map[string]json.RawMessage) *ContentLight {
 	l := &ContentLight{}
-	ok1, ok2 := false, false
-	if raw, ok := sd["max_content"]; ok {
-		l.MaxCLL, ok1 = integer(raw, maxContentLight)
-		if !ok1 {
-			s.reject("max_cll")
-		}
+	cllRaw, hasCLL := sd["max_content"]
+	fallRaw, hasFALL := sd["max_average"]
+	if !hasCLL && !hasFALL {
+		return nil
 	}
-	if raw, ok := sd["max_average"]; ok {
-		l.MaxFALL, ok2 = integer(raw, maxContentLight)
-		if !ok2 {
-			s.reject("max_fall")
-		}
+	ok1, ok2 := false, false
+	if hasCLL {
+		l.MaxCLL, ok1 = integer(cllRaw, maxContentLight)
+	}
+	if hasFALL {
+		l.MaxFALL, ok2 = integer(fallRaw, maxContentLight)
+	}
+	if !ok1 {
+		s.reject("max_cll")
+	}
+	if !ok2 {
+		s.reject("max_fall")
 	}
 	if !ok1 || !ok2 {
 		return nil

@@ -146,6 +146,70 @@ mkvmerge -q -o hdr10.mkv \
 mkvmerge -q -o hlg.mkv \
   --colour-primaries 0:9 --colour-transfer-characteristics 0:18 --colour-matrix-coefficients 0:9 --colour-range 0:1 \
   video.h264 --language 0:eng audio_eng.m4a >/dev/null || true
+# 25. The same signalling in MP4, where it lives in the colr, mdcv and clli
+#     boxes of the sample entry. mkvmerge's MP4 reader carries the colr
+#     primaries, transfer and matrix but not its range flag, nor mdcv or clli,
+#     so these files exercise the remuxer naming those values on the mkvmerge
+#     command line. hdr10.mp4 is hdr10.mkv copied into MP4; sdr709.mp4 is a
+#     BT.709 limited-range file, the colr atom nearly every phone recording
+#     and encoder output carries. hdr10.mp4 shares its stem with hdr10.mkv,
+#     so an in-place ingest of the whole corpus meets OUTPUT_EXISTS on it.
+ff -i hdr10.mkv -c copy -f mp4 hdr10.mp4
+mkvmerge -q -o sdr709.mkv \
+  --colour-primaries 0:1 --colour-transfer-characteristics 0:1 --colour-matrix-coefficients 0:1 --colour-range 0:1 \
+  video.h264 --language 0:eng audio_eng.m4a >/dev/null || true
+ff -i sdr709.mkv -c copy -f mp4 sdr709.mp4
+rm sdr709.mkv
+# 26. Dolby Vision profile 8.1 configuration record in MP4: hdr10.mp4 with a
+#     dvcC box spliced into its video sample entry. No encoder here writes
+#     one, and the H.264 packets carry no RPUs, but the record is what ffprobe
+#     reports as "DOVI configuration record" and what mkvmerge must carry into
+#     a Matroska block addition mapping for the remux verifier to pass the
+#     file. The moov box follows mdat in ffmpeg's default MP4 layout, so
+#     growing it moves no chunk offsets.
+python3 - <<'PY'
+import struct
+data = bytearray(open('hdr10.mp4', 'rb').read())
+
+def boxes(start, end):
+    p = start
+    while p + 8 <= end:
+        size, typ = struct.unpack('>I4s', data[p:p+8])
+        hdr = 8
+        if size == 1:
+            size = struct.unpack('>Q', data[p+8:p+16])[0]
+            hdr = 16
+        elif size == 0:
+            size = end - p
+        yield p, size, typ, hdr
+        p += size
+
+def find(start, end, want):
+    for p, size, typ, hdr in boxes(start, end):
+        if typ == want:
+            return p, size, hdr
+    raise SystemExit('no ' + want.decode())
+
+# dv_version 1.0, profile 8, level 6, rpu present, no EL, BL present,
+# bl_signal_compatibility_id 1, then reserved bits to the 24-byte record.
+flags = (8 << 9) | (6 << 3) | (1 << 2) | (0 << 1) | 1
+record = bytes([1, 0]) + struct.pack('>H', flags) + bytes([1 << 4]) + bytes(19)
+dvcc = struct.pack('>I4s', 8 + len(record), b'dvcC') + record
+
+mdat, _, _ = find(0, len(data), b'mdat')
+p, size, hdr = find(0, len(data), b'moov')
+assert mdat < p, 'moov must follow mdat so chunk offsets stay valid'
+chain = [(p, size)]
+for typ in (b'trak', b'mdia', b'minf', b'stbl', b'stsd'):
+    p, size, hdr = find(p + hdr, p + size, typ)
+    chain.append((p, size))
+entry, esize, _, _ = next(boxes(p + hdr + 8, p + size))
+chain.append((entry, esize))
+data[entry + esize:entry + esize] = dvcc
+for bp, bs in chain:
+    struct.pack_into('>I', data, bp, bs + len(dvcc))
+open('dovi.mp4', 'wb').write(data)
+PY
 
 rm -f video.h264 audio_*.m4a subs_*.srt chapters.txt tags.xml fake.ttf payload.bin real.ttf
 echo "fixtures written to $out"

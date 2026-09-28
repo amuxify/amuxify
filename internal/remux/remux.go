@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1030,6 +1031,9 @@ func (r *Remuxer) mkvmergeArgs(out string, m *probe.MediaInfo, d *policy.Decisio
 		if t.ClearTitle {
 			trackOpts = append(trackOpts, "--track-name", sid+":")
 		}
+		if t.Stream.Type == "video" {
+			trackOpts = append(trackOpts, colourArgs(sid, t.Stream)...)
+		}
 	}
 	args = append(args, "--video-tracks", strings.Join(ids["video"], ","))
 	if len(ids["audio"]) == 0 {
@@ -1053,6 +1057,85 @@ func boolFlag(b bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// colourArgs names, for one kept video track, the colour and HDR values
+// that the source's ffprobe view holds and mkvmerge's own view of the same
+// track does not, as the mkvmerge options that write them into the output
+// track header. mkvmerge's MP4 and MOV reader carries the primaries,
+// transfer and matrix of a colr atom into the Matroska Colour element but
+// not the atom's range flag, and it reads neither the mdcv box that holds
+// the mastering display nor the clli box that holds the content light
+// levels, so a plain remux of such a file loses signalling that the
+// verifier then reports as HDR_LOST. A value is named here only when the
+// merged Color holds it, which a malformed value never does, and MkvColor
+// lacks it; a value mkvmerge saw for itself it carries for itself, so a
+// Matroska source gets no option at all. A measured value is written in
+// the decimal form mkvmerge parses and only when that form reads back as
+// the value held, otherwise the option is left out and the verifier
+// reports the loss rather than a wrong value being written. The Dolby
+// Vision configuration record has no mkvmerge option; mkvmerge v102
+// carries it from an MP4 as a block addition mapping on its own, and with
+// a version that does not the verifier reports the record as lost.
+func colourArgs(sid string, s probe.Stream) []string {
+	c, mk := s.Color, s.MkvColor
+	var opts []string
+	if mk.Range == "" {
+		switch c.Range {
+		case "tv":
+			opts = append(opts, "--colour-range", sid+":1")
+		case "pc":
+			opts = append(opts, "--colour-range", sid+":2")
+		}
+	}
+	if m := c.Mastering; m != nil {
+		mkPrimaries := mk.Mastering != nil && mk.Mastering.HasPrimaries
+		mkLuminance := mk.Mastering != nil && mk.Mastering.HasLuminance
+		if m.HasPrimaries && !mkPrimaries {
+			coords, ok := mkvNumbers(m.RedX, m.RedY, m.GreenX, m.GreenY, m.BlueX, m.BlueY)
+			white, ok2 := mkvNumbers(m.WhiteX, m.WhiteY)
+			if ok && ok2 {
+				opts = append(opts, "--chromaticity-coordinates", sid+":"+strings.Join(coords, ","))
+				opts = append(opts, "--white-colour-coordinates", sid+":"+strings.Join(white, ","))
+			}
+		}
+		if m.HasLuminance && !mkLuminance {
+			if lum, ok := mkvNumbers(m.MinLuminance, m.MaxLuminance); ok {
+				opts = append(opts, "--min-luminance", sid+":"+lum[0])
+				opts = append(opts, "--max-luminance", sid+":"+lum[1])
+			}
+		}
+	}
+	if c.Light != nil && mk.Light == nil {
+		opts = append(opts, "--max-content-light", sid+":"+strconv.Itoa(c.Light.MaxCLL))
+		opts = append(opts, "--max-frame-light", sid+":"+strconv.Itoa(c.Light.MaxFALL))
+	}
+	return opts
+}
+
+// mkvNumbers formats validated chromaticity or luminance values for an
+// mkvmerge option. mkvmerge reads a plain decimal with no exponent and
+// misreads a fractional part longer than eighteen digits, so each value
+// is printed in fixed notation rounded to twelve fractional digits with
+// trailing zeros trimmed. The result is false when a rounded string does
+// not parse back to a value the verifier would accept as the same, and
+// the caller then writes nothing for the group. Twelve digits are finer
+// than the verifier's absolute floor, so no value in range fails this
+// today; the check is what makes that a fact rather than an assumption.
+func mkvNumbers(vals ...float64) ([]string, bool) {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		str := strconv.FormatFloat(v, 'f', 12, 64)
+		if strings.Contains(str, ".") {
+			str = strings.TrimRight(strings.TrimRight(str, "0"), ".")
+		}
+		back, err := strconv.ParseFloat(str, 64)
+		if err != nil || !probe.CloseEnough(back, v) {
+			return nil, false
+		}
+		out = append(out, str)
+	}
+	return out, true
 }
 
 // verifyOutput runs the verification battery. Returns false on failure.

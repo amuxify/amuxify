@@ -39,11 +39,16 @@ type Result struct {
 	Stderr   []byte
 	ExitCode int
 	TimedOut bool
-	// OutputTruncated is set when the child wrote more than the runner's
-	// MaxOutput to standard output or standard error; Stdout and Stderr
-	// then hold the first MaxOutput bytes of each and the rest was dropped
-	// while the child kept running, so the child never blocked on a full
-	// pipe.
+	// StdoutTruncated and StderrTruncated are set when the child wrote more
+	// than the runner's MaxOutput to that stream; Stdout or Stderr then
+	// holds the first MaxOutput bytes and the rest was dropped while the
+	// child kept running, so the child never blocked on a full pipe.
+	// OutputTruncated is set when either was. A consumer that parses only
+	// standard output checks StdoutTruncated, so that a tool whose
+	// diagnostics on standard error ran past the bound does not have a
+	// complete document on standard output thrown away.
+	StdoutTruncated bool
+	StderrTruncated bool
 	OutputTruncated bool
 	Duration        time.Duration
 	Cmdline         string
@@ -65,9 +70,10 @@ const DefaultWaitDelay = 5 * time.Second
 // probe of a file with thousands of chapters and tags and a text subtitle
 // track extracted as SRT for the link check, both of which stay far below
 // this for any real file. Every consumer that reads back a whole output
-// checks Result.OutputTruncated and reports a cut rather than treating the
-// part it kept as the whole: a cut probe is an unparseable file and a cut
-// subtitle track is reported as not fully checked. Streaming runs
+// checks Result.StdoutTruncated, or OutputTruncated when it reads both
+// streams, and reports a cut rather than treating the part it kept as the
+// whole: a cut probe is an unparseable file and a cut subtitle track is
+// reported as not fully checked. Streaming runs
 // (RunStreaming) hand standard output to the caller's writer and are not
 // bounded here.
 const DefaultMaxOutput = 16 << 20
@@ -244,7 +250,9 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, tool string, st
 		res.Stdout = out.buf.Bytes()
 	}
 	res.Stderr = errb.buf.Bytes()
-	res.OutputTruncated = out.dropped > 0 || errb.dropped > 0
+	res.StdoutTruncated = out.dropped > 0
+	res.StderrTruncated = errb.dropped > 0
+	res.OutputTruncated = res.StdoutTruncated || res.StderrTruncated
 	if ctx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		return res, fmt.Errorf("%s: timed out after %s", tool, timeout)
