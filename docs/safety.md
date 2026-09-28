@@ -43,8 +43,20 @@ SECURITY.md.
    prefix without the `.tmp` suffix is scanned like any other.
    An interrupt under `--jobs` starts no further file, waits for the files
    already running, and leaves no temp file behind them either.
-   Test: `fsutil.TestTempNameIsHiddenSibling`, `remux.TestRemuxWritesViaTempAndPlaces`,
-   `pool.TestRunCancelStartsNothingNew`, `cli.TestJobsInterruptLeavesNoTemp`.
+   A cancelled context, whether from a tool timeout or from an interrupt,
+   kills the tool and removes the temp file. `watch` does not pass its
+   interrupt into the file in progress: that file is finished and the pass
+   stops before the next one, so a stop signal never kills a tool mid-write.
+   Test: `fsutil.TestTempNameIsHiddenSibling`,
+   `remux.TestRemuxWritesViaTempAndPlaces`,
+   `pool.TestRunCancelStartsNothingNew`, `cli.TestJobsInterruptLeavesNoTemp`,
+   `remux.TestFailedRemuxLeavesNothing` (a timed-out mkvmerge leaves nothing),
+   `remux.TestCancelledMidMkvmergeLeavesNoTemp` (a cancel while mkvmerge writes
+   the temp file removes it and leaves the source untouched),
+   `watch.TestCancelStopsBetweenFiles` (the file in progress is handed a context
+   the cancel does not reach), `cli.TestWatchInterruptFinishesFileInProgress`
+   (SIGINT while mkvmerge runs under `watch`: the file is finished and placed,
+   no further file is started, no temp file is left).
 3. **Symlinks are never followed.** Each symlink is reported `WARN SYMLINK` and
    skipped. A symlink somewhere in a tree never aborts the run (0.1.x did).
    A symlink swapped onto the temp name during a run is refused before the
@@ -68,19 +80,36 @@ SECURITY.md.
    run reports the timeout as a failed remux or clean. The flush before
    placement goes through the descriptor held since the temp file was
    created, never through the name.
-   Test: `scan.TestSymlinkSkippedNotFollowed`, `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
-   `fsutil.TestCreateTempPinsInode`, `remux.TestTempSwappedBeforePlacementRefused`,
+    `watch` lists symlinks without following them, refuses a directory that
+   was replaced by a symlink between two passes, and checks the whole path
+   again right before each ingest.
+   Test: `scan.TestSymlinkSkippedNotFollowed`,
+   `fsutil.TestCopyIdentityToNeverFollowsSymlinkAtFormerName`,
+   `fsutil.TestCreateTempPinsInode`,
+   `remux.TestTempSwappedBeforePlacementRefused`,
    `clean.TestMp4RewriteRefusesSwappedTemp`,
-   `fsutil.TestOpenRegularRefusesNamedPipeAndEveryOtherKind`, `fsutil.TestOpenOwnRefusesNamedPipe`,
-   `fsutil.TestReplaceInPlaceOwnRefusesNamedPipeAtTemp`, `fsutil.TestCreateTempReplacesPlantedPipe`,
+   `fsutil.TestOpenRegularRefusesNamedPipeAndEveryOtherKind`,
+   `fsutil.TestOpenOwnRefusesNamedPipe`,
+   `fsutil.TestReplaceInPlaceOwnRefusesNamedPipeAtTemp`,
+   `fsutil.TestCreateTempReplacesPlantedPipe`,
    `fsutil.TestFsyncRefusesNamedPipe`, `fsutil.TestTempSyncNeverOpensTheName`,
-   `fsutil.TestMoveNoClobberRefusesNamedPipes`, `sniff.TestFileRefusesNamedPipeAndSymlink`,
+   `fsutil.TestMoveNoClobberRefusesNamedPipes`,
+   `sniff.TestFileRefusesNamedPipeAndSymlink`,
    `mp4.TestParseRefusesNamedPipeAndSymlink`, `scan.TestNamedPipeInputRefused`,
-   `scan.TestScanReadersRefuseNamedPipe`, `scan.TestQuarantineRefusesNamedPipeAtDestination`,
-   `scan.TestAttachmentSwappedForPipeDoesNotBlock`, `clean.TestNamedPipeInputRefused`,
-   `clean.TestMp4RewriteRefusesPipeAtTemp`, `remux.TestNamedPipeInputRefused`,
-   `remux.TestTempSwappedForPipeAfterMkvmerge`, `remux.TestTakeIdentityRefusesPipeAtTemp`,
-   `remux.TestMkvmergeBlockedOnPipeIsKilled`, `ingest.TestNamedPipeInputRefused`, `cli.TestHookSABnzbdArgumentForms/SAB_COMPLETE_DIR_is_a_symlink`.
+   `scan.TestScanReadersRefuseNamedPipe`,
+   `scan.TestQuarantineRefusesNamedPipeAtDestination`,
+   `scan.TestAttachmentSwappedForPipeDoesNotBlock`,
+   `clean.TestNamedPipeInputRefused`, `clean.TestMp4RewriteRefusesPipeAtTemp`,
+   `remux.TestNamedPipeInputRefused`,
+   `remux.TestTempSwappedForPipeAfterMkvmerge`,
+   `remux.TestTakeIdentityRefusesPipeAtTemp`,
+   `remux.TestMkvmergeBlockedOnPipeIsKilled`,
+   `ingest.TestNamedPipeInputRefused`,
+   `cli.TestHookSABnzbdArgumentForms/SAB_COMPLETE_DIR_is_a_symlink`,
+   `watch.TestSymlinkIsSkippedAndNoticedOnce`,
+   `watch.TestDirectoryReplacedBySymlinkIsNotFollowed`,
+   `watch.TestRecheckRefusesEveryChange`,
+   `watch.TestRootSwappedForSymlinkIsRefused`, `cli.TestWatchSymlinkIsSkipped`.
 4. **ffmpeg cannot reach the network or devices.** Every ffmpeg and ffprobe call
    is started with `-protocol_whitelist file,pipe`, `-nostdin`, a clean
    environment, and a timeout. A crafted playlist or subtitle cannot make
@@ -158,9 +187,10 @@ SECURITY.md.
    `security.*` are never touched.
    Test: `clean.TestStripXattrsOnlyListedNamespaces`.
 8. **No unverified in-place writes.** `--verify none` with `--in-place` is a
-   usage error, and `ingest` and every hook adapter refuse verify tier `none`
-   whether it comes from the flag or from the profile.
-   Test: `remux.TestInPlaceVerifyNoneRefused`, `ingest.TestVerifyNoneRefusedFromFlagAndProfile`.
+   usage error, and `ingest`, `watch` and every hook adapter refuse verify
+   tier `none` whether it comes from the flag or from the profile.
+   Test: `remux.TestInPlaceVerifyNoneRefused`, `ingest.TestVerifyNoneRefusedFromFlagAndProfile`,
+   `cli.TestWatchUsage`.
 9. **BLOCK is final.** No flag, profile key or environment variable turns a
    BLOCK into anything else. A positive antivirus hit is a BLOCK from the
    exit status of clamscan, whatever the scanner printed, and `--clamav`
@@ -169,23 +199,35 @@ SECURITY.md.
    missing, that was killed at the timeout, that could not start or that
    exited without a verdict fails the file before it is probed, and
    `ingest` and the hook adapters refuse it.
-   Test: `remux.TestBlockRefusedEvenWithForce`, `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`,
-   `scan.TestClamscanInfectedBlocks`, `scan.TestClamAVFlagForcesAndNeverDowngrades`,
+   Test: `remux.TestBlockRefusedEvenWithForce`,
+   `ingest.TestBlockRefusedEvenWithForce`, `scan.TestBlockIsNeverLowered`,
+   `scan.TestClamscanInfectedBlocks`,
+   `scan.TestClamAVFlagForcesAndNeverDowngrades`,
    `scan.TestClamscanErrorFailsUnderRequiredProfile`,
-   `ingest.TestClamscanInfectedRefusedEvenWithForce`, `ingest.TestClamscanMissingRefusesMedia`,
+   `ingest.TestClamscanInfectedRefusedEvenWithForce`,
+   `ingest.TestClamscanMissingRefusesMedia`,
    `ingest.TestClamscanErrorRefusedUnderStrict`,
-   `cli.TestClamscanInfectedBlocksEverywhere`, `cli.TestClamscanMissingWithStrictProfile`,
-   `cli.TestClamscanErrorFailsStrictEverywhere`, `doctor.TestClamscanDatabaseRequiredByProfile`.
+   `cli.TestClamscanInfectedBlocksEverywhere`,
+   `cli.TestClamscanMissingWithStrictProfile`,
+   `cli.TestClamscanErrorFailsStrictEverywhere`,
+   `doctor.TestClamscanDatabaseRequiredByProfile`.
 10. **No root by accident.** Modifying commands refuse to run as uid 0 unless
     `--allow-root`, because a hook container running as root would leave
     root-owned files in the library.
-    Test: `cli.TestSetupRefusesRoot`.
+    Test: `cli.TestSetupRefusesRoot`, `cli.TestWatchRefusesRoot`.
 
-`ingest` and the hook adapters are compositions of scan, remux and clean and
-add no write path of their own; a file is rebuilt by the same remux code,
-edited by the same mkvpropedit call `clean` uses, or left alone, and a
+`ingest`, `watch` and the hook adapters are compositions of scan, remux and
+clean and add no write path of their own; a file is rebuilt by the same remux
+code, edited by the same mkvpropedit call `clean` uses, or left alone, and a
 hard-linked file is never edited in place. Every guarantee above applies to
-them unchanged. A hook never turns a client job into a failed one for a WARN
+them unchanged. `watch` adds only a decision about when to hand a file to
+ingest: a file is handed over once it has been seen unchanged in size,
+modification time and identity for the settle window, and is checked again
+right before the hand-over (`watch.TestGrowingFileIsNotIngested`,
+`watch.TestSwappedFileIsNew`, `watch.TestChangedDuringIngestIsIngestedAgain`).
+The quarantine directory is excluded from the walk as in ingest and refused
+as the watched directory (`cli.TestWatchQuarantineAndSidecarWiring`), and a
+hostile file name reaches the terminal escaped (`cli.TestWatchEscapesHostileNames`). A hook never turns a client job into a failed one for a WARN
 or FAIL verdict unless `--fail-on` says so, and BLOCK remains final.
 
 Everything a hook receives from its caller is untrusted, and some of it
@@ -202,7 +244,7 @@ value an indexer can write is ever a reason to refuse a job, because a
 refusal is a usage exit and SABnzbd's default settings leave a job
 successful on one; the failure URL is never inspected, and the hint that
 names a stray argument never names one of SABnzbd's own.
-Test: `hook.TestCheckSABnzbdArgs`, `hook.TestSABnzbdFailureURLNeverRefuses`,
+   Test: `hook.TestCheckSABnzbdArgs`, `hook.TestSABnzbdFailureURLNeverRefuses`,
 `hook.TestParseKeepsHostileValuesAsData`,
 `cli.TestHookSABnzbdArgumentForms`, `cli.TestHookArgumentInjection`,
 `cli.TestHookEnvironmentInjection`.
@@ -221,7 +263,7 @@ adapters always use one job, because the download client decides how many
 scripts run at once. Whatever the job count, at most one `clamscan` process
 runs at a time, because each one loads the whole signature database; a
 worker whose file is due for it waits its turn.
-Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
+   Test: `pool.TestRunKeysSerialise`, `pool.TestRunChainedKeysComplete`,
 `remux.TestParallelHardLinksSerialised`, `remux.TestSerialKeysOnlyMediaGetDestKeys`,
 `scan.TestScanPathParallelOrderAndCancel`, `scan.TestClamScanRunsOneAtATime`,
 `exec.TestPathConcurrentCallers`, `cli.TestJobsParallelMatchesSequential`,
