@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -813,3 +814,34 @@ func TestRunCapsOutput(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// Workers of a parallel run resolve tools through one Runner at the same
+// time; the path cache is filled and read under a lock, so the race
+// detector sees no unsynchronised access and every caller gets the same
+// answer. A hostile override is checked by every caller, not only the first.
+func TestPathConcurrentCallers(t *testing.T) {
+	helperTool(t, "shared", "echo")
+	r := &Runner{}
+	var wg sync.WaitGroup
+	paths := make([]string, 16)
+	errs := make([]error, 16)
+	for i := range paths {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 20; n++ {
+				paths[i], errs[i] = r.Path("shared")
+				if errs[i] != nil {
+					return
+				}
+				_ = r.Have("no-such-tool-anywhere")
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range paths {
+		if errs[i] != nil || paths[i] != paths[0] || paths[i] == "" {
+			t.Errorf("caller %d: %q %v, first %q", i, paths[i], errs[i], paths[0])
+		}
+	}
+}

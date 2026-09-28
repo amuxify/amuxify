@@ -2,7 +2,9 @@
 
 Every amuxify command writes the same report. Without `--json` the report is
 printed for a terminal, one line per file as soon as that file is finished,
-followed by the run-level errors and a count line. With `--json` nothing is
+followed by the run-level errors and a count line. Under `--jobs` the lines
+appear in the order the files finish, each file's block whole, while the JSON
+document and the count line keep walk order. With `--json` nothing is
 printed until the run is over and then exactly one JSON object followed by a
 newline is written to stdout. Errors and diagnostics go to stderr in both
 modes, so stdout can be piped straight into a parser. The hook adapters print

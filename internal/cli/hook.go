@@ -49,7 +49,7 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 	failOnS := fs.String("fail-on", "fail", "the verdict from which the caller sees a failure: warn | fail | block")
 	category := fs.String("category", "", "act only when the job's category matches this glob (SABnzbd and NZBGet)")
 	jsonOut := fs.String("json-out", "", "also write the JSON report to this file, which must not exist yet")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := g.parse(fs, args[1:]); err != nil {
 		return hook.ExitCode(a, report.Pass, report.Fail, hook.UsageError)
 	}
 	env := environ()
@@ -103,7 +103,11 @@ func (g *Global) hook(ctx context.Context, args []string) int {
 		return usage("%v", err)
 	}
 	o.original = job.Original
-	in, err := g.newIngester(t, o)
+	// A hook run always works on one file at a time. The download client
+	// decides how many post-processing scripts run at once, and a job is
+	// one release, so --jobs is accepted, checked like every other global
+	// flag, and then ignored here.
+	in, err := g.newIngester(t, o, 1)
 	if err != nil {
 		return usage("%v", err)
 	}
