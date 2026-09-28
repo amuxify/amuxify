@@ -111,11 +111,14 @@ implementation. ffmpeg still does the MP4, MOV and AVI metadata rewrite for
 
 0.3: `ingest`, hook adapters for SABnzbd, NZBGet, Sonarr and Radarr, frozen
 report schema `amuxify.report/1`, Kodi NFO awareness, a test for every
-guarantee. 0.4: HDR and Dolby Vision assertions, `--jobs` for parallel full
-verification, a watch mode for set-ups where the hook cannot run inside the
-client container, ClamAV polish, and the fixes carried over from 0.3. macOS
-notarization waits for an Apple developer account; until then the Homebrew
-cask clears the quarantine attribute on install. A native Windows build is not
-planned: the guarantees rest on POSIX file identity, and Windows users run the
-Docker image through Docker Desktop or the Linux binary under WSL (see
-[install.md](install.md)). 1.0: fixture matrix complete.
+guarantee. 0.4 (this release): HDR and Dolby Vision assertions, `--jobs` for
+parallel processing, `watch` for set-ups where the hook cannot run inside the
+client container, ClamAV polish, and the fixes carried over from 0.3. 0.5: the
+module path moves to `amuxify.com/amuxify`, served by a static page on the
+project site, so the import path no longer names the hosting provider; macOS
+notarization once an Apple developer account exists, which also removes the
+quarantine step from the Homebrew cask. A native Windows build is not planned:
+the guarantees rest on POSIX file identity, and Windows users run the Docker
+image through Docker Desktop or the Linux binary under WSL (see
+[install.md](install.md)). 1.0: fixture matrix complete, exit codes and the
+report schema declared stable, `legacy/` removed.

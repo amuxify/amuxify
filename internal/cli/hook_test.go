@@ -1725,9 +1725,16 @@ func TestContribHooks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The image pulls the release named in VERSION, so a bump that
+		// forgets the Dockerfile fails here as well as in release-check.
+		version, err := os.ReadFile(filepath.Join("..", "..", "VERSION"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		image := "ghcr.io/amuxify/amuxify:" + strings.TrimSpace(string(version))
 		// The wrapper is installed outside /config, so a bind mount of
 		// /config cannot hide it; the docs say how to point SABnzbd at it.
-		for _, c := range []string{"FROM lscr.io/linuxserver/sabnzbd:", "COPY --from=ghcr.io/amuxify/amuxify:0.3.0 /usr/local/bin/amuxify /usr/local/bin/amuxify", "/usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/"} {
+		for _, c := range []string{"FROM lscr.io/linuxserver/sabnzbd:", "COPY --from=" + image + " /usr/local/bin/amuxify /usr/local/bin/amuxify", "/usr/share/amuxify/hooks/amuxify-sabnzbd.sh /usr/local/share/amuxify/hooks/"} {
 			if !strings.Contains(string(data), c) {
 				t.Errorf("missing %q", c)
 			}
