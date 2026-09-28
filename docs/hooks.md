@@ -398,6 +398,9 @@ unchanged for the settle window. It takes the ingest flags (`--quarantine`,
 `--profile` as a global flag, `--verify`, `--hardlinks`, `--force`, `--dry-run`,
 `--remove-blocked-sidecars`) and treats each file exactly as `ingest` would,
 with the same walker, the same quarantine exclusion and the same symlink rules.
+As with `ingest` and the hooks, the quarantine directory is written as
+`--quarantine=DIR`; a bare `--quarantine` followed by a directory leaves that
+directory as a stray positional argument and the watcher refuses to start.
 Files are handed to `ingest` one at a time, so `--jobs` is accepted and has no
 effect under `watch`, as it has none under a hook. It uses polling only, so it
 works on any filesystem, including network shares and Docker bind mounts, where
@@ -488,7 +491,7 @@ services:
     user: "1000:1000"
     command: >
       watch --interval 10s --settle 60s
-      --quarantine /downloads/quarantine --remove-blocked-sidecars
+      --quarantine=/downloads/quarantine --remove-blocked-sidecars
       /downloads/complete
     volumes:
       - /srv/media/downloads:/downloads

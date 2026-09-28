@@ -50,9 +50,10 @@ All notable changes to amuxify will be documented in this file.
   something writes one `amuxify.report/1` document on one line. On SIGINT or
   SIGTERM the watcher finishes the file it is working on, with the tool that
   is rebuilding or editing it left to run to its end under its usual timeout,
-  starts no further file and exits 0. `--once` makes one pass, waits one
-  settle window, makes a second pass and exits with the worst verdict, so
-  `--settle 0s` is the cron form. The quarantine directory, a directory
+  starts no further file and exits 0. `--once` makes one pass and, when the
+  settle window is longer than zero, waits it out and makes a second pass,
+  then exits with the worst verdict; `--settle 0s` ingests everything present
+  in one pass and is the cron form. The quarantine directory, a directory
   inside it and a symlink are refused as the watched directory, and
   `--verify none` is refused. The Docker compose example gains a watcher
   service with a `stop_grace_period`.
