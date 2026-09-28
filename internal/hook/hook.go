@@ -416,8 +416,11 @@ func ExitCode(a Adapter, verdict, failOn report.Severity, o Outcome) int {
 const MarkBad = "[NZB] MARK=BAD"
 
 // ControlLines are printed on stdout last. Only NZBGet has any: MarkBad when
-// the verdict is BLOCK, so a WARN or FAIL never makes the caller blocklist
-// and re-grab a release.
+// the verdict is BLOCK, whatever --fail-on says, so an executable payload is
+// blocklisted by Sonarr and Radarr even when a FAIL is allowed to exit 93.
+// A WARN or FAIL never prints it; whether those cost the release is decided
+// by the exit code alone, because the arrs treat any NZBGet script status
+// other than SUCCESS or NONE as a failed download.
 func ControlLines(a Adapter, verdict report.Severity) []string {
 	if a == NZBGet && verdict == report.Block {
 		return []string{MarkBad}
