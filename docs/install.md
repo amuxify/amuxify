@@ -41,7 +41,7 @@ PREFIX=$HOME/.local sh install.sh
 
 The script downloads the archive for your OS and CPU, verifies it against the
 `checksums.txt` published with the release, and installs `amuxify` under
-`$PREFIX/bin`. Set `VERSION=0.3.0` to pin a version.
+`$PREFIX/bin`. Set `VERSION=0.4.0` to pin a version.
 
 ### Homebrew
 
@@ -103,7 +103,7 @@ the download client runs inside WSL or in a container.
 
 ```
 $ amuxify doctor
-amuxify 0.3.0
+amuxify 0.4.0
 PASS     mkvmerge     /usr/bin/mkvmerge (mkvmerge v85.0 ('Nightingale') 64-bit)
 PASS     mkvpropedit  /usr/bin/mkvpropedit (...)
 PASS     mkvextract   /usr/bin/mkvextract (...)
