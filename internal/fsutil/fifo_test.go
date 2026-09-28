@@ -223,7 +223,7 @@ func TestReplaceInPlaceOwnRefusesNamedPipeAtTemp(t *testing.T) {
 	}
 	mkfifo(t, tmp)
 	holdReader(t, tmp)
-	err = within(t, "ReplaceInPlaceOwn", func() error { return ReplaceInPlaceOwn(tmp, dest, own.Info()) })
+	err = within(t, "ReplaceInPlaceOwn", func() error { return ReplaceInPlaceOwn(tmp, dest, own.Info(), nil) })
 	if err == nil || !strings.Contains(err.Error(), "named pipe") {
 		t.Fatalf("got %v, want a refusal naming the pipe", err)
 	}

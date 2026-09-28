@@ -843,7 +843,11 @@ func TestAudioTagsAdviceFollowsTheCommand(t *testing.T) {
 		path := write(t, filepath.Join(t.TempDir(), "a.mp3"), "ID3\x03\x00\x00\x00\x00\x00\x00")
 		sum := fileSHA(t, path)
 		fr := report.FileResult{Path: path, Info: map[string]string{}}
-		c.cleanMedia(context.Background(), &fr, path, "mp3", info)
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.cleanMedia(context.Background(), &fr, path, "mp3", info, fi)
 		var got string
 		for _, f := range fr.Findings {
 			if f.Code == CodeSkipped {
@@ -926,5 +930,135 @@ func TestInNamespaceHostileNames(t *testing.T) {
 		if xattrPrefixes() != nil {
 			t.Errorf("unexpected prefixes on %s", runtime.GOOS)
 		}
+	}
+}
+
+// toolWrapper installs a shell script as AMUXIFY_<TOOL> that runs the real
+// tool with the original arguments, then the after snippet with "$@" still
+// holding those arguments, and exits with the tool's status. It is the
+// general form of ffmpegWrapper for the other tools a clean runs.
+func toolWrapper(t *testing.T, r *exec.Runner, tool, after string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the wrapper is a POSIX shell script")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("no /bin/sh: %v", err)
+	}
+	real, err := r.Path(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), tool)
+	body := "#!/bin/sh\n" + shq(real) + " \"$@\"\nrc=$?\n" + after + "\nexit $rc\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUXIFY_"+strings.ToUpper(tool), script)
+}
+
+// Guarantee 3 in the window between the probe and mkvpropedit: the source
+// was a regular file when the clean began, the probe then took its time,
+// and mkvpropedit opens the name with an ordinary open. A symlink swapped
+// onto the source in that window would have its target's headers edited.
+// The wrapper performs the swap as the probe's last tool, mkvmerge, exits.
+// The victim is a dirty copy of the same media, so an edit through the
+// link would succeed and strip its title; it must keep its bytes, and
+// mkvpropedit must not run at all.
+func TestMatroskaEditRefusesSourceSwappedForSymlinkAfterProbe(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge, exec.MKVPropedit)
+	src := testutil.Copy(t, "multi.mkv")
+	dir := filepath.Dir(src)
+	victim := testutil.Copy(t, "multi.mkv")
+	victimBefore := fileSHA(t, victim)
+	toolWrapper(t, r, exec.MKVMerge, "if [ ! -L "+shq(src)+" ]; then rm -f "+shq(src)+" && ln -s "+shq(victim)+" "+shq(src)+"; fi")
+
+	c, tr := newCleaner(t, nil, mustProfile(t, "homelab"))
+	fr := c.CleanFile(context.Background(), src)
+	if fi, err := os.Lstat(src); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the wrapper never swapped the source; the window was not exercised: %v", err)
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeCleanFail) || fr.Has(CodeMetadata) {
+		t.Fatalf("%s %v", fr.Verdict, codes(fr))
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeCleanFail && strings.Contains(f.Message, "symlink") && strings.Contains(f.Message, "nothing was edited") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not name the symlink: %v", fr.Findings)
+	}
+	for _, l := range tr.all() {
+		if strings.Contains(l, "mkvpropedit") {
+			t.Fatalf("mkvpropedit ran against the swapped name: %s", l)
+		}
+	}
+	if fileSHA(t, victim) != victimBefore {
+		t.Fatal("the symlink target was edited")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+}
+
+// Guarantee 1 and 3 in the last window of the MP4 rewrite: the stream
+// hashes are taken from the source and the temp file, and only then is the
+// temp file renamed over the source. A different regular file renamed onto
+// the source after the last hash was read is not the file that was
+// verified, and renaming over it would lose a file that was never rewritten.
+// The wrapper performs the swap as the last stream hash of the temp file
+// exits; the swapped-in file must keep its bytes and its name, the rewrite
+// must be refused, and no temp file may remain.
+func TestMp4RewriteRefusesSourceSwappedAfterHashes(t *testing.T) {
+	r := testutil.Need(t, exec.FFmpeg, exec.FFprobe, exec.MKVMerge)
+	src := testutil.Copy(t, "purchased.mp4")
+	dir := filepath.Dir(src)
+	swap := testutil.Copy(t, "sample.mov")
+	swapSum := fileSHA(t, swap)
+	if swapSum == fileSHA(t, src) {
+		t.Fatal("test setup: the swap must differ from the source")
+	}
+	tmp := filepath.Join(dir, ".amuxify-purchased.mp4.tmp")
+	// The source has two streams, so the last hash call is the one over
+	// the temp file for stream 1; the swap fires as that call exits.
+	toolWrapper(t, r, exec.FFmpeg, "case \"$*\" in *"+shq(tmp)+"*\"0:1\"*streamhash*) [ -e "+shq(swap)+" ] && mv -f "+shq(swap)+" "+shq(src)+";; esac")
+
+	c, tr := newCleaner(t, nil, mustProfile(t, "homelab"))
+	fr := c.CleanFile(context.Background(), src)
+	hashedTmp := false
+	for _, l := range tr.all() {
+		if strings.Contains(l, "streamhash") && strings.Contains(l, tmp) && strings.Contains(l, "0:1") {
+			hashedTmp = true
+		}
+	}
+	if !hashedTmp {
+		t.Fatalf("the last hash over the temp file never ran: %v", tr.all())
+	}
+	if _, err := os.Lstat(swap); err == nil {
+		t.Fatal("the wrapper never swapped the source; the window was not exercised")
+	}
+	if fr.Verdict != report.Fail || !fr.Has(CodeCleanFail) || fr.Has(CodeMetadata) || fr.Has(CodeHashMismatch) {
+		t.Fatalf("%s %v", fr.Verdict, codes(fr))
+	}
+	said := false
+	for _, f := range fr.Findings {
+		if f.Code == CodeCleanFail && strings.Contains(f.Message, "replaced") && strings.Contains(f.Message, "original untouched") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the finding does not say what happened: %v", fr.Findings)
+	}
+	if fileSHA(t, src) != swapSum {
+		t.Fatal("the swapped-in file was replaced or removed")
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("temp files left: %v", l)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("directory holds %d entries, want only the swapped-in file", len(entries))
 	}
 }
