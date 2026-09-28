@@ -19,8 +19,16 @@ All notable changes to amuxify will be documented in this file.
   Matroska header and nothing wider. Every number is validated before it is
   trusted, so a malformed probe result is recorded as malformed rather than
   compared, and a clean value from one tool never stands in for a malformed
-  one from the other. The scan `HDR` finding lists the values it read. The
-  fixture corpus gains an HDR10 and an HLG file.
+  one from the other. The scan `HDR` finding lists the values it read. An
+  `HDR_LOST` finding for a value that changed below the six digits shown
+  appends the exact value of each side. mkvmerge's MP4 reader does not carry
+  the colour range flag, the mastering display or the content light levels,
+  so the remuxer passes those values to mkvmerge from the source's ffprobe
+  reading whenever mkvmerge would otherwise drop them; without this every
+  HDR10 MP4 or MOV would fail its own verification as `HDR_LOST`. The fixture
+  corpus gains an HDR10 and an HLG Matroska file and SDR, HDR10 and Dolby
+  Vision MP4 files, the last of which pins that mkvmerge carries the Dolby
+  Vision configuration record from an MP4 on its own.
 - `--jobs <n>`: `scan`, `remux`, `clean` and `ingest` process up to n files at
   the same time, from 1 to 64. The default of 1 behaves exactly as before and
   a value outside the range is a usage error. Each file's lines are printed
@@ -35,8 +43,13 @@ All notable changes to amuxify will be documented in this file.
   whatever the job count, so the second name of a hard-linked pair is
   reported with the links it had when the run began. An interrupt starts no
   further file, waits for the files already running, and leaves no temp file
-  behind. The hook adapters accept the flag and always process one file at a
-  time, because the download client decides how many scripts run at once.
+  behind. Two sources whose names differ only in Unicode normalisation, the
+  composed and the decomposed spelling of an accented letter, which APFS
+  treats as one directory entry, are rebuilt one after the other so the
+  later one reports `OUTPUT_EXISTS` as a sequential run does. The hook
+  adapters and `watch` accept the flag and always process one file at a
+  time, because the download client decides how many scripts run at once
+  and the watcher hands files to `ingest` as they settle.
 - `amuxify watch <dir>`: polls one directory and runs `ingest` on each
   regular file once its size, modification time and identity have stayed
   unchanged for `--settle` (default 30s), checking every `--interval`
@@ -66,8 +79,11 @@ All notable changes to amuxify will be documented in this file.
   through the report sanitiser; the verdict comes from the exit status alone,
   so text in the output cannot change it. ClamAV scans run one at a time
   whatever the job count, because every `clamscan` start loads the whole
-  signature database. docs/profiles.md and docs/install.md gained ClamAV
-  sections.
+  signature database. `doctor` checks that clamscan is ClamAV 0.103 or newer,
+  the first release with `--alert-exceeds-max`, and reports a missing
+  requirement (exit 2) under a profile that requires the scan when clamscan
+  is installed but cannot be run. docs/profiles.md and docs/install.md
+  gained ClamAV sections.
 - The tool runner keeps at most 16 MiB of what any tool prints to each of
   standard output and standard error, so a flooding tool cannot grow the
   process, and a cut output is never taken for the whole: a text subtitle
@@ -97,11 +113,29 @@ All notable changes to amuxify will be documented in this file.
   stray argument says to write `--quarantine=<dir>`. The eighth parameter,
   the failure URL, is never inspected, because SABnzbd copies it from the
   indexer's `X-DNZB-Failure` header and a check on its value would let an
-  indexer have its jobs refused before the scan. Operators with
-  `script_can_fail` on should note that a job started with
-  `SAB_COMPLETE_DIR` but no `SAB_PP_STATUS` now fails as a usage error.
+  indexer have its jobs refused before the scan. Seven positional parameters
+  with `SAB_COMPLETE_DIR` set are a usage error: every SABnzbd that sets the
+  environment passes eight, so seven in that form means a flag that takes a
+  value, such as `--category`, was written before `"$@"` in the wrapper and
+  swallowed the job directory, and such a run previously went ahead on the
+  shifted values. The check for a directory written in front of an older
+  SABnzbd's seven parameters looks up the second parameter only when it is
+  written as a path; SABnzbd's own NZB name, which the indexer chooses, is
+  never looked up, so a directory of that name in the script's working
+  directory no longer refuses the job. Operators with `script_can_fail` on
+  should note that a job started with `SAB_COMPLETE_DIR` but no
+  `SAB_PP_STATUS` now fails as a usage error.
 - The `LINK_IN_TAG` finding lists tag hits in a fixed order instead of the
   order the tag map happened to be visited in.
+- `remux` refuses the output root it names itself, `<root>__remuxed`, when a
+  symbolic link or anything but a directory sits at that name, because anyone
+  with write access to the parent of the input tree could otherwise plant a link
+  there and have every verified output placed wherever it points. A root given
+  with `--output` is still followed as the user's choice, so an operator who
+  kept outputs elsewhere through a link at the default name should name that
+  directory with `--output`.
+- `make test-required`, which CI runs on Linux and macOS, runs the test suite
+  under the race detector.
 - The Homebrew cask clears the macOS quarantine attribute through a
   `postflight_steps` stanza instead of the `postflight` block that Homebrew 7
   reports as deprecated.
@@ -131,9 +165,35 @@ All notable changes to amuxify will be documented in this file.
   remux or MP4 rewrite whose modification time cannot be set now fails
   before the rename, with the source left under its own name. Ownership
   remains best effort.
-- Guarantees 2, 3 and 6 in docs/safety.md are backed by new adversarial
+- clamscan reported a file above its own file size limit clean without reading
+  it, and that limit defaults to 100 MB, which is below almost every media file,
+  so a ClamAV scan passed nearly everything unread. Every clamscan call now
+  raises the limit to 2047 MiB, the most libclamav can scan, switches off its
+  scan size and scan time limits, and passes `--alert-exceeds-max`, so a file
+  the scanner skipped is `CLAMAV_ERROR` rather than a silent pass; a file larger
+  than 2047 MiB, which libclamav cannot scan at all, is `CLAMAV_ERROR` in plain
+  words before clamscan starts. Under `safety.clamav = required` that fails the
+  file and under `optional` it warns. The scan therefore needs ClamAV 0.103 or
+  newer.
+- A file could be rebuilt or edited on the strength of a scan of a different
+  file. `remux` scans a whole tree before it rebuilds any file, and under
+  `ingest` the routing sits between the scan and the action, so a file swapped
+  onto the path in that window was carried past the scan. The scan now records
+  the identity, size and modification time of the file it examined, and a remux
+  or a clean that acts on the verdict first checks that the entry at the path is
+  still that file, refusing it before any tool runs otherwise. The cleaner makes
+  the same check right before mkvpropedit, right before ffmpeg and again after
+  the stream hashes right before the source is replaced, so a link or another
+  file swapped onto the source in those windows is never edited or renamed over.
+  The identity an in-place output receives is the examined source's, never a
+  fresh look at the source's name. Files are opened with `O_NOCTTY`, so a run
+  that leads its session cannot acquire a planted terminal device as its
+  controlling terminal. The Linux fallback that sets a file's time by name also
+  requires the file to have a single hard link before and after the call.
+- Guarantees 2, 3, 6 and 9 in docs/safety.md are backed by new adversarial
   tests: a cancelled mkvmerge and an interrupted watcher leave no temp file,
-  pipes at every name a run opens, and the timestamp fallbacks.
+  pipes at every name a run opens, the timestamp fallbacks, and a file
+  swapped onto a scanned path before the remux, the clean or the replacement.
 
 ## 0.3.0
 
