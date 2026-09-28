@@ -395,14 +395,13 @@ amuxify [global flags] watch [--interval 5s] [--settle 30s] [--once] [ingest fla
 
 `watch` polls one directory and runs `ingest` on each file once it has stayed
 unchanged for the settle window. It takes the ingest flags (`--quarantine`,
-`--profile` as a global flag, `--verify`, `--hardlinks`, `--force`,
-`--dry-run`, `--remove-blocked-sidecars`) and treats each file exactly as
-`ingest` would, with the same walker, the same quarantine exclusion and the
-same symlink rules. Files are
-handed to `ingest` one at a time, so `--jobs` is accepted and has no effect
-under `watch`, as it has none under a hook. It uses polling only, so it works on any filesystem,
-including network shares and Docker bind mounts, where change notification is
-unreliable or absent.
+`--profile` as a global flag, `--verify`, `--hardlinks`, `--force`, `--dry-run`,
+`--remove-blocked-sidecars`) and treats each file exactly as `ingest` would,
+with the same walker, the same quarantine exclusion and the same symlink rules.
+Files are handed to `ingest` one at a time, so `--jobs` is accepted and has no
+effect under `watch`, as it has none under a hook. It uses polling only, so it
+works on any filesystem, including network shares and Docker bind mounts, where
+change notification is unreliable or absent.
 
 Use `watch` when the hook cannot run inside the download client, for example
 when the client is a stock container you do not want to rebuild, or when the
