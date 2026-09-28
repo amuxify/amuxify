@@ -76,11 +76,19 @@ func validateIngestEnums(o *ingestOpts, cmd string) string {
 	return ""
 }
 
+// ingesterJobs, when set, receives the job count of every ingester that
+// newIngester builds. Tests set it to prove that the hook adapters and watch
+// build theirs with one job whatever --jobs says, while ingest passes the
+// flag through; with stub tools every file finishes in microseconds, so the
+// streamed order alone cannot tell one job from many. It is nil in
+// production.
+var ingesterJobs func(jobs int)
+
 // newIngester wires Scanner{VerifyTier:"none", Quarantine}, Remuxer{InPlace:true, ...},
 // Cleaner{...}. It returns an error for effective tier none and for a missing
 // mkvpropedit; the caller turns it into a usage error. jobs is how many
 // files the ingester works on at once; the ingest command passes --jobs and
-// the hook adapters pass one.
+// the hook adapters and watch pass one.
 func (g *Global) newIngester(t *tools, o ingestOpts, jobs int) (*ingest.Ingester, error) {
 	if o.tier == "none" {
 		return nil, errors.New("ingest: in-place writes require verification; verify tier none is refused (from --verify)")
@@ -102,6 +110,9 @@ func (g *Global) newIngester(t *tools, o ingestOpts, jobs int) (*ingest.Ingester
 		DryRun: g.DryRun, Original: o.original, Timeout: g.Timeout}
 	cl := &clean.Cleaner{Runner: t.runner, Prober: t.prober, Verifier: t.verifier, Profile: t.profile,
 		DryRun: g.DryRun, RemoveBlockedSidecars: o.removeSidecars, Hardlinks: o.hardlinks, Timeout: g.Timeout}
+	if ingesterJobs != nil {
+		ingesterJobs(jobs)
+	}
 	return &ingest.Ingester{
 		Scanner: sc, Remuxer: rm, Cleaner: cl, Verifier: t.verifier, Profile: t.profile,
 		VerifyTier: o.tier, Hardlinks: o.hardlinks, Force: o.force, Original: o.original,

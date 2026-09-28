@@ -177,6 +177,32 @@ func TestScanPathParallelOrderAndCancel(t *testing.T) {
 // the decision. The move primitive is held open for the first file to
 // quarantine, so that nothing sits at the destination yet, and a second
 // file that maps to the same place is scanned while that is so. It must be
+// Two blocked files whose names differ only in Unicode normalisation, the
+// composed and the decomposed spelling of an accented letter, quarantine to
+// one directory entry on a filesystem such as APFS, while their quarantine
+// keys compare as different byte strings. Each therefore also carries the
+// key of its quarantine directory, so they are moved one after the other in
+// walk order rather than at the same time; an ASCII name beside them shares
+// neither key and keeps its parallelism. Nothing here touches the disk.
+func TestSerialKeysNormalisationSharesDirectoryKey(t *testing.T) {
+	noTools(t)
+	dir := t.TempDir()
+	s := newScanner(t, mustProfile(t, "homelab"), nil)
+	s.Quarantine = filepath.Join(t.TempDir(), "q")
+	nfc := s.SerialKeys(filepath.Join(dir, "sub", "Caf\u00e9.url"), dir)
+	nfd := s.SerialKeys(filepath.Join(dir, "sub", "Cafe\u0301.lnk"), dir)
+	if len(nfc) != 2 || len(nfd) != 2 || nfc[0] == nfd[0] || nfc[1] != nfd[1] {
+		t.Fatalf("keys %v and %v must share the directory key and nothing else", nfc, nfd)
+	}
+	if want := "quarantine-dir:" + strings.ToLower(filepath.Join(s.Quarantine, "sub")); nfc[1] != want {
+		t.Errorf("directory key %q, want %q", nfc[1], want)
+	}
+	plain := s.SerialKeys(filepath.Join(dir, "sub", "Plain.url"), dir)
+	if len(plain) != 1 || plain[0] != "quarantine:"+strings.ToLower(filepath.Join(s.Quarantine, "sub", "plain.url")) {
+		t.Errorf("ASCII name keys %v", plain)
+	}
+}
+
 // refused by the run-wide claim, with the words the disk would use, before
 // it reaches the directory creation or the move; the primitive runs exactly
 // once, the first file is moved once the hold is lifted, and the second

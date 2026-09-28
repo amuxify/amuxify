@@ -217,11 +217,14 @@ func all(ran []bool) bool {
 // file are handled one after the other, and the outputs it could map to,
 // spelled in lower case, so files that would collide on one destination are
 // decided in walk order and the earlier one wins, as in a sequential run.
-// Only a media file gets destination keys: RemuxScanned skips every other
-// file before it computes a destination, so a sidecar that shares its stem
-// with a media file, Movie.nfo beside Movie.mkv, need not wait for that
-// file's rebuild. The claim set guards the destinations whatever the keys
-// say; the keys make the outcome deterministic.
+// A destination whose name holds a character outside ASCII also keys its
+// directory, because a filesystem may treat two Unicode spellings of that
+// name as one entry; pool.PathKeys explains the rule. Only a media file gets
+// destination keys: RemuxScanned skips every other file before it computes
+// a destination, so a sidecar that shares its stem with a media file,
+// Movie.nfo beside Movie.mkv, need not wait for that file's rebuild. The
+// claim set guards the destinations whatever the keys say; the keys make
+// the outcome deterministic.
 func (r *Remuxer) SerialKeys(path, inputRoot, outRoot string) []string {
 	var keys []string
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
@@ -237,9 +240,9 @@ func (r *Remuxer) SerialKeys(path, inputRoot, outRoot string) []string {
 		rel = filepath.Base(path)
 	}
 	stem := strings.TrimSuffix(rel, filepath.Ext(rel)) + ".mkv"
-	keys = append(keys, "dest:"+strings.ToLower(filepath.Join(outRoot, stem)))
+	keys = append(keys, pool.PathKeys("dest", filepath.Join(outRoot, stem))...)
 	if r.InPlace {
-		keys = append(keys, "dest:"+strings.ToLower(filepath.Join(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))+".mkv")))
+		keys = append(keys, pool.PathKeys("dest", filepath.Join(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))+".mkv"))...)
 	}
 	return keys
 }

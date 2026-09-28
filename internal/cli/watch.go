@@ -32,7 +32,10 @@ func (g *Global) watch(ctx context.Context, args []string) int {
 	interval := fs.Duration("interval", 5*time.Second, "time between two passes over the directory")
 	settle := fs.Duration("settle", 30*time.Second, "how long a file must stay unchanged before it is ingested")
 	once := fs.Bool("once", false, "ingest what has settled after one settle window, then exit")
-	if err := fs.Parse(args); err != nil {
+	// g.parse rather than fs.Parse, so a --jobs written after the command
+	// is range-checked as it is for every other command, even though the
+	// watcher never uses more than one job.
+	if err := g.parse(fs, args); err != nil {
 		return int(report.Usage)
 	}
 	if fs.NArg() != 1 {
@@ -94,8 +97,15 @@ func (g *Global) watch(ctx context.Context, args []string) int {
 	if !g.Quiet {
 		fmt.Fprintf(logw, "amuxify watch: %s every %s, ingesting each file after %s unchanged\n", report.Sanitize(abs), *interval, *settle)
 	}
-	w := &watch.Watcher{Root: abs, Settle: *settle, Exclude: scan.QuarantineExcludes(quarantine),
-		Notice: func(msg string) { fmt.Fprintf(g.stderr, "amuxify watch: %s\n", report.Sanitize(msg)) }}
+	// The watcher's notices, one line per entry it skips, are operator
+	// lines like the start line and the count line, so --quiet silences
+	// them too: a quiet run prints nothing and leaves only the exit code, as
+	// docs/report.md promises. Nothing is lost by that, because a skipped
+	// entry never changes the exit code.
+	w := &watch.Watcher{Root: abs, Settle: *settle, Exclude: scan.QuarantineExcludes(quarantine)}
+	if !g.Quiet {
+		w.Notice = func(msg string) { fmt.Fprintf(g.stderr, "amuxify watch: %s\n", report.Sanitize(msg)) }
+	}
 	worst := report.Pass
 	pass := func() {
 		in, err := g.newIngester(t, o, 1)

@@ -13,7 +13,10 @@ package pool
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Run calls fn(i) for every i in [0, n) using at most jobs goroutines and
@@ -209,6 +212,38 @@ func (s *scheduler) wait() {
 		}
 		s.cond.Wait()
 	}
+}
+
+// PathKeys builds the serialisation keys for a destination path: the path
+// spelled in lower case under prefix, so two sources that would collide on
+// one name in a case-folding directory share a key, and, when the base name
+// holds a character outside ASCII, the directory itself under prefix with
+// "-dir" appended. The second key exists because APFS treats the composed
+// and the decomposed spelling of an accented letter as one name, so Café.mp4
+// written by a Linux tool and Café.avi written through Finder both rebuild
+// to a Café.mkv that is one directory entry, while their keys, compared as
+// bytes, are two. Folding the two spellings together needs a normalisation
+// table this module does not carry; keying every non-ASCII name of a
+// directory to the directory instead runs the few files it can affect one
+// after the other in walk order, so the later one meets the earlier one's
+// output on disk and reports OUTPUT_EXISTS as a sequential run does, and
+// ASCII names keep their per-name key and full parallelism.
+func PathKeys(prefix, path string) []string {
+	keys := []string{prefix + ":" + strings.ToLower(path)}
+	if !ascii(filepath.Base(path)) {
+		keys = append(keys, prefix+"-dir:"+strings.ToLower(filepath.Dir(path)))
+	}
+	return keys
+}
+
+// ascii reports whether s holds no byte above 0x7F.
+func ascii(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // Claims is a run-wide set of destinations that a worker has reserved. A
