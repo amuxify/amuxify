@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -298,23 +297,32 @@ func TestWatchGrowingFileIsNotIngested(t *testing.T) {
 	dir := t.TempDir()
 	still := write(t, filepath.Join(dir, "still.nfo"), "nfo\n")
 	growing := write(t, filepath.Join(dir, "growing.nfo"), "nfo\n")
+	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Keep the file changing through the settle window: a new size and
-		// a new modification time well before the second pass.
-		for i := 0; i < 5; i++ {
-			time.Sleep(60 * time.Millisecond)
+		// Keep the file changing until the command has returned, whatever
+		// the command's own timing: every 60ms a new size and a new
+		// modification time, so no pass ever sees it unchanged for the
+		// settle window.
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(60 * time.Millisecond):
+			}
 			f, err := os.OpenFile(growing, os.O_WRONLY|os.O_APPEND, 0)
 			if err != nil {
 				return
 			}
 			f.WriteString("more\n")
 			f.Close()
-			os.Chtimes(growing, time.Now().Add(time.Duration(i+1)*time.Second), time.Now().Add(time.Duration(i+1)*time.Second))
+			later := time.Now().Add(time.Duration(i) * time.Second)
+			os.Chtimes(growing, later, later)
 		}
 	}()
 	code, out, errb := run(t, "watch", "--once", "--interval", "10ms", "--settle", "400ms", dir)
+	close(stop)
 	<-done
 	if code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, errb)
@@ -357,9 +365,10 @@ func TestWatchSymlinkIsSkipped(t *testing.T) {
 	}
 }
 
-// Under --json stdout carries one complete report document per pass that
-// ingested something, each on its own line, and the operator's lines go to
-// stderr; a pass that ingested nothing writes nothing.
+// Under --json stdout carries one complete report document for the pass that
+// ingested something, on a single line, and the operator's lines go to
+// stderr; a pass that ingested nothing writes nothing. The property across
+// several passes is proved by TestWatchJSONWritesOneDocumentPerPass.
 func TestWatchJSONIsOneDocumentPerLine(t *testing.T) {
 	testutil.Stubs(t)
 	dir := t.TempDir()
@@ -399,22 +408,6 @@ func TestWatchJSONIsOneDocumentPerLine(t *testing.T) {
 	walkNulls("", doc, &nulls)
 	if len(nulls) > 0 {
 		t.Errorf("null values: %v", nulls)
-	}
-	// Two documents when two passes ingest: the first pass at settle 0 takes
-	// every file, then a file written between the passes is taken by the
-	// second. The second run below is driven the same way as the growing
-	// test: the new file appears during the wait.
-	dir2 := t.TempDir()
-	write(t, filepath.Join(dir2, "first.nfo"), "nfo\n")
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		write(t, filepath.Join(dir2, "second.nfo"), "nfo\n")
-	}()
-	_, out, _ = run(t, "--json", "watch", "--once", "--interval", "10ms", "--settle", "400ms", dir2)
-	for i, l := range lines(out) {
-		if err := json.Unmarshal([]byte(l), &map[string]interface{}{}); err != nil {
-			t.Errorf("line %d is not a document: %v: %q", i+1, err, l)
-		}
 	}
 }
 

@@ -348,7 +348,12 @@ file under the same name, is a new version and is ingested again once it has
 settled. That includes a file amuxify itself rebuilt or cleaned: the watcher
 does not try to tell its own writes from someone else's, so the rewritten file
 is looked at once more after it settles, and that second ingest finds nothing
-left to change. A file that is still growing is never ingested. Right before
+left to change. That second look is a full ingest, with the probe and the
+decode check the first one ran, so a file the watcher rebuilds or edits costs
+roughly twice the processing of the same file under `ingest`. The watcher
+accepts that cost rather than trusting its own writes, because a change from
+someone else that lands while amuxify is writing would otherwise be
+missed. A file that is still growing is never ingested. Right before
 each ingest the watcher checks the path again: it must be the same regular
 file it decided on, still inside the watched directory, reached through real
 directories and not through a symlink. A file that vanished before its turn
@@ -363,16 +368,21 @@ finishes, and a pass that ingested at least one file ends with the usual count
 line. Under `--json` each such pass writes one complete `amuxify.report/1`
 document on a single line, with `command` set to `ingest`, so a consumer reads
 newline-delimited reports and can parse each line as it arrives; the watcher's
-own lines go to stderr. A pass that ingested nothing prints nothing, so a quiet
-folder stays quiet. The command starts with one line naming the directory, the
-interval and the settle window.
+own lines go to stderr. A pass that ingested nothing and met no new error
+prints nothing, so a quiet folder stays quiet; an unreadable subdirectory is
+reported once, with a count line or a document of its own, when it appears or
+changes. The command starts with one line naming the directory, the interval
+and the settle window.
 
 Exit behaviour: without `--once` the command runs until it is interrupted
 (SIGINT or SIGTERM). On an interrupt it finishes the file it is working on,
 reports it, starts no further file, prints `amuxify watch: interrupted,
-stopped` and exits 0, whatever the verdicts were. No temporary file is left
-behind, because a file in progress is either finished or its temporary output
-is removed, as in every other command. With `--once` the command makes one
+stopped` and exits 0, whatever the verdicts were. The file in progress is
+finished for real: a tool that is rebuilding or editing it is left to run to
+its end, bounded only by its usual timeout, so an interrupt never leaves a
+half-written header behind. No temporary file is left behind, because a file
+in progress is either finished or its temporary output is removed, as in
+every other command. With `--once` the command makes one
 pass, waits one settle window, makes a second pass that ingests what has
 settled, and exits with the worst verdict of the run using the usual codes (0
 PASS, 1 WARN, 3 FAIL, 4 BLOCK, 130 interrupted). A `--once` run therefore
@@ -411,6 +421,7 @@ services:
     volumes:
       - /srv/media/downloads:/downloads
     restart: unless-stopped
+    stop_grace_period: 30m
 ```
 
 The watcher sees the folder the client writes to, waits until each file has
@@ -422,7 +433,13 @@ client that writes a download in one go, while a client that assembles a file
 from parts may pause longer while it repairs or unpacks. With `--json` the
 service's stdout is one report document per line, so `docker compose logs -f
 amuxify` or a log shipper can follow it. The container stops with exit code 0
-when compose sends its stop signal.
+when compose sends its stop signal, once the file in progress is finished.
+Set `stop_grace_period` longer than the longest time a single file takes to
+process, because after that period Docker sends SIGKILL, which ends the
+watcher and its tool at once like a crash would: a rebuild leaves its
+temporary file behind, which the next pass ignores, and an in-place header
+edit can be cut short. Compose's default of ten seconds is far too short for
+a remux.
 
 ## Docker
 
