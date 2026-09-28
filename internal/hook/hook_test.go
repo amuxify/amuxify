@@ -188,10 +188,14 @@ func TestParseSABnzbd(t *testing.T) {
 
 // CheckSABnzbdArgs is the definition of which positionals are SABnzbd's.
 // The stray directory cases matter for safety: a directory added in front
-// of or after SABnzbd's own parameters must never be ingested or read as a
-// parameter in silence, whatever the wrapper did to put it there.
+// of an older SABnzbd's seven parameters must never be ingested in place of
+// the job's own directory, and the hint that names a stray must never name
+// a value SABnzbd itself passed, since an indexer influences those. The
+// rows run in both forms: with SAB_COMPLETE_DIR set only the count and the
+// status are checked, without it the shifted shape is refused too.
 func TestCheckSABnzbdArgs(t *testing.T) {
 	dir := t.TempDir()
+	stray := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(dir, link); err != nil {
 		t.Fatal(err)
@@ -208,67 +212,115 @@ func TestCheckSABnzbdArgs(t *testing.T) {
 		out[i] = v
 		return out
 	}
+	after := func(base []string, v string) []string { return append(append([]string(nil), base...), v) }
+	count := func(n int, first string) string {
+		return fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got %d beginning with %q", n, first)
+	}
+	shifted := func(second string) string {
+		return fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", second)
+	}
+	const emptyStatus = "SABnzbd's seventh parameter, the post-processing status, is empty"
 	tests := []struct {
 		name string
 		args []string
 		arg  string // the argument a usage message should name, "" for none
 		err  string // "" means accepted
+		env  string // "" means the same in both forms; "argv" means refused only without SAB_COMPLETE_DIR
 	}{
-		{"none", nil, "", ""},
-		{"seven", seven, "", ""},
-		{"eight", eight, "", ""},
-		{"eight with a failure URL", with(eight, 7, "https://indexer/report/1"), "", ""},
-		{"seven with a missing directory", with(seven, 0, missing), "", ""},
-		{"eight with a file where the NZB name goes", with(eight, 1, file), "", ""},
-		{"eight with a missing path where the NZB name goes", with(eight, 1, missing), "", ""},
-		{"one directory", []string{dir}, dir,
-			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 1 beginning with %q", dir)},
-		{"a directory named --quarantine", []string{"--quarantine"}, "--quarantine",
-			`expected no positional arguments or SABnzbd's seven or eight parameters, got 1 beginning with "--quarantine"`},
-		{"six", seven[:6], dir,
-			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 6 beginning with %q", dir)},
-		{"nine: a directory before eight", append([]string{dir}, eight...), dir,
-			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with %q", dir)},
-		{"nine: a directory after eight", append(append([]string(nil), eight...), dir), dir,
-			fmt.Sprintf("expected no positional arguments or SABnzbd's seven or eight parameters, got 9 beginning with %q", dir)},
-		{"a directory before seven", append([]string{missing}, seven...), missing,
-			fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", dir)},
-		{"a symlink to a directory before seven", append([]string{missing}, with(seven, 0, link)...), missing,
-			fmt.Sprintf("%q is a directory where SABnzbd's second parameter, the original NZB name, belongs; a directory in front of SABnzbd's parameters is not read as one of them", link)},
-		{"a directory after seven", append(append([]string(nil), seven...), dir), dir,
-			fmt.Sprintf("%q is a directory where SABnzbd's eighth parameter, the failure URL, belongs; a directory after SABnzbd's parameters is not read as one of them", dir)},
-		{"a symlink to a directory after seven", append(append([]string(nil), seven...), link), link,
-			fmt.Sprintf("%q is a directory where SABnzbd's eighth parameter, the failure URL, belongs; a directory after SABnzbd's parameters is not read as one of them", link)},
-		{"seven with an empty status", with(seven, 6, ""), "",
-			"SABnzbd's seventh parameter, the post-processing status, is empty"},
-		{"eight with an empty status", with(eight, 6, ""), "",
-			"SABnzbd's seventh parameter, the post-processing status, is empty"},
-		{"a NUL where the NZB name goes is data, not a directory", with(eight, 1, dir+"\x00"), "", ""},
-		{"a newline where the failure URL goes is data, not a directory", with(eight, 7, dir+"\n"), "", ""},
+		{"none", nil, "", "", ""},
+		{"seven", seven, "", "", ""},
+		{"eight", eight, "", "", ""},
+		{"eight with a failure URL", with(eight, 7, "https://indexer/report/1"), "", "", ""},
+		{"seven with a missing directory", with(seven, 0, missing), "", "", ""},
+		{"eight with a file where the NZB name goes", with(eight, 1, file), "", "", ""},
+		{"eight with a missing path where the NZB name goes", with(eight, 1, missing), "", "", ""},
+		{"one directory", []string{dir}, dir, count(1, dir), ""},
+		{"a directory named --quarantine", []string{"--quarantine"}, "--quarantine", count(1, "--quarantine"), ""},
+		{"six names nothing: the stray cannot be told", seven[:6], "", count(6, dir), ""},
+		{"ten names nothing: the stray cannot be told", after(after(eight, stray), stray), "", count(10, dir), ""},
+		{"nine: a directory before eight names the first", append([]string{stray}, eight...), stray, count(9, stray), ""},
+		{"nine: a directory before eight with a failure URL names the first", append([]string{stray}, with(eight, 7, "https://indexer/report/1")...), stray, count(9, stray), ""},
+		{"nine: a directory after eight names the last, not the job directory", after(eight, stray), stray, count(9, dir), ""},
+		{"nine: a directory after eight with a failure URL names the last", after(with(eight, 7, "https://indexer/report/1"), stray), stray, count(9, dir), ""},
+		{"nine: a missing path after eight names the last", after(eight, missing), missing, count(9, dir), ""},
+		{"nine: a bare path as the failure URL and a directory after names nothing", after(with(eight, 7, "/"), stray), "", count(9, dir), ""},
+		{"nine: a directory before and a bare path as the failure URL names nothing", append([]string{stray}, with(eight, 7, "/")...), "", count(9, stray), ""},
+		{"nine: a scheme without a host is not a URL", append([]string{stray}, with(eight, 7, "c:/q")...), "", count(9, stray), ""},
+		{"a directory before seven", append([]string{missing}, seven...), missing, shifted(dir), "argv"},
+		{"a symlink to a directory before seven", append([]string{missing}, with(seven, 0, link)...), missing, shifted(link), "argv"},
+		{"a directory after seven is the failure URL and is not inspected", after(seven, stray), "", "", ""},
+		{"a symlink to a directory after seven is not inspected", after(seven, link), "", "", ""},
+		{"seven with an empty status", with(seven, 6, ""), "", emptyStatus, ""},
+		{"eight with an empty status", with(eight, 6, ""), "", emptyStatus, ""},
+		{"a NUL where the NZB name goes is data, not a directory", with(eight, 1, dir+"\x00"), "", "", ""},
+		{"a newline where the failure URL goes is data", with(eight, 7, dir+"\n"), "", "", ""},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := CheckSABnzbdArgs(tc.args)
-			if tc.err == "" {
-				if err != nil {
-					t.Fatalf("refused: %v", err)
+		for _, env := range [][]string{nil, {"SAB_COMPLETE_DIR=" + dir, "SAB_PP_STATUS=0"}} {
+			form := "argv"
+			if env != nil {
+				form = "env"
+			}
+			t.Run(tc.name+" ("+form+")", func(t *testing.T) {
+				err := CheckSABnzbdArgs(env, tc.args)
+				wantErr := tc.err
+				if tc.env == "argv" && env != nil {
+					wantErr = ""
 				}
-				return
+				if wantErr == "" {
+					if err != nil {
+						t.Fatalf("refused: %v", err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("accepted %q", tc.args)
+				}
+				if err.Error() != wantErr {
+					t.Errorf("got  %s\nwant %s", err, wantErr)
+				}
+				var ae *SABnzbdArgError
+				if !errors.As(err, &ae) {
+					t.Fatalf("%T is not a *SABnzbdArgError", err)
+				}
+				if ae.Arg != tc.arg {
+					t.Errorf("Arg %q, want %q", ae.Arg, tc.arg)
+				}
+			})
+		}
+	}
+}
+
+// The failure URL is the one parameter an indexer writes: SABnzbd copies
+// the X-DNZB-Failure header of the NZB response into the eighth positional
+// unchanged. Whatever stands there, a genuine job is parsed and scanned, in
+// both forms and with seven parameters followed by the value as an older
+// SABnzbd with a wrapper would pass it. A refusal here would be a scan
+// bypass under SABnzbd's default script_can_fail=off, where a non-zero
+// script exit leaves the job successful.
+func TestSABnzbdFailureURLNeverRefuses(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostile := []string{"/", ".", "..", "/tmp", dir, link, cwd, dir + "/", "./" + filepath.Base(dir), "file:///", "//", "\x00", "-", "--quarantine", "\n", " "}
+	for _, u := range hostile {
+		for _, env := range [][]string{nil, {"SAB_COMPLETE_DIR=" + dir, "SAB_PP_STATUS=0", "SAB_FINAL_NAME=Job", "SAB_FAILURE_URL=" + u}} {
+			args := []string{dir, "job.nzb", "Job", "1", "tv", "alt.binaries", "0", u}
+			j, err := Parse(SABnzbd, env, args)
+			if err != nil {
+				t.Errorf("failure URL %q env=%v: refused: %v", u, env != nil, err)
+				continue
 			}
-			if err == nil {
-				t.Fatalf("accepted %q", tc.args)
+			if j.Skip != "" || len(j.Paths) != 1 || j.Paths[0] != dir || j.Label != "Job" {
+				t.Errorf("failure URL %q env=%v: %+v", u, env != nil, j)
 			}
-			if err.Error() != tc.err {
-				t.Errorf("got  %s\nwant %s", err, tc.err)
-			}
-			var ae *SABnzbdArgError
-			if !errors.As(err, &ae) {
-				t.Fatalf("%T is not a *SABnzbdArgError", err)
-			}
-			if ae.Arg != tc.arg {
-				t.Errorf("Arg %q, want %q", ae.Arg, tc.arg)
-			}
-		})
+		}
 	}
 }
 
